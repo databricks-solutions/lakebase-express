@@ -1,0 +1,20 @@
+# SAMPLE — copy to `target.yml` (gitignored) and edit for your workspace.
+# databricks.yml includes it, so these targets reach `databricks bundle` / ./deploy.sh.
+#
+# Name the target after your `databricks auth login` profile: deploy.sh defaults the
+# profile to the target name. Override with DATABRICKS_PROFILE=<profile> ./deploy.sh.
+targets:
+  my-workspace:
+    default: true
+    # Optional — pin the host instead of relying on a matching profile:
+    # workspace:
+    #   host: https://adb-1234567890123456.7.azuredatabricks.net
+
+    # Become the app's env vars. The two below have no default, so the bundle won't
+    # deploy without them. Never put passwords here — those come from the secret scope.
+    variables:
+      projects_pg_host: my-instance.database.eastus2.azuredatabricks.net
+      projects_pg_user: my-lakebase-role
+      # secret_scope: lakebase-express
+      # projects_backend: postgres
+      # fm_endpoint: databricks-claude-opus-4-8

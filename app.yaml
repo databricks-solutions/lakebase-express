@@ -1,0 +1,12 @@
+# Databricks Apps runtime config. One uvicorn process serves /api/* and the
+# compiled SPA — build it first: cd frontend && npm install && npm run build
+#
+# Env vars are set by the bundle (databricks.yml), which overrides this file, so
+# workspace-specific values stay in the gitignored target.yml.
+command:
+  - uvicorn
+  - backend.main:app
+  - --host
+  - "0.0.0.0"
+  - --port
+  - "8000"

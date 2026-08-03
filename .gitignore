@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Node / frontend build
+frontend/node_modules/
+frontend/dist/
+
+# Local env
+.env
+.databricks/
+
+# Per-user bundle deploy targets (workspace-specific); keep target.yml.sample
+target.yml
+
+# Local credentials / scratch notes — NEVER commit (holds DB hosts + passwords)
+sqladmin.md
+*.secrets.md
+.databrickscfg
+
+# Build artifacts
+frontend/test-results/
+frontend/tsconfig.tsbuildinfo
+
+# Claude Code local settings
+.claude/
+.local-backup/
+.isaac/config.json
+.DS_Store

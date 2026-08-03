@@ -1,0 +1,74 @@
+# Databricks Asset Bundle for Lakebase Express.
+# Deploy with ./deploy.sh (builds the SPA first) or directly:
+#   databricks bundle deploy -t <target>
+#   databricks bundle run  -t <target> lakebase_express
+bundle:
+  name: lakebase-express
+
+variables:
+  app_name:
+    description: Databricks App name (2–30 chars, lowercase alphanumeric and hyphens).
+    default: lakebase-express
+
+  secret_scope:
+    description: Databricks secret scope the app reads DB credentials from.
+    default: lakebase-express
+  fm_endpoint:
+    description: Foundation Model serving endpoint used for schema translation.
+    default: databricks-claude-opus-4-8
+
+  # projects_pg_host/_user have no default on purpose: they are workspace-specific,
+  # so set them in target.yml rather than committing them here.
+  projects_backend:
+    description: Project store backend (local|volume|postgres).
+    default: postgres
+  projects_pg_host:
+    description: Lakebase instance host for the project store.
+  projects_pg_user:
+    description: Lakebase role the project store connects as.
+  projects_pg_database:
+    description: Database holding the project/credential tables.
+    default: databricks_postgres
+  projects_pg_secret_key:
+    description: Secret key holding the Lakebase role password.
+    default: lakebase-password
+  credential_key_secret_key:
+    description: Secret key holding the Fernet key that encrypts stored passwords.
+    default: lbx-credential-key
+
+# Deploy targets live in target.yml (gitignored, per-user) so no workspace-specific
+# config is committed. Copy target.yml.sample to target.yml before deploying.
+include:
+  - target.yml
+
+# Bundle sync honors .gitignore; re-include the compiled SPA the app serves.
+# (.venv, node_modules, .env stay excluded.)
+sync:
+  include:
+    - frontend/dist/**
+
+resources:
+  apps:
+    lakebase_express:
+      name: ${var.app_name}
+      description: "SQL Server → Lakebase migration accelerator (FastAPI + React SPA)"
+      # Run command comes from app.yaml; this env block overrides app.yaml's.
+      source_code_path: .
+      config:
+        env:
+          - name: LBX_SECRET_SCOPE
+            value: ${var.secret_scope}
+          - name: LBX_FM_ENDPOINT
+            value: ${var.fm_endpoint}
+          - name: LBX_PROJECTS_BACKEND
+            value: ${var.projects_backend}
+          - name: LBX_PROJECTS_PG_HOST
+            value: ${var.projects_pg_host}
+          - name: LBX_PROJECTS_PG_DATABASE
+            value: ${var.projects_pg_database}
+          - name: LBX_PROJECTS_PG_USER
+            value: ${var.projects_pg_user}
+          - name: LBX_PROJECTS_PG_SECRET_KEY
+            value: ${var.projects_pg_secret_key}
+          - name: LBX_CREDENTIAL_KEY_SECRET_KEY
+            value: ${var.credential_key_secret_key}

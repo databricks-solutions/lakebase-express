@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# Lakebase Express — sizing & pricing assumptions  (EDIT ME)
+#
+# These are PLANNING ESTIMATES, not a quote. Lakebase is billed in Capacity
+# Units (CUs) for compute plus separate storage. The Azure-SQL -> CU ratios
+# below are heuristics for first-pass sizing; validate against a real workload
+# benchmark before committing. Update the prices to your region / contract.
+# ---------------------------------------------------------------------------
+
+currency: USD
+
+# Lakebase list prices (per the OLTP pricing page — replace with your rates).
+lakebase:
+  cu_hourly_price: 0.35        # $ per Capacity Unit-hour
+  storage_gb_month: 0.35       # $ per GB-month of Postgres storage
+  hours_per_month: 730
+
+# Conversion heuristics from Azure SQL capacity to Lakebase CUs.
+# A CU is a compute unit (~vCPU + memory slice). These ratios are deliberately
+# conservative; tune them with the notes in calculator.py.
+conversion:
+  # DTU model: how many Azure DTUs map to one Lakebase CU.
+  dtus_per_cu: 100             # e.g. an S3 (100 DTU) ~ 1 CU
+  # vCore model: Azure vCores per Lakebase CU (roughly 1:1 on compute).
+  vcores_per_cu: 1.0
+  # Floor so tiny databases still get a usable baseline.
+  min_cu: 1
+
+# Autoscaling recommendation defaults.
+autoscale:
+  # Steady-state utilisation assumed of peak; min CU = ceil(max_cu * floor).
+  utilization_floor: 0.5
+  # Headroom multiplier applied to derived peak CUs for max.
+  peak_headroom: 1.25
+  # Scale-to-zero idle timeout (minutes) by environment. null = never sleep.
+  scale_to_zero_minutes:
+    dev: 10
+    test: 30
+    prod: null
