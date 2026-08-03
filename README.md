@@ -28,13 +28,11 @@ PostgreSQL, MySQL, …) "Coming soon".
 - A **Databricks workspace** with a **Lakebase** database instance (the migration
   target).
 - A **source database** — Azure SQL or SQL Server — reachable from the app
-  (a firewall rule for the app's egress IP, or a private link — see
-  [Finding the app's egress IP](#finding-the-apps-egress-ip)).
+  (a firewall rule for the app's egress IP, or a private link).
 - A **Databricks secret scope** holding the Lakebase role password under
-  `lakebase-password` (see [Secret scope contents](#secret-scope-contents) — the app
-  errors on every request without it). The app runs as its own service principal,
-  which needs an ACL on that scope; `deploy.sh` grants it, provided you hold
-  **MANAGE** there (see [Secret scope access](#secret-scope-access)).
+  `lakebase-password` — the app errors on every request without it. The app runs as
+  its own service principal, which needs an ACL on that scope; `deploy.sh` grants
+  it, provided you hold **MANAGE** there.
 
 The scan and assessment run without a Databricks workspace; the Foundation Model
 features and the Job-offload/Async data paths require one.
@@ -171,8 +169,7 @@ pytest tests/
 Deployment is an Asset Bundle (`databricks.yml`) orchestrated by `deploy.sh` (see
 the [Quick Start](#quick-start) for the end-to-end steps). It builds the SPA, runs
 `databricks bundle deploy`, grants the app's service principal access to the secret
-scope ([Secret scope access](#secret-scope-access)), then `databricks bundle run` to
-start the app.
+scope, then `databricks bundle run` to start the app.
 
 **Deploy targets** live in `target.yml`, a per-user file that is **gitignored** so
 no workspace-specific config is committed. Copy `target.yml.sample` to `target.yml`
@@ -189,11 +186,10 @@ To deploy to another workspace, add a target to `target.yml` and run
 `BUNDLE_TARGET=<target> ./deploy.sh`.
 
 > **Permissions.** `deploy.sh` grants the app's service principal access to the
-> secret scope (see [Secret scope access](#secret-scope-access)); doing so needs
-> **MANAGE** on that scope. You must still give the app network access to the source
-> DB endpoint (firewall rule for its egress IP, or private link — see
-> [Finding the app's egress IP](#finding-the-apps-egress-ip)). Async-mode runtime
-> scopes need scope create/write. Passwords are never stored in clear text.
+> secret scope; doing so needs **MANAGE** on that scope. You must still give the app
+> network access to the source DB endpoint (firewall rule for its egress IP, or
+> private link). Async-mode runtime scopes need scope create/write. Passwords are
+> never stored in clear text.
 
 ## Adding a source connector
 
@@ -216,8 +212,7 @@ To deploy to another workspace, add a target to `target.yml` and run
   for multi-worker deployments.
 - Job-offload and Async-mode paths require a live workspace and expect the schema
   plan to have created the target tables. Key Vault-backed runtime scopes work
-  only when the keys already exist (Databricks can't write through to them) — see
-  [Secret scope access](#secret-scope-access).
+  only when the keys already exist (Databricks can't write through to them).
 - `money`/`smallmoney` arithmetic differs between the two engines even though the
   type mapping itself is lossless — see
   [`money` and fixed-scale arithmetic](#money-and-fixed-scale-arithmetic).
