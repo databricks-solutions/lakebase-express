@@ -29,10 +29,10 @@ PostgreSQL, MySQL, …) "Coming soon".
   target).
 - A **source database** — Azure SQL or SQL Server — reachable from the app
   (a firewall rule for the app's egress IP, or a private link).
-- A **Databricks secret scope** holding the source and Lakebase passwords, with
-  the app's service principal granted **READ** (see
-  [Deploy as a Databricks App](#deploy-as-a-databricks-app) for the full
-  permission list).
+- A **Databricks secret scope** holding the Lakebase role password under
+  `lakebase-password` — the app errors on every request without it. The app runs as
+  its own service principal, which needs an ACL on that scope; `deploy.sh` grants
+  it, provided you hold **MANAGE** there.
 
 The scan and assessment run without a Databricks workspace; the Foundation Model
 features and the Job-offload/Async data paths require one.
@@ -54,17 +54,19 @@ cp target.yml.sample target.yml
 #      * set projects_pg_host / projects_pg_user to your Lakebase instance and
 #        role (required — the app won't start without them).
 
-# 3. Create the secret scope + store the source DB password
-databricks secrets create-scope lakebase-express
-databricks secrets put-secret lakebase-express azuresql-password
+# 3. Create the secret scope and store the Lakebase role password in it.
+#    Required with the default `postgres` project store — the app reads this key
+#    the first time it touches the store, and errors on every request without it.
+databricks secrets create-scope lakebase-express --profile <your-profile>
+databricks secrets put-secret lakebase-express lakebase-password --profile <your-profile>
 
-# 4. Build the SPA, deploy the bundle, and start the app
+# 4. Build the SPA, deploy the bundle, grant scope access, and start the app
 DATABRICKS_PROFILE=<your-profile> ./deploy.sh
 ```
 
-`deploy.sh` builds `frontend/dist`, runs `databricks bundle deploy`, then
-`databricks bundle run` to launch the app. When it finishes it prints the app
-URL — open it and:
+`deploy.sh` builds `frontend/dist`, runs `databricks bundle deploy`, grants the
+app's service principal `WRITE` on the secret scope, then `databricks bundle run`
+to launch the app. When it finishes it prints the app URL — open it and:
 
 1. **New migration** → pick a source connector.
 2. **Connections & Target** — enter the source (Azure SQL / SQL Server) and the
@@ -166,7 +168,8 @@ pytest tests/
 
 Deployment is an Asset Bundle (`databricks.yml`) orchestrated by `deploy.sh` (see
 the [Quick Start](#quick-start) for the end-to-end steps). It builds the SPA, runs
-`databricks bundle deploy`, then `databricks bundle run` to start the app.
+`databricks bundle deploy`, grants the app's service principal access to the secret
+scope, then `databricks bundle run` to start the app.
 
 **Deploy targets** live in `target.yml`, a per-user file that is **gitignored** so
 no workspace-specific config is committed. Copy `target.yml.sample` to `target.yml`
@@ -178,17 +181,15 @@ you add in `target.yml`.
 Knobs (see the header of `deploy.sh`): `--skip-build` reuses `frontend/dist`;
 `BUNDLE_TARGET=<target>` picks a target from `target.yml`;
 `DATABRICKS_PROFILE=<profile>` pins a CLI profile; `APP_NAME=<name>` overrides the
-app name. To deploy to another workspace, add a target to `target.yml` and run
+app name; `LBX_SECRET_ACL=READ` and `LBX_SKIP_ACL=1` control the secret-scope grant.
+To deploy to another workspace, add a target to `target.yml` and run
 `BUNDLE_TARGET=<target> ./deploy.sh`.
 
-> **Permissions.** The active Databricks identity needs **READ** on every secret
-> scope offered for DB credentials, plus network access to the source DB endpoint
-> (firewall rule for the app's egress IP, or private link). Async-mode runtime
-> scopes need scope create/write. When the Postgres project store is enabled,
-> typed passwords are persisted **encrypted**; the Fernet key lives in the secret
-> scope (`lbx-credential-key`, auto-generated on first use), so the app SP needs
-> **WRITE** for that first generation — otherwise credential persistence fails
-> soft to the in-memory cache. Passwords are never stored in clear text.
+> **Permissions.** `deploy.sh` grants the app's service principal access to the
+> secret scope; doing so needs **MANAGE** on that scope. You must still give the app
+> network access to the source DB endpoint (firewall rule for its egress IP, or
+> private link). Async-mode runtime scopes need scope create/write. Passwords are
+> never stored in clear text.
 
 ## Adding a source connector
 
