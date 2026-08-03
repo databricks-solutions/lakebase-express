@@ -29,10 +29,11 @@ PostgreSQL, MySQL, …) "Coming soon".
   target).
 - A **source database** — Azure SQL or SQL Server — reachable from the app
   (a firewall rule for the app's egress IP, or a private link).
-- A **Databricks secret scope** holding the source and Lakebase passwords, with
-  the app's service principal granted **READ** (see
-  [Deploy as a Databricks App](#deploy-as-a-databricks-app) for the full
-  permission list).
+- A **Databricks secret scope** holding the Lakebase role password under
+  `lakebase-password` (see [Secret scope contents](#secret-scope-contents) — the app
+  errors on every request without it). The app runs as its own service principal,
+  which needs an ACL on that scope; `deploy.sh` grants it, provided you hold
+  **MANAGE** there (see [Secret scope access](#secret-scope-access)).
 
 The scan and assessment run without a Databricks workspace; the Foundation Model
 features and the Job-offload/Async data paths require one.
@@ -54,17 +55,19 @@ cp target.yml.sample target.yml
 #      * set projects_pg_host / projects_pg_user to your Lakebase instance and
 #        role (required — the app won't start without them).
 
-# 3. Create the secret scope + store the source DB password
-databricks secrets create-scope lakebase-express
-databricks secrets put-secret lakebase-express azuresql-password
+# 3. Create the secret scope and store the Lakebase role password in it.
+#    Required with the default `postgres` project store — the app reads this key
+#    the first time it touches the store, and errors on every request without it.
+databricks secrets create-scope lakebase-express --profile <your-profile>
+databricks secrets put-secret lakebase-express lakebase-password --profile <your-profile>
 
-# 4. Build the SPA, deploy the bundle, and start the app
+# 4. Build the SPA, deploy the bundle, grant scope access, and start the app
 DATABRICKS_PROFILE=<your-profile> ./deploy.sh
 ```
 
-`deploy.sh` builds `frontend/dist`, runs `databricks bundle deploy`, then
-`databricks bundle run` to launch the app. When it finishes it prints the app
-URL — open it and:
+`deploy.sh` builds `frontend/dist`, runs `databricks bundle deploy`, grants the
+app's service principal `WRITE` on the secret scope, then `databricks bundle run`
+to launch the app. When it finishes it prints the app URL — open it and:
 
 1. **New migration** → pick a source connector.
 2. **Connections & Target** — enter the source (Azure SQL / SQL Server) and the
@@ -166,7 +169,9 @@ pytest tests/
 
 Deployment is an Asset Bundle (`databricks.yml`) orchestrated by `deploy.sh` (see
 the [Quick Start](#quick-start) for the end-to-end steps). It builds the SPA, runs
-`databricks bundle deploy`, then `databricks bundle run` to start the app.
+`databricks bundle deploy`, grants the app's service principal access to the secret
+scope ([Secret scope access](#secret-scope-access)), then `databricks bundle run` to
+start the app.
 
 **Deploy targets** live in `target.yml`, a per-user file that is **gitignored** so
 no workspace-specific config is committed. Copy `target.yml.sample` to `target.yml`
@@ -178,17 +183,130 @@ you add in `target.yml`.
 Knobs (see the header of `deploy.sh`): `--skip-build` reuses `frontend/dist`;
 `BUNDLE_TARGET=<target>` picks a target from `target.yml`;
 `DATABRICKS_PROFILE=<profile>` pins a CLI profile; `APP_NAME=<name>` overrides the
-app name. To deploy to another workspace, add a target to `target.yml` and run
+app name; `LBX_SECRET_ACL=READ` and `LBX_SKIP_ACL=1` control the secret-scope grant.
+To deploy to another workspace, add a target to `target.yml` and run
 `BUNDLE_TARGET=<target> ./deploy.sh`.
 
-> **Permissions.** The active Databricks identity needs **READ** on every secret
-> scope offered for DB credentials, plus network access to the source DB endpoint
-> (firewall rule for the app's egress IP, or private link). Async-mode runtime
-> scopes need scope create/write. When the Postgres project store is enabled,
-> typed passwords are persisted **encrypted**; the Fernet key lives in the secret
-> scope (`lbx-credential-key`, auto-generated on first use), so the app SP needs
-> **WRITE** for that first generation — otherwise credential persistence fails
-> soft to the in-memory cache. Passwords are never stored in clear text.
+> **Permissions.** `deploy.sh` grants the app's service principal access to the
+> secret scope (see [Secret scope access](#secret-scope-access)); doing so needs
+> **MANAGE** on that scope. You must still give the app network access to the source
+> DB endpoint (firewall rule for its egress IP, or private link). Async-mode runtime
+> scopes need scope create/write. Passwords are never stored in clear text.
+
+### Secret scope contents
+
+The scope named by `var.secret_scope` (default `lakebase-express`) holds the keys
+below. `deploy.sh` grants the app access to the scope but **cannot create the keys**
+— it has no way to know your passwords, so this part stays manual.
+
+| Key | Who reads it | Required? |
+|-----|--------------|-----------|
+| `lakebase-password` (`var.projects_pg_secret_key`) | `backend/projects/store.py` — the Postgres project store's own connection | **Yes**, with the default `projects_backend: postgres` |
+| `lbx-credential-key` (`var.credential_key_secret_key`) | `backend/connectors/credential_store.py` — Fernet key encrypting stored passwords | No — auto-generated on first use if the app has WRITE |
+| *your DB passwords*, e.g. `azuresql-password` | Nothing at startup. These are the keys you pick in the UI's secret-scope fields, and in generated Job code | No — convenience only |
+
+A missing `lakebase-password` surfaces on **every request that touches a project**,
+not at startup — the store is constructed lazily and the result cached, so the app
+starts and passes health checks, then fails as soon as you open it:
+
+```
+ResourceDoesNotExist: Failed to get secret lakebase-password for scope lakebase-express
+```
+
+Fix it by storing the key, then **restarting the app** — `get_store()` is
+`lru_cache`d, so a process that already failed will not pick up a newly added
+secret:
+
+```bash
+databricks secrets put-secret <scope> lakebase-password -p <your-profile>
+databricks apps start <app-name> -p <your-profile>
+```
+
+The value is the password for the Lakebase role in `var.projects_pg_user`. Pass it
+on **stdin** (the command prompts) rather than `--string-value`, which records it in
+your shell history. Alternatively set `LBX_PROJECTS_PG_PASSWORD` in the app's env to
+bypass the scope entirely — but that stores the password in plain text in the app
+config, so the secret scope is preferred.
+
+Distinguish the two failure modes by the error type: `ResourceDoesNotExist` means
+the scope or key is absent (this section), while `PermissionDenied` means they exist
+but the app's identity can't read them ([Secret scope access](#secret-scope-access)).
+
+To avoid `lakebase-password` altogether, run with a different project store —
+`projects_backend: local` or `volume` in `target.yml` needs no Postgres connection
+and never reads this key.
+
+### Secret scope access
+
+A Databricks App runs as its **own service principal**, not as the developer who
+deployed it — so your CLI's access to a scope says nothing about the app's. The SP
+needs an explicit ACL on the scope named by `var.secret_scope` (default
+`lakebase-express`).
+
+**`deploy.sh` does this for you** (step 3, between `bundle deploy` and
+`bundle run`): `deploy` creates the app so its SP exists, and the app reads the
+scope when its process starts, which `run` triggers — so granting in between means
+the first start already has access and no restart is needed. The step is
+idempotent, never downgrades an existing `MANAGE`, and on any failure warns with
+the exact command to run by hand rather than aborting the deploy.
+
+| Env var | Effect |
+|---------|--------|
+| `LBX_SECRET_ACL=READ` | Grant `READ` instead of `WRITE` (see below) |
+| `LBX_SKIP_ACL=1` | Leave the scope's ACLs alone entirely |
+| `LBX_SECRET_SCOPE=<name>` | Override the scope to grant on |
+
+The scope and app name are read from the bundle (`bundle validate -o json`), so a
+`secret_scope` set in `target.yml` is picked up automatically and the grant always
+lands on the scope the app actually reads; the env vars above override it.
+
+To do it manually — a scope managed by someone else, or `LBX_SKIP_ACL=1`:
+
+```bash
+# The SP's client_id is the `service_principal_client_id` field on the app.
+databricks apps get <app-name> -p <your-profile> -o json | grep service_principal
+databricks secrets put-acl <scope> <sp-client-id> WRITE -p <your-profile>
+databricks apps start <app-name> -p <your-profile>   # only needed post-start
+```
+
+Granting requires **MANAGE** on the scope; the identity that ran `create-scope`
+has it. If you lack it, `deploy.sh` prints the command for whoever does. The app
+reads the scope lazily and caches the result for the process lifetime, so
+**restart the app** after changing ACLs on an already-running app — a cached
+failure does not self-heal.
+
+**Why `WRITE` and not `READ`.** Of the two keys the app reads
+([Secret scope contents](#secret-scope-contents)), `lakebase-password` only needs
+READ — but `lbx-credential-key` is **auto-generated and written back** when the
+scope has none, so a fresh scope needs WRITE. With READ only, that write fails —
+which is caught and logged (`Could not persist credential`), degrading to the
+in-memory cache rather than crashing, so typed passwords simply stop surviving a
+restart. `WRITE` includes read, so it satisfies both rows.
+
+To keep the scope **READ-only** for the app, pre-create the Fernet key yourself and
+grant READ instead — nothing then needs to write:
+
+```bash
+python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())' \
+  | databricks secrets put-secret <scope> lbx-credential-key -p <your-profile>
+LBX_SECRET_ACL=READ ./deploy.sh    # or put-acl ... READ by hand
+```
+
+Rotating that key makes existing stored passwords undecryptable; they are treated
+as a cache miss and re-prompted, not an error. Key Vault-backed scopes are
+read-only to Databricks, so they always need the key pre-created this way.
+
+Missing ACL surfaces as:
+
+```
+PermissionDenied: User <client-id> does not have secret-scopes.secrets/get
+permission on scope lakebase-express to perform this action
+```
+
+That is an *authentication-adjacent authorization* failure on the app's identity —
+check the `client_id` in the error against the app's SP before assuming the scope
+or key is wrong. If instead you see `ResourceDoesNotExist`, the scope or key is
+genuinely absent (step 3 of the [Quick Start](#quick-start)).
 
 ## Adding a source connector
 
@@ -211,7 +329,8 @@ app name. To deploy to another workspace, add a target to `target.yml` and run
   for multi-worker deployments.
 - Job-offload and Async-mode paths require a live workspace and expect the schema
   plan to have created the target tables. Key Vault-backed runtime scopes work
-  only when the keys already exist (Databricks can't write through to them).
+  only when the keys already exist (Databricks can't write through to them) — see
+  [Secret scope access](#secret-scope-access).
 - `money`/`smallmoney` arithmetic differs between the two engines even though the
   type mapping itself is lossless — see
   [`money` and fixed-scale arithmetic](#money-and-fixed-scale-arithmetic).
