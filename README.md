@@ -28,7 +28,8 @@ PostgreSQL, MySQL, …) "Coming soon".
 - A **Databricks workspace** with a **Lakebase** database instance (the migration
   target).
 - A **source database** — Azure SQL or SQL Server — reachable from the app
-  (a firewall rule for the app's egress IP, or a private link).
+  (a firewall rule for the app's egress IP, or a private link — see
+  [Finding the app's egress IP](#finding-the-apps-egress-ip)).
 - A **Databricks secret scope** holding the Lakebase role password under
   `lakebase-password` (see [Secret scope contents](#secret-scope-contents) — the app
   errors on every request without it). The app runs as its own service principal,
@@ -190,8 +191,47 @@ To deploy to another workspace, add a target to `target.yml` and run
 > **Permissions.** `deploy.sh` grants the app's service principal access to the
 > secret scope (see [Secret scope access](#secret-scope-access)); doing so needs
 > **MANAGE** on that scope. You must still give the app network access to the source
-> DB endpoint (firewall rule for its egress IP, or private link). Async-mode runtime
+> DB endpoint (firewall rule for its egress IP, or private link — see
+> [Finding the app's egress IP](#finding-the-apps-egress-ip)). Async-mode runtime
 > scopes need scope create/write. Passwords are never stored in clear text.
+
+### Finding the app's egress IP
+
+Azure SQL allowlists by **source IP**, and a deployed app egresses from a different
+address than your laptop — so a scan that works locally can fail in the app with
+error **40615** (`Client with IP address '…' is not allowed to access the server`).
+
+To find the address, set `egress_probe` and redeploy. The app then logs its public
+egress IP once at startup:
+
+```yaml
+# target.yml
+variables:
+  egress_probe: "true"
+```
+
+```bash
+./deploy.sh && databricks apps logs <app-name> --profile <your-profile> | grep -i egress
+```
+
+**It is off by default** — it's a debug aid, it calls out to third-party echo
+services (ipify, checkip.amazonaws.com, ifconfig.me), and a healthy deployment
+doesn't need it. Turn it off again once the firewall rule is in place. Anything
+other than `1`/`true`/`yes`/`on` leaves it disabled, so a typo fails closed.
+
+The probe queries three independent services so it can tell a *stable* egress from
+a rotating one:
+
+| Log line | Meaning |
+|----------|---------|
+| `INFO … Egress IP: <one address>` | Stable — allowlist that address |
+| `WARNING … multiple addresses seen (…)` | Rotating serverless egress; a single firewall rule is fragile — prefer "Allow Azure services" or a private endpoint |
+| `WARNING … could not determine` | No echo service reachable — outbound HTTPS is blocked, or the probe itself has no egress |
+
+The `WARNING` is the probe working as intended, not an error in the migration: it
+tells you a one-IP rule *won't hold*. Don't confuse it with a connection failure —
+error **40613** (`Database unavailable`) is the source database being paused or
+still resuming, and has nothing to do with the firewall.
 
 ### Secret scope contents
 

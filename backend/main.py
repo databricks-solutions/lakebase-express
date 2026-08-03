@@ -32,9 +32,10 @@ logging.basicConfig(level=logging.INFO)
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Log the app's public egress IP once so it's visible in `databricks apps
-    # logs` for Azure SQL firewall allowlisting. Runs in a daemon thread, so it
-    # never blocks startup or readiness checks.
+    # Opt-in (LBX_EGRESS_PROBE): log the app's public egress IP once so it's
+    # visible in `databricks apps logs` for Azure SQL firewall allowlisting. A
+    # no-op by default; when on it runs in a daemon thread, so it never blocks
+    # startup or readiness checks.
     log_egress_ip()
     yield
 

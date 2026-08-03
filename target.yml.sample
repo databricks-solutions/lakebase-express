@@ -18,3 +18,5 @@ targets:
       # secret_scope: lakebase-express
       # projects_backend: postgres
       # fm_endpoint: databricks-claude-opus-4-8
+      # Debug aid — logs the app's egress IP at startup for firewall allowlisting:
+      # egress_probe: "true"

@@ -36,6 +36,12 @@ variables:
     description: Secret key holding the Fernet key that encrypts stored passwords.
     default: lbx-credential-key
 
+  egress_probe:
+    description: >-
+      Log the app's public egress IP at startup, for allowlisting it on the source
+      DB firewall. Debug aid — off unless you're diagnosing a connection problem.
+    default: "false"
+
 # Deploy targets live in target.yml (gitignored, per-user) so no workspace-specific
 # config is committed. Copy target.yml.sample to target.yml before deploying.
 include:
@@ -72,3 +78,5 @@ resources:
             value: ${var.projects_pg_secret_key}
           - name: LBX_CREDENTIAL_KEY_SECRET_KEY
             value: ${var.credential_key_secret_key}
+          - name: LBX_EGRESS_PROBE
+            value: ${var.egress_probe}
