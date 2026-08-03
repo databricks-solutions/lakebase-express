@@ -210,6 +210,15 @@ To deploy to another workspace, add a target to `target.yml` and run
   at apply time for review.
 - Run state is in-process memory — fine for a single-user App; use a table/Redis
   for multi-worker deployments.
+- **Lakebase auth in lakebase-express is native Postgres roles only** — a role name
+  and password over the Postgres wire protocol. Databricks identity auth
+  (OAuth/OIDC for users, service principals, or groups) is **not** supported yet,
+  so target access isn't governed by workspace RBAC and doesn't inherit SSO/MFA or
+  short-lived credentials. TLS is always required and passwords are never stored in
+  clear text, but a long-lived role password is a shared secret you must rotate
+  yourself: use a dedicated least-privilege role, and prefer a **private network
+  path** (Private Link / private endpoints) over a public endpoint with an IP
+  allowlist. OAuth support is on the [Roadmap](#roadmap).
 - Job-offload and Async-mode paths require a live workspace and expect the schema
   plan to have created the target tables. Key Vault-backed runtime scopes work
   only when the keys already exist (Databricks can't write through to them).
@@ -245,6 +254,20 @@ than to missing or altered data.
 
 [money]: https://learn.microsoft.com/en-us/sql/t-sql/data-types/money-and-smallmoney-transact-sql
 [avg]: https://learn.microsoft.com/en-us/sql/t-sql/functions/avg-transact-sql
+
+## Roadmap
+
+Not commitments — the gaps we'd close next, in rough priority order.
+
+- **Databricks identity auth for Lakebase (OAuth/OIDC).** Connect as a Databricks
+  user, service principal, or group with short-lived tokens instead of a native
+  Postgres role password, so target access is governed by workspace identity and
+  inherits SSO/MFA and credential rotation.
+- **More source connectors** — Oracle, PostgreSQL, MySQL. The scanner is
+  connector-agnostic; see [Adding a source connector](#adding-a-source-connector).
+- **Multi-user run state.** Run state is in-process memory, so the app is
+  single-user today; persisting it would allow concurrent users and multi-worker
+  deployments.
 
 ## License
 
