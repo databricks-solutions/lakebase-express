@@ -17,7 +17,7 @@ interface Props {
 
 type Mode = "now" | "async";
 type Schedule = "once" | "create";
-type SyncScope = "full" | "schema";
+type SyncScope = "schema" | "full";
 
 export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData, onGoValidation, workspace, onManageWorkspace }: Props) {
   const report = state.report;
@@ -35,8 +35,8 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   const [postApplyRes, setPostApplyRes] = useState<ApplyResponse | null>(null);
   const [postBusy, setPostBusy] = useState(false);
   const postRanRef = useRef(false);
-  // What "Sync now" runs: the full migration, or only the schema & code plan.
-  const [syncScope, setSyncScope] = useState<SyncScope>("full");
+  // What "Sync now" runs: only the schema & code plan (the default), or the full migration.
+  const [syncScope, setSyncScope] = useState<SyncScope>("schema");
   // True while/after a schema-&-code-only apply, so progress skips the data phase.
   const [schemaOnly, setSchemaOnly] = useState(false);
   const pollRef = useRef(true);
@@ -363,14 +363,14 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
           </p>
           <div className="modecards" style={{ marginTop: 14 }}>
             <ModeCard
-              on={syncScope === "full"} onSelect={() => setSyncScope("full")}
-              badge="Schema + data" title="Full migration"
-              desc="Apply the schema & code plan, then stream the selected tables into Lakebase."
-            />
-            <ModeCard
               on={syncScope === "schema"} onSelect={() => setSyncScope("schema")}
               badge="No data" title="Schema & code only"
               desc="Only apply the migration plan — create the target objects without loading data."
+            />
+            <ModeCard
+              on={syncScope === "full"} onSelect={() => setSyncScope("full")}
+              badge="Schema + data" title="Full migration"
+              desc="Apply the schema & code plan, then stream the selected tables into Lakebase."
             />
           </div>
           {noTarget && (
