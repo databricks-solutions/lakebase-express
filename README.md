@@ -35,7 +35,8 @@ PostgreSQL, MySQL, …) "Coming soon".
   it, provided you hold **MANAGE** there.
 
 The scan and assessment run without a Databricks workspace; the Foundation Model
-features and the Job-offload/Async data paths require one.
+features and the Job-offload/Async data paths require one, plus
+[grants on `system.ai`](#foundation-model-access-unity-catalog-grants).
 
 ## Quick Start
 
@@ -161,6 +162,24 @@ Open the printed Vite URL (default http://localhost:5173).
 
 `DATABRICKS_CONFIG_PROFILE` is a profile from `~/.databrickscfg` and picks the
 workspace for the whole session. Settings shows which one is connected.
+
+### Foundation Model access (Unity Catalog grants)
+
+The AI features need both grants on `system.ai` for your user (locally) or the app's
+service principal (deployed):
+
+```sql
+GRANT USE SCHEMA ON SCHEMA system.ai TO `<principal>`;
+GRANT EXECUTE    ON SCHEMA system.ai TO `<principal>`;
+```
+
+Verify:
+
+```bash
+databricks serving-endpoints query databricks-claude-opus-4-8 \
+  --json '{"messages":[{"role":"user","content":"ping"}],"max_tokens":16}' \
+  --profile <your-profile>
+```
 
 ## Run tests
 
