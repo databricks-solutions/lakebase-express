@@ -138,9 +138,11 @@ tests/         Pure-Python unit tests
 
 In production the SPA is built and served by the same FastAPI process. Database
 passwords are typed per session or referenced by a workspace-bound Databricks
-secret scope/key (including Key Vault-backed scopes on Azure). Databricks
-authenticates via user OAuth when configured, otherwise the App's injected
-service-principal OAuth.
+secret scope/key (including Key Vault-backed scopes on Azure).
+
+The app is bound to exactly **one** Databricks workspace, not selectable in the
+UI: locally the CLI profile it was started with, and when deployed the workspace
+the App is published in. Restart with a different profile to switch.
 
 ## Local development
 
@@ -149,7 +151,7 @@ To iterate on the code without redeploying, run the two processes locally:
 ```bash
 # Backend (FastAPI) — from the repo root
 pip install -r requirements.txt
-uvicorn backend.main:app --reload --port 8000
+DATABRICKS_CONFIG_PROFILE=<your-profile> uvicorn backend.main:app --reload --port 8000
 
 # Frontend (React + Vite) — separate shell; proxies /api -> :8000
 cd frontend && npm install && npm run dev
@@ -157,10 +159,13 @@ cd frontend && npm install && npm run dev
 
 Open the printed Vite URL (default http://localhost:5173).
 
+`DATABRICKS_CONFIG_PROFILE` is a profile from `~/.databrickscfg` and picks the
+workspace for the whole session. Settings shows which one is connected.
+
 ## Run tests
 
 ```bash
-pip install pytest
+pip install pytest httpx   # httpx backs FastAPI's TestClient
 pytest tests/
 ```
 

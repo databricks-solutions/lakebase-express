@@ -51,22 +51,22 @@ function workspaceName(host?: string): string {
   return h.split(".")[0] || h;
 }
 
-/** Compact workspace-connection indicator in the app bar. */
+/** Compact indicator for the bound workspace. Opens Settings for the details;
+ *  the workspace itself is fixed at startup and not changeable from the UI. */
 function WorkspaceChip({ workspace, onManage }: { workspace?: WorkspaceStatus | null; onManage?: () => void }) {
   if (!workspace) return null;
   if (!workspace.connected) {
     return (
-      <button className="wschip wschip--off" onClick={onManage} title="Connect a Databricks workspace">
-        <span className="wschip__dot" /> Connect workspace
+      <button className="wschip wschip--off" onClick={onManage} title="No Databricks workspace configured">
+        <span className="wschip__dot" /> No workspace
       </button>
     );
   }
-  const auth = workspace.source === "oauth" ? "Signed in" : "Ambient identity";
   return (
     <button
       className="wschip"
       onClick={onManage}
-      title={`${workspace.host ?? ""}${workspace.user ? ` · ${workspace.user}` : ""} · ${auth}`}
+      title={`${workspace.host ?? ""}${workspace.user ? ` · ${workspace.user}` : ""}`}
     >
       <span className="wschip__dot wschip__dot--on" />
       <span className="wschip__host">{workspaceName(workspace.host)}</span>

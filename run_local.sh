@@ -8,6 +8,11 @@
 # Backend:  uvicorn (FastAPI) on http://127.0.0.1:8000  (serves /api/*)
 # Frontend: Vite dev server on http://127.0.0.1:5173     (proxies /api -> :8000)
 #
+# The Databricks workspace comes from DATABRICKS_CONFIG_PROFILE (a profile in
+# ~/.databrickscfg) and is fixed for the whole session:
+#
+#   DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
+#
 # Ctrl-C stops both. Backend logs are written to /tmp/lbx-backend.log.
 
 set -uo pipefail
@@ -84,6 +89,13 @@ FRONTEND_PID=$!
 echo ""
 echo "Backend:  http://127.0.0.1:${BACKEND_PORT}  (logs: ${BACKEND_LOG})"
 echo "Frontend: http://127.0.0.1:${FRONTEND_PORT}"
+if [[ -n "${DATABRICKS_CONFIG_PROFILE:-}" ]]; then
+  echo "Workspace: CLI profile '${DATABRICKS_CONFIG_PROFILE}'"
+else
+  echo "Workspace: DATABRICKS_CONFIG_PROFILE is not set — falling back to the"
+  echo "           DEFAULT profile / DATABRICKS_HOST. Re-run as:"
+  echo "           DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh"
+fi
 echo "Press Ctrl-C to stop both."
 
 # Portable wait loop (macOS Bash 3.2 has no `wait -n`): exit as soon as either

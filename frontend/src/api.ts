@@ -572,11 +572,13 @@ export interface DataOptions {
   batch_size: number;
 }
 
+/** The single workspace the backend is bound to (CLI profile locally, the App's
+ *  own workspace when deployed). Read-only — there is no in-app login. */
 export interface WorkspaceStatus {
   connected: boolean;
-  source: "oauth" | "ambient";
   host?: string;
   user?: string;
+  error?: string;
 }
 
 export const api = {
@@ -598,10 +600,8 @@ export const api = {
 
   listFmEndpoints: () => get<FmEndpointList>("/api/settings/fm-endpoints"),
 
-  // --- Databricks workspace (OAuth login) ---
+  // --- Databricks workspace (bound at startup; read-only) ---
   dbStatus: () => get<WorkspaceStatus>("/api/databricks/status"),
-  dbOauthStart: (host: string) => post<{ auth_url: string }>("/api/databricks/oauth/start", { host }),
-  dbLogout: () => post<WorkspaceStatus>("/api/databricks/logout", {}),
 
   // Populate the password-source dropdowns. Both fail-soft server-side (empty
   // list on missing auth/permission), so the UI falls back to manual entry.
