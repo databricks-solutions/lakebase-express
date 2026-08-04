@@ -19,6 +19,12 @@ PostgreSQL, MySQL, …) "Coming soon".
 > verified backups of your source and target. See [`LICENSE`](LICENSE) for the
 > full terms.
 
+> **Try it in dev/QA first.** Point the app at a non-production source and a
+> throwaway Lakebase target until you've seen a full cycle — assessment, plan,
+> apply, data load, validation — succeed on your own schema. Plan items execute
+> real DDL against the target and the data load can truncate target tables, so a
+> first run belongs somewhere you can drop and recreate.
+
 ## Prerequisites
 
 - **Databricks CLI** ≥ 0.239, authenticated to your workspace
