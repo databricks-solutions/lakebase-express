@@ -52,22 +52,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [ws, setWs] = useState<WorkspaceStatus | null>(null);
 
-  const refreshWs = useCallback(() => { api.dbStatus().then(setWs).catch(() => {}); }, []);
-  useEffect(() => { refreshWs(); }, [refreshWs]);
-
-  // Open the workspace OAuth flow in a popup; refresh status when it completes.
-  const loginWs = useCallback(async (host: string) => {
-    const { auth_url } = await api.dbOauthStart(host);
-    const popup = window.open(auth_url, "databricks-oauth", "width=600,height=760");
-    const onMsg = (e: MessageEvent) => {
-      if (e.data === "lbx-databricks-auth") { cleanup(); refreshWs(); }
-    };
-    const timer = window.setInterval(() => { if (popup?.closed) { cleanup(); refreshWs(); } }, 800);
-    function cleanup() { window.removeEventListener("message", onMsg); window.clearInterval(timer); }
-    window.addEventListener("message", onMsg);
-  }, [refreshWs]);
-
-  const logoutWs = useCallback(async () => { setWs(await api.dbLogout()); }, []);
+  // The workspace is fixed by how the backend was started, so this is read once.
+  useEffect(() => { api.dbStatus().then(setWs).catch(() => {}); }, []);
 
   // Passwords live only in memory for the session.
   const secretsRef = useRef<Secrets>({ source: "", target: "", sourceRef: null, targetRef: null });
@@ -124,13 +110,7 @@ export default function App() {
           ) : view === "migrations" ? (
             <MigrationsHome query={query} onNew={() => setCreating(true)} onOpen={openProject} />
           ) : (
-            <Settings
-              fmEndpoint={fmEndpoint}
-              setFmEndpoint={setFmEndpoint}
-              workspace={ws}
-              onLogin={loginWs}
-              onLogout={logoutWs}
-            />
+            <Settings fmEndpoint={fmEndpoint} setFmEndpoint={setFmEndpoint} workspace={ws} />
           )}
         </div>
       </div>

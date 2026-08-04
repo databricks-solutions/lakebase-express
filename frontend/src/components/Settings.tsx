@@ -5,32 +5,13 @@ interface Props {
   fmEndpoint: string;
   setFmEndpoint: (v: string) => void;
   workspace: WorkspaceStatus | null;
-  onLogin: (host: string) => Promise<void>;
-  onLogout: () => void;
 }
 
-export default function Settings({ fmEndpoint, setFmEndpoint, workspace, onLogin, onLogout }: Props) {
+export default function Settings({ fmEndpoint, setFmEndpoint, workspace }: Props) {
   const [endpoints, setEndpoints] = useState<FmEndpoint[]>([]);
   const [defaultEp, setDefaultEp] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
-  const [host, setHost] = useState("");
-  const [wsBusy, setWsBusy] = useState(false);
-  const [wsError, setWsError] = useState<string | null>(null);
-
-  async function login() {
-    if (!host.trim()) return;
-    setWsBusy(true);
-    setWsError(null);
-    try {
-      await onLogin(host.trim());
-    } catch (e) {
-      setWsError((e as Error).message);
-    } finally {
-      setWsBusy(false);
-    }
-  }
 
   useEffect(() => {
     api
@@ -60,8 +41,9 @@ export default function Settings({ fmEndpoint, setFmEndpoint, workspace, onLogin
         <div className="card">
           <h2>Databricks workspace</h2>
           <p className="muted">
-            Sign in to the Databricks workspace used for the AI assessment &amp; code translation
-            (Foundation Model), endpoint listing, and creating Databricks Jobs.
+            The workspace used for the AI assessment &amp; code translation (Foundation Model),
+            endpoint listing, and creating Databricks Jobs. Each migration targets a single
+            workspace, fixed when the app starts — it cannot be changed from here.
           </p>
 
           {workspace?.connected ? (
@@ -69,33 +51,23 @@ export default function Settings({ fmEndpoint, setFmEndpoint, workspace, onLogin
               <span className="dot dot--ok" />
               <span>
                 Connected to <strong>{workspace.host}</strong>
-                {workspace.user ? <> as {workspace.user}</> : null}{" "}
-                <span className="badge badge--soon">{workspace.source === "oauth" ? "OAuth" : "Ambient identity"}</span>
+                {workspace.user ? <> as {workspace.user}</> : null}
               </span>
-              {workspace.source === "oauth" && (
-                <button className="btn btn--sm" onClick={onLogout} style={{ marginLeft: "auto" }}>Log out</button>
-              )}
             </div>
           ) : (
-            <p className="muted">Not connected — sign in below.</p>
+            <>
+              <div className="wsstatus">
+                <span className="dot" />
+                <span>Not connected to a Databricks workspace.</span>
+              </div>
+              <p className="muted">
+                Running locally, start the backend with a CLI profile:{" "}
+                <code>DATABRICKS_CONFIG_PROFILE=&lt;your-profile&gt;</code>. Deployed as a
+                Databricks App, the App's own identity is used automatically.
+              </p>
+              {workspace?.error && <div className="banner banner--err">{workspace.error}</div>}
+            </>
           )}
-
-          <div className="field" style={{ maxWidth: 460, marginTop: 14 }}>
-            <label>Workspace URL</label>
-            <input
-              value={host}
-              placeholder="https://adb-1234567890.11.azuredatabricks.net"
-              onChange={(e) => setHost(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && login()}
-            />
-          </div>
-          <div className="actions">
-            <button className="btn btn--primary" disabled={wsBusy || !host.trim()} onClick={login}>
-              {wsBusy ? "Opening Databricks…" : workspace?.source === "oauth" ? "Switch workspace" : "Log in with Databricks"}
-            </button>
-          </div>
-          <p className="muted">A Databricks sign-in window opens; approve access, then it closes automatically.</p>
-          {wsError && <div className="banner banner--err">{wsError}</div>}
         </div>
 
         <div className="card" style={{ marginTop: 24 }}>
