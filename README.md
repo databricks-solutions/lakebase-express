@@ -285,6 +285,32 @@ than to missing or altered data.
 [money]: https://learn.microsoft.com/en-us/sql/t-sql/data-types/money-and-smallmoney-transact-sql
 [avg]: https://learn.microsoft.com/en-us/sql/t-sql/functions/avg-transact-sql
 
+## Troubleshooting
+
+### Testing and debugging the source connection
+
+`scripts/azure_sql_connect.py` reproduces a failing **Test connection** from a
+terminal. It drives the same code path as the app (`build_connector` →
+`AzureSqlConnection`) outside FastAPI — same `pymssql` driver, login/query
+timeouts, and transient-error retry (serverless auto-pause resume, `40613`) — then
+runs two cheap catalog queries, so it's safe against production.
+
+```bash
+# Coordinates come from the environment (nothing workspace-specific committed)
+export LBX_SRC_HOST="<server>.database.windows.net"
+export LBX_SRC_DATABASE="<db>"
+export LBX_SRC_USER="<login>"
+export LBX_SRC_PASSWORD="<password>"
+PYTHONPATH=. python3 scripts/azure_sql_connect.py
+
+# Or keep them in a file the probe parses itself
+cp .vscode/azure_sql.env.sample .vscode/azure_sql.env   # gitignored — fill it in
+PYTHONPATH=. python3 scripts/azure_sql_connect.py --env-file .vscode/azure_sql.env
+
+To step through it in VS Code, use the **Azure SQL probe (env file)** launch
+configuration in `.vscode/launch.json`, which reads `.vscode/azure_sql.env` and
+pins the interpreter that has `pymssql` installed.
+
 ## Roadmap
 
 Not commitments — the gaps we'd close next, in rough priority order.

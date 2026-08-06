@@ -1,0 +1,30 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // Real server, real credentials. The probe reads coordinates from
+            // .vscode/azure_sql.env (gitignored):
+            //   LBX_SRC_HOST / LBX_SRC_DATABASE / LBX_SRC_USER / LBX_SRC_PASSWORD
+            //   optional: LBX_SRC_PORT, LBX_SRC_TYPE
+            "name": "Azure SQL probe (env file)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/azure_sql_connect.py",
+            "args": [
+                "--env-file",
+                "${workspaceFolder}/.vscode/azure_sql.env"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            // .venv314 has no pymssql — pin the interpreter that does.
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        }
+    ]
+}
