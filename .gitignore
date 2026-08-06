@@ -8,8 +8,14 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
-# Local env
+# Local env files — NEVER commit (hold DB hosts, logins, passwords).
 .env
+*.env
+.env.*
+*.env.*
+!*.env.sample
+!*.env.example
+
 .databricks/
 
 # Per-user bundle deploy targets (workspace-specific); keep target.yml.sample
