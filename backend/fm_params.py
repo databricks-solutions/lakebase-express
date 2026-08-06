@@ -16,6 +16,18 @@ which endpoints users can pick in Settings.
 3. A ``max_tokens`` beyond the endpoint's output window is clamped to the cap
    the server reports and retried, so callers can request a large budget and
    still work on smaller-window endpoints.
+
+Two APIs can carry the call, selected by ``LBX_FM_API`` (see ``config.FM_API``)
+or per call via ``query_chat(..., api=...)``. They reach the same model and
+return the same OpenAI-style body; they differ in where the model name goes and
+therefore in which names they accept:
+
+* ``serving`` (default) — ``POST /serving-endpoints/{name}/invocations``. The
+  name is in the path, so only the endpoint name works.
+* ``gateway`` — ``POST /ai-gateway/mlflow/v1/chat/completions``. The name is in
+  the body, and both the endpoint name and the gateway model id
+  (``system.ai.claude-opus-4-8``) resolve. This is the form the AI Gateway
+  console's sample request uses.
 """
 from __future__ import annotations
 
@@ -24,7 +36,7 @@ import re
 
 from databricks.sdk.service.serving import QueryEndpointResponse
 
-from backend.config import workspace_client
+from backend.config import FM_API, FM_API_GATEWAY, workspace_client
 
 log = logging.getLogger("lakebase_express.fm_params")
 
@@ -76,6 +88,19 @@ def max_tokens_cap(exc: BaseException) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _to_response(res: dict) -> QueryEndpointResponse:
+    """Deserialize a raw OpenAI-style chat body into the SDK response type.
+
+    The chat response uses ``finish_reason`` but the SDK model deserializes the
+    camelCase ``finishReason`` — normalize so callers can see why generation
+    stopped (e.g. token-limit truncation).
+    """
+    for choice in res.get("choices", []):
+        if "finish_reason" in choice and "finishReason" not in choice:
+            choice["finishReason"] = choice["finish_reason"]
+    return QueryEndpointResponse.from_dict(res)
+
+
 def _query_raw(w, endpoint: str, messages, params: dict) -> QueryEndpointResponse:
     """Replicate the SDK's query() wire call, allowing request fields the SDK
     method doesn't expose yet (e.g. ``response_format`` for structured output)."""
@@ -86,17 +111,32 @@ def _query_raw(w, endpoint: str, messages, params: dict) -> QueryEndpointRespons
         body=body,
         headers={"Accept": "application/json", "Content-Type": "application/json"},
     )
-    # The chat response is OpenAI-style ("finish_reason") but the SDK model
-    # deserializes the camelCase "finishReason" — normalize so callers can see
-    # why generation stopped (e.g. token-limit truncation).
-    for choice in res.get("choices", []):
-        if "finish_reason" in choice and "finishReason" not in choice:
-            choice["finishReason"] = choice["finish_reason"]
-    return QueryEndpointResponse.from_dict(res)
+    return _to_response(res)
 
 
-def query_chat(endpoint: str, messages, **params):
-    """Query a chat serving endpoint, sending only parameters the model accepts.
+def _query_gateway(w, endpoint: str, messages, params: dict) -> QueryEndpointResponse:
+    """Query via the AI Gateway's OpenAI-compatible chat route.
+
+    The model goes in the body as ``model``, which is what lets this route accept
+    the ``system.ai.<model>`` ids shown in the AI Gateway console alongside plain
+    endpoint names.
+    """
+    body = {
+        "model": endpoint,
+        "messages": [m.as_dict() for m in messages],
+        **params,
+    }
+    res = w.api_client.do(
+        "POST",
+        "/ai-gateway/mlflow/v1/chat/completions",
+        body=body,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
+    return _to_response(res)
+
+
+def query_chat(endpoint: str, messages, api: str | None = None, **params):
+    """Query a chat model, sending only parameters that model accepts.
 
     Unknown models that reject a parameter are retried without it (one retry
     per rejected parameter, so the loop is bounded by ``len(params)``).
@@ -108,11 +148,18 @@ def query_chat(endpoint: str, messages, **params):
     Callers may ask for a large ``max_tokens`` (big procedure bodies): endpoints
     with a smaller output window reject the value with a range error naming
     their cap, so it is clamped to that cap and retried.
+
+    ``api`` picks the wire route — ``"serving"`` or ``"gateway"`` (see the module
+    docstring); it defaults to ``config.FM_API``. Use ``"gateway"`` to address a
+    model by its ``system.ai.<model>`` id.
     """
     w = workspace_client()
+    api = (api or FM_API).strip().lower()
     params = allowed_params(endpoint, params)
     while True:
         try:
+            if api == FM_API_GATEWAY:
+                return _query_gateway(w, endpoint, messages, params)
             if "response_format" in params:
                 return _query_raw(w, endpoint, messages, params)
             return w.serving_endpoints.query(name=endpoint, messages=messages, **params)

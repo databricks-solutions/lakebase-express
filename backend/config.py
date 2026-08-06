@@ -31,6 +31,25 @@ SECRET_SCOPE = os.getenv("LBX_SECRET_SCOPE", "lakebase-express")
 # Foundation Model serving endpoint for the schema-translation phase.
 FM_ENDPOINT = os.getenv("LBX_FM_ENDPOINT", "databricks-claude-opus-4-8")
 
+# Which API carries the chat call (see backend/fm_params.py):
+#   "serving" — POST /serving-endpoints/{name}/invocations, the model in the path.
+#   "gateway" — POST /ai-gateway/mlflow/v1/chat/completions, the model in the body.
+# Both reach the same underlying model; only the naming differs. The gateway
+# route accepts either the endpoint name (``databricks-claude-opus-4-8``) or the
+# gateway model id (``system.ai.claude-opus-4-8``), while the serving route
+# accepts the endpoint name only.
+FM_API_SERVING = "serving"
+FM_API_GATEWAY = "gateway"
+_FM_APIS = (FM_API_SERVING, FM_API_GATEWAY)
+
+FM_API = os.getenv("LBX_FM_API", FM_API_SERVING).strip().lower() or FM_API_SERVING
+if FM_API not in _FM_APIS:
+    log.warning(
+        "Unknown LBX_FM_API %r — falling back to %r (valid: %s)",
+        FM_API, FM_API_SERVING, ", ".join(_FM_APIS),
+    )
+    FM_API = FM_API_SERVING
+
 
 # --- The single bound workspace ---------------------------------------------------
 

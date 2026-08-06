@@ -238,3 +238,82 @@ def test_response_format_is_stripped_when_the_endpoint_rejects_it(raw_client):
     assert "response_format" in api.bodies[0]
     assert serving.calls == [{"max_tokens": 10}]
     assert result["ok"]
+
+
+# --- API selection: serving vs AI Gateway -------------------------------------
+
+
+class _RecordingApiClient:
+    """Captures the path and body of raw wire calls."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def do(self, method, path, body=None, headers=None):
+        self.calls.append((path, dict(body)))
+        return {"choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "hi"}}]}
+
+
+@pytest.fixture
+def routes(monkeypatch):
+    """Install a recording api_client plus a serving double, and return both."""
+    api = _RecordingApiClient()
+    fake_serving = _FakeServing(set())
+
+    class _W:
+        @property
+        def serving_endpoints(self):
+            return fake_serving
+
+        @property
+        def api_client(self):
+            return api
+
+    monkeypatch.setattr(fm_params, "workspace_client", lambda: _W())
+    return api, fake_serving
+
+
+def test_gateway_api_puts_the_model_in_the_body(routes):
+    api, fake_serving = routes
+    resp = query_chat("system.ai.claude-opus-4-8", [_Msg()], api="gateway", max_tokens=16)
+    path, body = api.calls[0]
+    # The gateway route names the model in the body, which is what lets the
+    # system.ai.* ids work; the serving path is untouched.
+    assert path == "/ai-gateway/mlflow/v1/chat/completions"
+    assert body == {"model": "system.ai.claude-opus-4-8",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 16}
+    assert fake_serving.calls == []
+    assert resp.choices[0].message.content == "hi"
+
+
+def test_serving_api_puts_the_endpoint_in_the_path(routes):
+    api, fake_serving = routes
+    query_chat("databricks-claude-opus-4-8", [_Msg()], api="serving", max_tokens=16,
+               response_format={"type": "json_object"})
+    path, body = api.calls[0]
+    assert path == "/serving-endpoints/databricks-claude-opus-4-8/invocations"
+    assert "model" not in body
+
+
+def test_api_defaults_to_the_configured_value(routes, monkeypatch):
+    api, _ = routes
+    monkeypatch.setattr(fm_params, "FM_API", "gateway")
+    query_chat("system.ai.claude-opus-4-8", [_Msg()], max_tokens=16)
+    assert api.calls[0][0] == "/ai-gateway/mlflow/v1/chat/completions"
+
+
+def test_gateway_route_still_adapts_to_rejected_params(routes):
+    api, _ = routes
+    real_do = api.do
+
+    def picky(method, path, body=None, headers=None):
+        if "temperature" in body:
+            raise Exception("BAD_REQUEST: Model x does not support the temperature parameter.")
+        return real_do(method, path, body=body, headers=headers)
+
+    api.do = picky
+    query_chat("system.ai.claude-opus-4-8", [_Msg()], api="gateway", temperature=0.2)
+    # The adaptive strip/retry loop wraps both routes, not just serving.
+    assert "temperature" not in api.calls[-1][1]

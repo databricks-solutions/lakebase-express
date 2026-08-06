@@ -484,6 +484,7 @@ export interface FmEndpointList {
   default: string;
   endpoints: FmEndpoint[];
   error?: string | null;
+  api?: string;
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
