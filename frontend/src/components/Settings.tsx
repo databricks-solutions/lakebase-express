@@ -10,6 +10,7 @@ interface Props {
 export default function Settings({ fmEndpoint, setFmEndpoint, workspace }: Props) {
   const [endpoints, setEndpoints] = useState<FmEndpoint[]>([]);
   const [defaultEp, setDefaultEp] = useState<string>("");
+  const [fmApi, setFmApi] = useState<string>("serving");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -19,6 +20,7 @@ export default function Settings({ fmEndpoint, setFmEndpoint, workspace }: Props
       .then((r) => {
         setEndpoints(r.endpoints);
         setDefaultEp(r.default);
+        if (r.api) setFmApi(r.api);
         if (r.error) setError(r.error);
         // Adopt the workspace default until the user picks one.
         if (!fmEndpoint) setFmEndpoint(r.default);
@@ -76,6 +78,13 @@ export default function Settings({ fmEndpoint, setFmEndpoint, workspace }: Props
             Used by the Schema &amp; Code phase to translate T-SQL into Postgres / PL-pgSQL. The
             list shows chat-capable serving endpoints in this workspace.
           </p>
+          <p className="muted">
+            Calls go through the{" "}
+            <strong>{fmApi === "gateway" ? "AI Gateway" : "serving endpoints"}</strong> API
+            {fmApi === "gateway"
+              ? " — both endpoint names and system.ai.* model ids work."
+              : " — endpoint names only."}
+          </p>
 
           <div className="field" style={{ maxWidth: 460, marginTop: 12 }}>
             <label>Translation endpoint</label>
@@ -105,7 +114,8 @@ export default function Settings({ fmEndpoint, setFmEndpoint, workspace }: Props
             </div>
           )}
           <p className="muted">
-            Override the default via the <code>LBX_FM_ENDPOINT</code> app environment variable.
+            Override the default via the <code>LBX_FM_ENDPOINT</code> app environment variable, and
+            the API via <code>LBX_FM_API</code> (<code>serving</code> or <code>gateway</code>).
           </p>
         </div>
 

@@ -18,5 +18,8 @@ targets:
       # secret_scope: lakebase-express
       # projects_backend: postgres
       # fm_endpoint: databricks-claude-opus-4-8
+      # Route chat calls via the AI Gateway instead of the serving endpoint, which
+      # also accepts system.ai.* model ids (fm_endpoint: system.ai.claude-opus-4-8):
+      # fm_api: gateway
       # Debug aid — logs the app's egress IP at startup for firewall allowlisting:
       # egress_probe: "true"

@@ -187,6 +187,42 @@ databricks serving-endpoints query databricks-claude-opus-4-8 \
   --profile <your-profile>
 ```
 
+### Choosing the model and the API
+
+Pick the model per session in **Settings → Foundation Model endpoint**, or change
+the default with `LBX_FM_ENDPOINT`:
+
+```bash
+LBX_FM_ENDPOINT=databricks-claude-sonnet-4-5 \
+DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
+```
+
+`LBX_FM_API` selects which API carries the chat calls. Both reach the same model
+and differ only in how it is named:
+
+| `LBX_FM_API` | Request | Accepted names |
+| --- | --- | --- |
+| `serving` (default) | `POST /serving-endpoints/{name}/invocations` | endpoint name: `databricks-claude-opus-4-8` |
+| `gateway` | `POST /ai-gateway/mlflow/v1/chat/completions` | endpoint name **or** the gateway model id: `system.ai.claude-opus-4-8` |
+
+`gateway` is the route the AI Gateway console's sample request uses, so the
+`system.ai.*` ids copied from there work as-is:
+
+```bash
+LBX_FM_API=gateway LBX_FM_ENDPOINT=system.ai.claude-opus-4-8 \
+DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
+```
+
+In gateway mode Settings lists both forms for each pay-per-token endpoint. Note
+the `system.ai.<model>` id drops the endpoint's `databricks-` prefix, and that it
+is *not* a Unity Catalog path — the registered model is
+`system.ai.databricks-claude-opus-4-8`. Passing a `system.ai.*` id in `serving`
+mode fails with `ENDPOINT_NOT_FOUND`, since that route takes the name from the
+URL path.
+
+Deployed, set these through the bundle: `fm_endpoint` and `fm_api` in
+`target.yml` (see `target.yml.sample`).
+
 ## Run tests
 
 ```bash
@@ -286,6 +322,16 @@ than to missing or altered data.
 [avg]: https://learn.microsoft.com/en-us/sql/t-sql/functions/avg-transact-sql
 
 ## Troubleshooting
+
+### `npm install` fails with `ENOTFOUND` on every package
+
+The lockfile pins a private npm mirror that your network can't reach, and its
+host wins over your configured registry. `frontend/package-lock.json` is kept on
+the public registry to prevent this — npm still downloads from a mirror in your
+`~/.npmrc` if you have one.
+
+If you commit from behind a mirror, run `npm run lockfile:check` in `frontend/`
+first (`lockfile:normalize` fixes it).
 
 ### Testing and debugging the source connection
 
