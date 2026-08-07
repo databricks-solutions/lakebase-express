@@ -42,13 +42,13 @@ FM_API_SERVING = "serving"
 FM_API_GATEWAY = "gateway"
 _FM_APIS = (FM_API_SERVING, FM_API_GATEWAY)
 
-FM_API = os.getenv("LBX_FM_API", FM_API_SERVING).strip().lower() or FM_API_SERVING
+FM_API = os.getenv("LBX_FM_API", FM_API_GATEWAY).strip().lower() or FM_API_GATEWAY
 if FM_API not in _FM_APIS:
     log.warning(
         "Unknown LBX_FM_API %r — falling back to %r (valid: %s)",
-        FM_API, FM_API_SERVING, ", ".join(_FM_APIS),
+        FM_API, FM_API_GATEWAY, ", ".join(_FM_APIS),
     )
-    FM_API = FM_API_SERVING
+    FM_API = FM_API_GATEWAY
 
 
 # --- The single bound workspace ---------------------------------------------------

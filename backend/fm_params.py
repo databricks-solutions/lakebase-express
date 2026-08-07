@@ -22,10 +22,10 @@ or per call via ``query_chat(..., api=...)``. They reach the same model and
 return the same OpenAI-style body; they differ in where the model name goes and
 therefore in which names they accept:
 
-* ``serving`` (default) — ``POST /serving-endpoints/{name}/invocations``. The
-  name is in the path, so only the endpoint name works.
-* ``gateway`` — ``POST /ai-gateway/mlflow/v1/chat/completions``. The name is in
-  the body, and both the endpoint name and the gateway model id
+* ``serving`` — ``POST /serving-endpoints/{name}/invocations``. The name is in
+  the path, so only the endpoint name works.
+* ``gateway`` (default) — ``POST /ai-gateway/mlflow/v1/chat/completions``. The
+  name is in the body, and both the endpoint name and the gateway model id
   (``system.ai.claude-opus-4-8``) resolve. This is the form the AI Gateway
   console's sample request uses.
 """
