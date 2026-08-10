@@ -83,6 +83,9 @@ def serving(monkeypatch):
         def serving_endpoints(self):
             return holder["serving"]
 
+    # These tests exercise the route-agnostic parameter policy through the serving
+    # route, so pin it regardless of the configured default (which is gateway).
+    monkeypatch.setattr(fm_params, "FM_API", "serving")
     monkeypatch.setattr(fm_params, "workspace_client", lambda: _W())
 
     def install(rejected: set[str]) -> _FakeServing:
@@ -206,6 +209,9 @@ def raw_client(monkeypatch):
         def api_client(self):
             return holder["api"]
 
+    # response_format routes via raw invocations then falls back to the serving
+    # SDK path; pin serving so the default (gateway) doesn't change the route.
+    monkeypatch.setattr(fm_params, "FM_API", "serving")
     monkeypatch.setattr(fm_params, "workspace_client", lambda: _W())
 
     def install(reject_response_format: bool = False):

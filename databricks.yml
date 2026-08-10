@@ -18,7 +18,7 @@ variables:
     default: databricks-claude-opus-4-8
   fm_api:
     description: API carrying the Foundation Model chat calls (serving|gateway).
-    default: serving
+    default: gateway
 
   # projects_pg_host/_user have no default on purpose: they are workspace-specific,
   # so set them in target.yml rather than committing them here.

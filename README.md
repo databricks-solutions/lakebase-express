@@ -202,11 +202,11 @@ and differ only in how it is named:
 
 | `LBX_FM_API` | Request | Accepted names |
 | --- | --- | --- |
-| `serving` (default) | `POST /serving-endpoints/{name}/invocations` | endpoint name: `databricks-claude-opus-4-8` |
-| `gateway` | `POST /ai-gateway/mlflow/v1/chat/completions` | endpoint name **or** the gateway model id: `system.ai.claude-opus-4-8` |
+| `serving` | `POST /serving-endpoints/{name}/invocations` | endpoint name: `databricks-claude-opus-4-8` |
+| `gateway` (default) | `POST /ai-gateway/mlflow/v1/chat/completions` | endpoint name **or** the gateway model id: `system.ai.claude-opus-4-8` |
 
-`gateway` is the route the AI Gateway console's sample request uses, so the
-`system.ai.*` ids copied from there work as-is:
+`gateway` is the default and the route the AI Gateway console's sample request
+uses, so the `system.ai.*` ids copied from there work as-is:
 
 ```bash
 LBX_FM_API=gateway LBX_FM_ENDPOINT=system.ai.claude-opus-4-8 \

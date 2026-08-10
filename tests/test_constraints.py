@@ -29,6 +29,7 @@ from backend.schema_migration.ddl_generator import (
 )
 from backend.schema_migration.expr_mapper import map_expression
 from backend.schema_migration.naming import IdentifierCase
+from backend.schema_migration.windows_timezones import WINDOWS_TO_IANA
 
 
 def _rich_table() -> TableInfo:
@@ -79,8 +80,10 @@ def test_expression_function_map():
 
 def test_expression_unknown_passthrough():
     # Unknown constructs stay verbatim: they fail visibly at apply time and can
-    # be edited in the plan, instead of silently changing meaning.
-    assert map_expression("(CONVERT([varchar](10),[A]))") == '(CONVERT("varchar"(10),"A"))'
+    # be edited in the plan, instead of silently changing meaning. (CONVERT with a
+    # translatable target type is rewritten — see the cast tests below.)
+    assert map_expression("(dateadd(day,(30),getdate()))") == "(dateadd(day,(30),now()))"
+    assert map_expression("(format([D],'yyyy-MM'))") == '(format("D",\'yyyy-MM\'))'
 
 
 # --- Post-data DDL builders --------------------------------------------------------
@@ -157,6 +160,122 @@ def test_bit_column_default_becomes_boolean():
                              "Instrument", "ref", column=bit)
     assert on.endswith('SET DEFAULT true;')
     assert off.endswith('SET DEFAULT false;')
+
+
+def test_convert_default_becomes_postgres_cast():
+    # (CONVERT([datetime2](7),getdate())) is a very common SQL Server default. The
+    # bracketed type must not survive as a quoted identifier: "datetime2"(7) reads
+    # as a call to a function that doesn't exist ("function datetime2(integer) does
+    # not exist"). datetime2(7) is 100 ns; Postgres timestamps stop at 6, so the
+    # out-of-range precision is dropped rather than rejected as timestamp(7).
+    col = ColumnInfo(name="UpdatedAt", data_type="datetime2")
+    sql = column_default_ddl(
+        ColumnDefaultInfo(column="UpdatedAt", definition="(CONVERT([datetime2](7),getdate()))"),
+        "Assets", "public", column=col,
+    )
+    assert sql.endswith("SET DEFAULT (CAST(now() AS timestamp));")
+    assert "datetime2" not in sql
+
+    # An in-range precision is preserved.
+    assert "CAST(now() AS timestamp(3))" in column_default_ddl(
+        ColumnDefaultInfo(column="UpdatedAt", definition="(CONVERT([datetime2](3),getdate()))"),
+        "Assets", "public", column=col,
+    )
+
+
+def test_cast_and_convert_forms_translate_in_checks_and_indexes():
+    # CAST(val AS type) and CONVERT(type, val) reach Postgres as the same CAST,
+    # including when nested; the same mapper backs checks and filtered indexes.
+    assert map_expression("(CAST(getdate() AS [datetime2](7)))") == "(CAST(now() AS timestamp))"
+    assert map_expression("(CONVERT([int],[Qty]))") == '(CAST("Qty" AS integer))'
+    assert map_expression("(CONVERT([varchar](max),[Notes]))") == '(CAST("Notes" AS text))'
+    assert map_expression("(CONVERT([decimal](18,2),[Amt]))") == '(CAST("Amt" AS numeric(18,2)))'
+    assert (
+        map_expression("(CAST(CONVERT([datetime2](7),getdate()) AS [date]))")
+        == "(CAST(CAST(now() AS timestamp) AS date))"
+    )
+    assert (
+        map_expression("(CONVERT([date],[CreatedAt]) IS NOT NULL)")
+        == '(CAST("CreatedAt" AS date) IS NOT NULL)'
+    )
+
+
+def test_untranslatable_conversions_are_left_verbatim_to_fail_visibly():
+    # Per this module's policy, anything that can't be translated faithfully is
+    # left as written so it fails at apply time instead of silently changing
+    # meaning. A 3-arg CONVERT's style code has no Postgres equivalent; spatial
+    # types have no mapping; bare char/decimal have different implicit widths in
+    # the two engines (T-SQL char(30)/decimal(18,0) vs PG char(1)/unbounded).
+    assert map_expression("(CONVERT([varchar](10),getdate(),(112)))") == (
+        '(CONVERT("varchar"(10),now(),(112)))'
+    )
+    assert map_expression("(CONVERT([geography],[Shape]))") == '(CONVERT("geography","Shape"))'
+    assert map_expression("(CONVERT([char],[Code]))") == '(CONVERT("char","Code"))'
+    assert map_expression("(CONVERT([decimal],[Amt]))") == '(CONVERT("decimal","Amt"))'
+
+    # The inner expression is still translated even when the call itself isn't.
+    assert map_expression("(CONVERT([geography],getdate()))") == '(CONVERT("geography",now()))'
+
+
+def test_conversion_rewrite_respects_string_literals_and_bad_input():
+    # A conversion spelled inside a string literal is a value, not code.
+    assert map_expression("('CONVERT([int],x)')") == '(\'CONVERT("int",x)\')'
+    # Parens and escaped quotes inside literals must not confuse paren matching.
+    assert map_expression("(CONVERT([varchar](10),')'))") == "(CAST(')' AS varchar(10)))"
+    assert map_expression("(CONVERT([varchar](10),'it''s ('))") == "(CAST('it''s (' AS varchar(10)))"
+    # Malformed/degenerate input passes through instead of raising.
+    for expr in ("", "(CONVERT())", "(CONVERT([int]))", "(CAST([a] AS))"):
+        map_expression(expr)
+
+
+def test_windows_time_zone_name_becomes_iana():
+    # SQL Server AT TIME ZONE names zones in the Windows registry form; Postgres
+    # only knows IANA names and rejects the Windows name at execution ("time zone
+    # ... not recognized"). Only the quoted name is rewritten — the clause is
+    # identical in both engines. Lookup is case-insensitive (SQL Server's is).
+    assert (
+        map_expression("(getdate() AT TIME ZONE 'E. South America Standard Time')")
+        == "(now() AT TIME ZONE 'America/Sao_Paulo')"
+    )
+    assert (
+        map_expression("(getdate() AT TIME ZONE 'pacific standard time')")
+        == "(now() AT TIME ZONE 'America/Los_Angeles')"
+    )
+    # Already-IANA and unknown names are left as written (fail-visibly for the latter).
+    assert "America/Sao_Paulo" in map_expression("(getdate() AT TIME ZONE 'America/Sao_Paulo')")
+    assert map_expression("(d AT TIME ZONE 'Nowhere Standard Time')") == (
+        "(d AT TIME ZONE 'Nowhere Standard Time')"
+    )
+
+
+def test_windows_timezone_table_is_populated_and_iana_valued():
+    # Guards a bad regeneration of the vendored CLDR map (empty / non-IANA values).
+    assert len(WINDOWS_TO_IANA) > 100
+    assert WINDOWS_TO_IANA["E. South America Standard Time"] == "America/Sao_Paulo"
+    # Every value is an IANA-style zone (Region/City or the Etc/ family), never a
+    # Windows display name, and no key is itself already IANA.
+    assert all("/" in v for v in WINDOWS_TO_IANA.values())
+    assert not any("/" in k for k in WINDOWS_TO_IANA)
+
+
+def test_customer_convert_with_windows_time_zone_default():
+    # The exact shape a customer hit: CONVERT to datetime2(3) around a getdate()
+    # shifted with a Windows time-zone name. Both defects must clear — the
+    # datetime2 pseudo-function AND the untranslated Windows zone — or the retry
+    # just trades one execution error for another.
+    col = ColumnInfo(name="UpdatedAt", data_type="datetime2")
+    sql = column_default_ddl(
+        ColumnDefaultInfo(
+            column="UpdatedAt",
+            definition="(CONVERT([datetime2](3),(getdate() AT TIME ZONE 'E. South America Standard Time')))",
+        ),
+        "Assets", "public", column=col,
+    )
+    assert sql.endswith(
+        "SET DEFAULT (CAST((now() AT TIME ZONE 'America/Sao_Paulo') AS timestamp(3)));"
+    )
+    assert "datetime2" not in sql
+    assert "Standard Time" not in sql
 
 
 def test_next_value_for_default_creates_sequence_and_uses_nextval():
