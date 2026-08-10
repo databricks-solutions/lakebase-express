@@ -55,6 +55,10 @@ export default function ValidationModule({ state, setState, goConnection, fmEndp
   // Off = exact COUNT(*) on every table (precise, but can take minutes).
   const [useEstimates, setUseEstimates] = useState(true);
   const pollRef = useRef(true);
+  // Held in a ref so the poll effect can save the report without taking
+  // `setState` as a dependency — see the effect below.
+  const setStateRef = useRef(setState);
+  setStateRef.current = setState;
 
   // The LLM behind the AI remediation on this page: the Settings override, or
   // the server's configured default when no override is set.
@@ -66,25 +70,36 @@ export default function ValidationModule({ state, setState, goConnection, fmEndp
   // Passwords may be blank after a page reload — the backend falls back to its
   // session credential cache and returns a clear error when it has nothing.
 
+  // Poll until the run stops. Depends on runId ALONE: `setState` is rebuilt on
+  // every App render, and saving the finished report through it re-renders — so
+  // including it here re-ran this effect, which started a second poll loop that
+  // saved again, and so on. The loops accumulated and kept hammering
+  // /api/validation/status forever after the run had finished.
   useEffect(() => {
     if (!runId) return;
     pollRef.current = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       try {
         const r = await api.validationStatus(runId);
         if (!pollRef.current) return;
         setRun(r);
-        if (r.status === "running") setTimeout(tick, 1000);
+        if (r.status === "running") timer = setTimeout(tick, 1000);
         else if (r.status === "success" && r.report) {
-          setState((s) => ({ ...s, validation: r.report! }));
+          setStateRef.current((s) => ({ ...s, validation: r.report! }));
         }
       } catch (e) {
         if (pollRef.current) setError((e as Error).message);
       }
     };
     tick();
-    return () => { pollRef.current = false; };
-  }, [runId, setState]);
+    // Stop the in-flight tick from scheduling, and drop any pending timer, so a
+    // remount (or unmount mid-run) can't leave an orphaned loop behind.
+    return () => {
+      pollRef.current = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [runId]);
 
   async function start(scope: "full" | "objects" = "full") {
     setError(null);
