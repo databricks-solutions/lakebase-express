@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import pathlib
 
 from fastapi import FastAPI
@@ -27,7 +28,11 @@ from backend.api.sizing_routes import router as sizing_router
 from backend.api.validation_routes import router as validation_router
 from backend.egress import log_egress_ip
 
-logging.basicConfig(level=logging.INFO)
+# LBX_LOG_LEVEL raises this to DEBUG for local debugging (./run_local.sh
+# --verbose). A typo must not take the app down at startup, so an unrecognized
+# name falls back to INFO (basicConfig would otherwise raise ValueError).
+_LEVEL = logging.getLevelName(os.getenv("LBX_LOG_LEVEL", "INFO").strip().upper())
+logging.basicConfig(level=_LEVEL if isinstance(_LEVEL, int) else logging.INFO)
 
 
 @contextlib.asynccontextmanager

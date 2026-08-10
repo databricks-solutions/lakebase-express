@@ -45,6 +45,10 @@ export default function QueryParityModule({ state, setState, goConnection, goAss
   const [run, setRun] = useState<QueryParityRunState | null>(null);
   const [runErr, setRunErr] = useState<string | null>(null);
   const pollRef = useRef(true);
+  // Held in a ref so the poll effect can save the report without taking
+  // `setState` as a dependency — see the effect below.
+  const setStateRef = useRef(setState);
+  setStateRef.current = setState;
 
   // The LLM behind generation: the Settings override, or the server default.
   const [defaultEndpoint, setDefaultEndpoint] = useState("");
@@ -53,25 +57,32 @@ export default function QueryParityModule({ state, setState, goConnection, goAss
 
   const running = run?.status === "running";
 
+  // Poll until the run stops. Depends on runId ALONE — including `setState`
+  // (rebuilt on every App render) re-ran this effect when the finished report
+  // was saved, spawning another poll loop that saved again, forever.
   useEffect(() => {
     if (!runId) return;
     pollRef.current = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       try {
         const r = await api.parityRunStatus(runId);
         if (!pollRef.current) return;
         setRun(r);
-        if (r.status === "running") setTimeout(tick, 1000);
+        if (r.status === "running") timer = setTimeout(tick, 1000);
         else if (r.status === "success" && r.report) {
-          setState((s) => ({ ...s, queryParity: r.report! }));
+          setStateRef.current((s) => ({ ...s, queryParity: r.report! }));
         }
       } catch (e) {
         if (pollRef.current) setRunErr((e as Error).message);
       }
     };
     tick();
-    return () => { pollRef.current = false; };
-  }, [runId, setState]);
+    return () => {
+      pollRef.current = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [runId]);
 
   async function generate() {
     setGenBusy(true);
