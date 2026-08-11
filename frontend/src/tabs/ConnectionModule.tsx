@@ -79,7 +79,7 @@ export default function ConnectionModule({ source, state, setState, onSave, work
           workspace/scope/key reference; successfully tested typed passwords may be retained
           by the encrypted credential store so a migration can resume.
         </p>
-        {source.connectionNote && <div className="banner banner--ok">{source.connectionNote}</div>}
+        {source.connectionNote && <div className="banner banner--info">{source.connectionNote}</div>}
 
         <div className="field" style={{ marginTop: 14 }}>
           <label>Server host</label>
