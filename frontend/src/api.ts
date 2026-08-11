@@ -339,6 +339,16 @@ export interface Artifact {
 // --- Post-migration validation ---
 export type MatchStatus = "matched" | "missing" | "mismatch" | "extra";
 
+/** One post-data object (constraint/index/FK) inside a rollup item. Constraints
+ *  and indexes are compared as a count per table — there can be hundreds — so
+ *  these entries carry the detail an expanded row needs to name what differs. */
+export interface ObjectDiff {
+  name: string;
+  status: MatchStatus;
+  detail: string;
+  source_definition: string;
+}
+
 export interface ValidationItem {
   id: string;
   kind: ObjectKind;
@@ -354,6 +364,10 @@ export interface ValidationItem {
   columns_missing: string[];
   columns_extra: string[];
   type_drift: string[];
+  // Constraint/index/foreign-key rollups only.
+  objects?: ObjectDiff[];
+  objects_expected?: number;
+  objects_present?: number;
   fix_sql: string;
   source_definition: string;
   remediated: boolean;

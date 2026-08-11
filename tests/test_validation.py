@@ -2,11 +2,23 @@
 import json
 from types import SimpleNamespace
 
-from backend.assessment.models import ColumnInfo, ConnectionRequest, ProgrammableObject, Severity, TableInfo
+from backend.assessment.models import (
+    CheckConstraintInfo,
+    ColumnDefaultInfo,
+    ColumnInfo,
+    ConnectionRequest,
+    ForeignKeyInfo,
+    IndexColumnInfo,
+    IndexInfo,
+    ProgrammableObject,
+    Severity,
+    TableInfo,
+)
 from backend.migration.models import LakebaseConnRequest, ObjectKind
 from backend.validation import fixer, runs
 from backend.validation.comparator import (
     TargetInventory,
+    TargetObject,
     compare,
     expected_schemas,
     fetch_target_inventory,
@@ -330,7 +342,20 @@ class FakeTarget:
         if "information_schema.triggers" in sql:
             return [{"schema": "public", "name": "trg_x"}]
         if "information_schema.columns" in sql:
-            return [{"schema": "public", "table": "orders", "name": "Id", "data_type": "integer"}]
+            return [{"schema": "public", "table": "orders", "name": "Id", "data_type": "integer",
+                     "has_default": True, "is_identity": True}]
+        if "pg_constraint" in sql and "contype" in sql:
+            return [
+                {"schema": "public", "table": "orders", "name": "pk_orders",
+                 "kind": "p", "columns": ["Id"]},
+                {"schema": "public", "table": "orders", "name": "ck_qty",
+                 "kind": "c", "columns": ["Qty"]},
+                {"schema": "public", "table": "orders", "name": "fk_orders_customer",
+                 "kind": "f", "columns": ["CustomerId"]},
+            ]
+        if "pg_index" in sql:
+            return [{"schema": "public", "table": "orders", "name": "orders_ix_total",
+                     "is_unique": False, "columns": ["Total"]}]
         if "count(*)" in sql:
             return [{"n": 2}]
         raise AssertionError(f"unexpected SQL: {sql}")
@@ -461,10 +486,11 @@ class HugeTarget:
         if "BASE TABLE" in sql:
             return [{"schema": "public", "name": "position"}]
         if "information_schema.views" in sql or "pg_proc" in sql or \
-           "information_schema.triggers" in sql:
+           "information_schema.triggers" in sql or "pg_constraint" in sql or "pg_index" in sql:
             return []
         if "information_schema.columns" in sql:
-            return [{"schema": "public", "table": "position", "name": "Id", "data_type": "integer"}]
+            return [{"schema": "public", "table": "position", "name": "Id", "data_type": "integer",
+                     "has_default": False, "is_identity": False}]
         if "reltuples" in sql:
             return [{"n": 600_000_000}]
         if "count(*)" in sql:
@@ -530,6 +556,193 @@ def test_merge_object_rescan_refreshes_objects_and_keeps_tables():
     # mismatched → 2/3 → 66% (floored, so 100 means literally everything matches).
     assert merged.match_score == 66
     assert merged.source_database == "srcdb" and merged.target_database == "tgtdb"
+
+
+# --- Post-data kinds: constraints, indexes, foreign keys --------------------------------
+
+
+def _constrained_table(**overrides):
+    """A table with one object of every post-data kind."""
+    base = dict(
+        schema_name="dbo", table_name="Orders", row_count=10, column_count=3,
+        columns=[
+            ColumnInfo(name="Id", data_type="int", is_nullable=False),
+            ColumnInfo(name="Qty", data_type="int"),
+            ColumnInfo(name="CustomerId", data_type="int"),
+        ],
+        primary_key=["Id"],
+        check_constraints=[CheckConstraintInfo(name="CK_Qty", definition="([Qty]>(0))")],
+        column_defaults=[ColumnDefaultInfo(column="Qty", definition="((1))")],
+        indexes=[IndexInfo(name="IX_Qty", columns=[IndexColumnInfo(name="Qty")])],
+        foreign_keys=[ForeignKeyInfo(name="FK_Cust", columns=["CustomerId"],
+                                     ref_schema="dbo", ref_table="Customer",
+                                     ref_columns=["Id"])],
+    )
+    return TableInfo(**{**base, **overrides})
+
+
+def _target(**overrides):
+    """Target inventory for the table above, with the post-data catalogs read."""
+    base = dict(
+        schemas={"public"}, tables={("public", "orders")},
+        columns={("public", "orders"): {"Id": "integer", "Qty": "integer",
+                                        "CustomerId": "integer"}},
+        post_data_scanned=True,
+    )
+    return TargetInventory(**{**base, **overrides})
+
+
+_ALL_PRESENT = dict(
+    primary_keys={("public", "orders"): TargetObject(name="pk_orders", columns=("Id",))},
+    checks={("public", "orders"): [TargetObject(name="ck_qty")]},
+    column_defaults={("public", "orders"): {"Qty"}},
+    indexes={("public", "orders"): [TargetObject(name="orders_ix_qty", columns=("Qty",))]},
+    foreign_keys={("public", "orders"): [TargetObject(name="fk_cust",
+                                                      columns=("CustomerId",))]},
+)
+
+
+def test_post_data_kinds_all_present_roll_up_as_matched():
+    rep = compare([_constrained_table()], [], _target(**_ALL_PRESENT))
+    items = _by_id(rep)
+    # One item per kind per table — not one per object.
+    c = items["constraint:dbo.Orders"]
+    assert c.status is MatchStatus.MATCHED and c.kind is ObjectKind.CONSTRAINT
+    assert (c.objects_present, c.objects_expected) == (3, 3)   # PK + check + default
+    assert c.detail == "All 3 constraints present."
+    assert items["index:dbo.Orders"].status is MatchStatus.MATCHED
+    assert items["foreign_key:dbo.Orders"].status is MatchStatus.MATCHED
+    assert rep.match_score == 100
+
+
+def test_missing_foreign_key_names_it_and_generates_the_ddl():
+    inv = _target(**{**_ALL_PRESENT, "foreign_keys": {}})
+    fk = _by_id(compare([_constrained_table()], [], inv))["foreign_key:dbo.Orders"]
+    assert fk.status is MatchStatus.MISMATCH and fk.severity is Severity.HIGH
+    assert (fk.objects_present, fk.objects_expected) == (0, 1)
+    assert "1 missing in the target" in fk.detail
+    # The expanded row names the specific object…
+    missing = [o for o in fk.objects if o.status is MatchStatus.MISSING]
+    assert [o.name for o in missing] == ["FK_Cust → public.customer (Id)"]
+    # …and the deterministic fix recreates exactly it, via the migration's own DDL.
+    assert 'ADD CONSTRAINT "fk_cust" FOREIGN KEY ("CustomerId")' in fk.fix_sql
+    assert 'REFERENCES "public"."customer" ("Id")' in fk.fix_sql
+
+
+def test_missing_index_and_check_are_reported_per_kind():
+    inv = _target(**{**_ALL_PRESENT, "indexes": {}, "checks": {}})
+    items = _by_id(compare([_constrained_table()], [], inv))
+    idx = items["index:dbo.Orders"]
+    assert idx.status is MatchStatus.MISMATCH and (idx.objects_present, idx.objects_expected) == (0, 1)
+    assert 'CREATE INDEX IF NOT EXISTS "orders_ix_qty"' in idx.fix_sql
+    # The check lives in the constraint rollup with the PK and default, which are
+    # still present — so the count shows partial coverage, not a total failure.
+    c = items["constraint:dbo.Orders"]
+    assert (c.objects_present, c.objects_expected) == (2, 3)
+    missing = [o for o in c.objects if o.status is MatchStatus.MISSING]
+    assert [o.name for o in missing] == ["CHECK CK_Qty"]
+    # Check predicates are compared by existence, so the source T-SQL is carried
+    # for the user to eyeball rather than diffed as text.
+    assert missing[0].source_definition == "([Qty]>(0))"
+    assert 'ADD CONSTRAINT "ck_qty" CHECK (("Qty">(0)))' in c.fix_sql
+
+
+def test_primary_key_on_different_columns_is_a_mismatch():
+    inv = _target(**{**_ALL_PRESENT,
+                     "primary_keys": {("public", "orders"): TargetObject(
+                         name="pk_orders", columns=("Id", "Qty"))}})
+    c = _by_id(compare([_constrained_table()], [], inv))["constraint:dbo.Orders"]
+    assert c.status is MatchStatus.MISMATCH
+    drifted = [o for o in c.objects if o.status is MatchStatus.MISMATCH]
+    assert "source (Id), target (Id, Qty)" in drifted[0].detail
+
+
+def test_target_only_index_is_extra_but_not_a_high_severity_gap():
+    inv = _target(**{**_ALL_PRESENT,
+                     "indexes": {("public", "orders"): [
+                         TargetObject(name="orders_ix_qty", columns=("Qty",)),
+                         TargetObject(name="orders_ix_adhoc", columns=("Id",)),
+                     ]}})
+    idx = _by_id(compare([_constrained_table()], [], inv))["index:dbo.Orders"]
+    # Everything the source asked for is present, so this is a review item.
+    assert idx.status is MatchStatus.MISMATCH and idx.severity is Severity.LOW
+    assert (idx.objects_present, idx.objects_expected) == (1, 1)
+    assert "1 only in the target" in idx.detail
+    extra = [o for o in idx.objects if o.status is MatchStatus.EXTRA]
+    assert [o.name for o in extra] == ["orders_ix_adhoc"]
+    # Nothing is missing, so there is no deterministic create-fix to offer.
+    assert idx.fix_sql == ""
+
+
+def test_tables_without_post_data_objects_emit_no_rollup_rows():
+    """A table with no constraints of a kind must not add an empty "0 of 0" row."""
+    plain = TableInfo(schema_name="dbo", table_name="Log", row_count=1, column_count=1,
+                      columns=[ColumnInfo(name="Msg", data_type="varchar")])
+    inv = _target(tables={("public", "log")},
+                  columns={("public", "log"): {"Msg": "character varying"}})
+    rep = compare([plain], [], inv)
+    assert not [i for i in rep.items if i.kind in
+                (ObjectKind.CONSTRAINT, ObjectKind.INDEX, ObjectKind.FOREIGN_KEY)]
+
+
+def test_unscanned_inventory_does_not_report_constraints_as_missing():
+    """post_data_scanned=False means "nobody looked" — not "the target has none".
+
+    Without this, every structure-only compare would report a correctly-migrated
+    database's constraints as missing.
+    """
+    rep = compare([_constrained_table()], [], _target(post_data_scanned=False))
+    assert not [i for i in rep.items if i.kind in
+                (ObjectKind.CONSTRAINT, ObjectKind.INDEX, ObjectKind.FOREIGN_KEY)]
+
+
+def test_missing_table_does_not_also_report_its_constraints():
+    """The missing table is the finding; repeating it per kind is noise."""
+    rep = compare([_constrained_table()], [], _target(tables=set(), columns={}))
+    assert _by_id(rep)["table:dbo.Orders"].status is MatchStatus.MISSING
+    assert not [i for i in rep.items if i.kind in
+                (ObjectKind.CONSTRAINT, ObjectKind.INDEX, ObjectKind.FOREIGN_KEY)]
+
+
+def test_post_data_names_follow_the_identifier_case_policy():
+    """The comparator must look for the names ddl_generator actually creates."""
+    inv = TargetInventory(
+        schemas={"public"}, tables={("public", "Orders")},
+        columns={("public", "Orders"): {"Id": "integer", "Qty": "integer",
+                                        "CustomerId": "integer"}},
+        post_data_scanned=True,
+        primary_keys={("public", "Orders"): TargetObject(name="pk_Orders", columns=("Id",))},
+        checks={("public", "Orders"): [TargetObject(name="CK_Qty")]},
+        column_defaults={("public", "Orders"): {"Qty"}},
+        indexes={("public", "Orders"): [TargetObject(name="Orders_IX_Qty", columns=("Qty",))]},
+        foreign_keys={("public", "Orders"): [TargetObject(name="FK_Cust",
+                                                          columns=("CustomerId",))]},
+    )
+    items = _by_id(compare([_constrained_table()], [], inv, identifier_case="preserve"))
+    assert items["constraint:dbo.Orders"].status is MatchStatus.MATCHED
+    assert items["index:dbo.Orders"].status is MatchStatus.MATCHED
+    assert items["foreign_key:dbo.Orders"].status is MatchStatus.MATCHED
+
+
+def test_objects_rescan_rechecks_post_data_and_keeps_table_rows():
+    """The agent fixes constraints, so the fast re-scan must re-check them —
+    a carried-over copy would keep reporting a created FK as missing."""
+    before = _target(**{**_ALL_PRESENT, "foreign_keys": {}})
+    previous = compare([_constrained_table()], [], before,
+                       source_counts={("dbo", "Orders"): 10},
+                       target_counts={("dbo", "Orders"): 10})
+    assert _by_id(previous)["foreign_key:dbo.Orders"].status is MatchStatus.MISMATCH
+
+    # Agent applied the FK; the objects-scope re-scan sees it.
+    rescan = compare([_constrained_table()], [], _target(**_ALL_PRESENT), include_tables=False)
+    merged = merge_object_rescan(previous, rescan)
+    items = _by_id(merged)
+    assert items["foreign_key:dbo.Orders"].status is MatchStatus.MATCHED
+    # The table item carried over — no re-counting — and no duplicate was added.
+    t = items["table:dbo.Orders"]
+    assert t.source_rows == 10 and t.target_rows == 10
+    assert sum(1 for i in merged.items if i.kind is ObjectKind.TABLE) == 1
+    assert merged.match_score == 100
 
 
 def test_compare_without_tables_flags_no_extra_tables():

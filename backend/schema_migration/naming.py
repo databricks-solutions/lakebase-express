@@ -75,3 +75,49 @@ def trigger_function_name(
 ) -> str:
     """Name of the companion trigger function the migration creates for a trigger."""
     return map_object(trigger_name, identifier_case) + TRIGGER_FN_SUFFIX
+
+
+# --- Constraint and index names ------------------------------------------------------
+#
+# Post-data objects (PKs, FKs, checks, indexes) are not all named after their
+# source object: a PK gets a derived name, and index names are prefixed with the
+# table. The names below are shared by the two callers that MUST agree on them —
+# ddl_generator, which creates the objects, and the validation comparator, which
+# looks for them in the target. A rule that lived in only one of the two would
+# make every constraint report as missing-in-target *and* extra-in-target.
+
+# Postgres truncates identifiers at 63 bytes; generated names are cut explicitly
+# so a DO-block existence check (and the comparator) compare the same name
+# Postgres actually stores.
+MAX_IDENTIFIER = 63
+
+
+def truncate_identifier(name: str) -> str:
+    return name[:MAX_IDENTIFIER]
+
+
+def mapped_identifier(
+    name: str, identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE
+) -> str:
+    """Map an identifier and truncate it the way Postgres would."""
+    return truncate_identifier(map_object(name, identifier_case))
+
+
+def primary_key_name(
+    table_name: str, identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE
+) -> str:
+    """Derived PK constraint name — SQL Server's own PK name is not reused."""
+    return mapped_identifier(f"pk_{map_object(table_name, identifier_case)}", identifier_case)
+
+
+def index_name(
+    source_index_name: str,
+    table_name: str,
+    identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+) -> str:
+    """Index names are prefixed with the table: source index names are unique
+    per table, Postgres index names must be unique per schema."""
+    return mapped_identifier(
+        f"{map_object(table_name, identifier_case)}_{map_object(source_index_name, identifier_case)}",
+        identifier_case,
+    )

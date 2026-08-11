@@ -78,6 +78,24 @@ def _build_user_prompt(item: ValidationItem, target_schema: str) -> str:
         parts.append(f"Extra columns in the target: {', '.join(item.columns_extra)}.")
     if item.type_drift:
         parts.append(f"Column type drift: {'; '.join(item.type_drift)}.")
+    if item.objects:
+        # Constraint/index/FK rollup: the item covers every object of one kind on
+        # one table, so the model needs the per-object breakdown to know which
+        # ones to create — the summary count alone is not actionable.
+        breakdown = "\n".join(
+            f"  - {o.name}: {o.status.value}"
+            + (f" ({o.detail})" if o.detail else "")
+            + (f" [source definition: {o.source_definition}]" if o.source_definition else "")
+            for o in item.objects
+            if o.status is not MatchStatus.MATCHED
+        )
+        if breakdown:
+            parts.append(
+                f"This item covers all {item.kind.value.replace('_', ' ')} objects on the "
+                f"table ({item.objects_present} of {item.objects_expected} present). "
+                f"Objects needing attention:\n{breakdown}\n"
+                "Create only what is missing; do not drop target-only objects."
+            )
     if item.source_definition:
         parts.append(f"Original source T-SQL definition:\n{_clip(item.source_definition)}")
     if item.fix_sql:

@@ -107,7 +107,7 @@ missing.
 | **Schema & Code** | Build an editable plan (DDL + AI-translated code) and apply it to Lakebase |
 | **Data Migration** | Stream data into Lakebase (batched `COPY`) with live per-table progress |
 | **Create Sync** | Sync now (in-app) or offload a re-runnable PySpark snapshot to a Databricks Job (run now, create unstarted, or schedule) |
-| **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, exact row counts — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
+| **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
 | **Query Parity** *(post-migration)* | Generate N synthetic read-only queries, run each against both sides, and compare row count, result format, and performance — with a side-by-side result preview on any mismatch |
 
 Target identifiers are lower-cased by default (PostgreSQL convention); a project
@@ -133,7 +133,9 @@ objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
 - **Post-migration** — Validation re-inventories both sides and diffs them
   through the naming rules; Query Parity runs generated read-only queries on both
   sides and compares the results. Both run on background threads with polled
-  progress.
+  progress. Constraints, indexes, and foreign keys are compared as one row per
+  table per kind ("5 of 5 present") rather than one row per object — a real
+  database has hundreds — and an expanded row names exactly what differs.
 
 ## Architecture
 
