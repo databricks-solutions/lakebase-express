@@ -22,8 +22,30 @@ class MatchStatus(str, Enum):
     EXTRA = "extra"          # exists only in the target
 
 
+class ObjectDiff(BaseModel):
+    """One post-data object inside a rollup item (a constraint, index, or FK).
+
+    Constraints and indexes are compared as a *count per table* rather than one
+    report row each — a 100-table database has hundreds of them, and a list that
+    long buries the objects a user actually needs to look at. The rollup item
+    carries these entries so an expanded row can still name exactly what is
+    missing, extra, or different.
+    """
+
+    name: str                            # target name (source name for a missing object)
+    status: MatchStatus
+    detail: str = ""                     # e.g. "columns differ: source (a, b), target (a)"
+    source_definition: str = ""          # source T-SQL predicate/expression, where there is one
+
+
 class ValidationItem(BaseModel):
-    """One compared object (schema/table/view/procedure/function/trigger)."""
+    """One compared object.
+
+    Schemas, tables, and code objects (view/procedure/function/trigger) are one
+    item per object. Constraints, indexes, and foreign keys are one item per
+    *table* per kind, summarising every object of that kind on the table — see
+    ``objects`` and ``ObjectDiff``.
+    """
 
     id: str                              # e.g. "table:SalesLT.Product"
     kind: ObjectKind
@@ -41,6 +63,12 @@ class ValidationItem(BaseModel):
     columns_missing: list[str] = []      # in the source, absent in the target
     columns_extra: list[str] = []        # in the target, absent in the source
     type_drift: list[str] = []           # "col: expected X, found Y" (normalized)
+
+    # Constraint/index/foreign-key rollups only: the per-object breakdown behind
+    # the counts, and the counts themselves (so the UI need not recompute them).
+    objects: list[ObjectDiff] = []
+    objects_expected: int = 0             # objects of this kind on the source table
+    objects_present: int = 0              # of those, how many matched in the target
 
     # Remediation aids.
     fix_sql: str = ""                    # deterministic fix, when derivable

@@ -27,15 +27,32 @@ from backend.assessment.models import ProgrammableObject, Severity, TableInfo
 from backend.assessment.scanner import scan_objects, scan_tables
 from backend.connectors.lakebase import LakebaseConnection
 from backend.migration.models import KIND_ORDER, ObjectKind
-from backend.schema_migration.ddl_generator import schema_ddl, table_ddl
+from backend.schema_migration.ddl_generator import (
+    check_constraint_ddl,
+    column_default_ddl,
+    foreign_key_ddl,
+    identity_ddl,
+    index_ddl,
+    primary_key_ddl,
+    schema_ddl,
+    table_ddl,
+)
 from backend.schema_migration.naming import (
     IdentifierCase,
+    index_name,
     map_object,
     map_schema,
+    mapped_identifier,
+    primary_key_name,
     trigger_function_name,
 )
 from backend.schema_migration.type_mapper import map_type
-from backend.validation.models import MatchStatus, ValidationItem, ValidationReport
+from backend.validation.models import (
+    MatchStatus,
+    ObjectDiff,
+    ValidationItem,
+    ValidationReport,
+)
 
 log = logging.getLogger("lakebase_express.validation")
 
@@ -97,10 +114,80 @@ WHERE  trigger_schema = ANY(%(schemas)s)
 """
 
 _PG_COLUMNS_SQL = """
-SELECT table_schema AS schema, table_name AS "table", column_name AS name, data_type
+SELECT table_schema AS schema, table_name AS "table", column_name AS name, data_type,
+       column_default IS NOT NULL AS has_default,
+       is_identity = 'YES' AS is_identity
 FROM   information_schema.columns
 WHERE  table_schema = ANY(%(schemas)s)
 """
+
+# Table constraints, by class: 'p' primary key, 'c' check, 'f' foreign key.
+# Unique constraints are deliberately absent — the scanner reads source unique
+# constraints as unique *indexes* (assessment/scanner._INDEXES_SQL), and the
+# migration recreates them as indexes, so they are compared as indexes too.
+#
+# NOT NULL arrives as a column attribute rather than a pg_constraint row, so it
+# is compared as part of the table's column structure, not here.
+_PG_CONSTRAINTS_SQL = """
+SELECT n.nspname AS schema, t.relname AS "table", c.conname AS name, c.contype AS kind,
+       ARRAY(
+           SELECT a.attname
+           FROM   unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+           JOIN   pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+           ORDER  BY k.ord
+       ) AS columns
+FROM   pg_constraint c
+JOIN   pg_class t ON t.oid = c.conrelid
+JOIN   pg_namespace n ON n.oid = t.relnamespace
+WHERE  n.nspname = ANY(%(schemas)s)
+  AND  c.contype IN ('p', 'c', 'f')
+"""
+
+# Indexes, excluding those Postgres creates to back a PK or UNIQUE *constraint*
+# (conindid) — those are not separate objects, and counting them would report a
+# phantom "extra index" on every keyed table. A unique index created directly by
+# the migration has no backing constraint, so it is kept.
+#
+# Only KEY columns are collected: ``ord <= indnkeyatts`` drops the trailing
+# INCLUDE columns, which are payload rather than part of the index key (and so
+# are not compared). Filtering on ordinality rather than slicing ``indkey``
+# avoids that column's 0-based subscripting — ``conkey`` above is an ordinary
+# 1-based array, and mixing the two conventions is an easy off-by-one.
+# Expression indexes carry attnum 0, which joins to no column and drops out; the
+# migration does not generate them.
+_PG_INDEXES_SQL = """
+SELECT n.nspname AS schema, t.relname AS "table", ix.relname AS name, i.indisunique AS is_unique,
+       ARRAY(
+           SELECT a.attname
+           FROM   unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+           JOIN   pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+           WHERE  k.ord <= i.indnkeyatts
+           ORDER  BY k.ord
+       ) AS columns
+FROM   pg_index i
+JOIN   pg_class ix ON ix.oid = i.indexrelid
+JOIN   pg_class t ON t.oid = i.indrelid
+JOIN   pg_namespace n ON n.oid = t.relnamespace
+WHERE  n.nspname = ANY(%(schemas)s)
+  AND  NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.indexrelid)
+"""
+
+
+@dataclass
+class TargetObject:
+    """A target constraint or index, with the columns it covers.
+
+    Columns are compared where they are genuinely comparable (keys and index
+    columns). Check predicates and default expressions are NOT: the source
+    stores ``([Qty]>(0))`` and Postgres stores ``(qty > 0)``, so a text
+    comparison would report a mismatch on every correctly-migrated constraint.
+    Those are compared by existence, and the source expression is shown in the
+    report so a human can eyeball it.
+    """
+
+    name: str
+    columns: tuple[str, ...] = ()
+    is_unique: bool = False
 
 
 @dataclass
@@ -116,6 +203,23 @@ class TargetInventory:
     # (schema, table) -> {column name: information_schema data_type}
     columns: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
 
+    # Whether the post-data catalogs below were actually queried. An empty dict
+    # is ambiguous on its own — it means both "this target has no constraints"
+    # and "nobody looked" — and guessing wrong would report every constraint of a
+    # correctly-migrated database as missing. Only ``fetch_target_inventory``
+    # sets this; an inventory built by hand (structure-only compares, tests)
+    # leaves it False and those kinds are simply not compared.
+    post_data_scanned: bool = False
+
+    # Post-data objects, keyed by target (schema, table).
+    primary_keys: dict[tuple[str, str], TargetObject] = field(default_factory=dict)
+    checks: dict[tuple[str, str], list[TargetObject]] = field(default_factory=dict)
+    foreign_keys: dict[tuple[str, str], list[TargetObject]] = field(default_factory=dict)
+    indexes: dict[tuple[str, str], list[TargetObject]] = field(default_factory=dict)
+    # Columns carrying a DEFAULT, and columns that are Postgres identity columns.
+    column_defaults: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    identity_columns: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+
 
 def fetch_target_inventory(conn: LakebaseConnection, schemas: list[str]) -> TargetInventory:
     params = {"schemas": schemas}
@@ -124,12 +228,32 @@ def fetch_target_inventory(conn: LakebaseConnection, schemas: list[str]) -> Targ
         tables={(r["schema"], r["name"]) for r in conn.query(_PG_TABLES_SQL, params)},
         views={(r["schema"], r["name"]) for r in conn.query(_PG_VIEWS_SQL, params)},
         triggers={(r["schema"], r["name"]) for r in conn.query(_PG_TRIGGERS_SQL, params)},
+        post_data_scanned=True,
     )
     for r in conn.query(_PG_ROUTINES_SQL, params):
         bucket = inv.procedures if r["kind"] == "procedure" else inv.functions
         bucket.add((r["schema"], r["name"]))
     for r in conn.query(_PG_COLUMNS_SQL, params):
-        inv.columns.setdefault((r["schema"], r["table"]), {})[r["name"]] = r["data_type"]
+        key = (r["schema"], r["table"])
+        inv.columns.setdefault(key, {})[r["name"]] = r["data_type"]
+        if r["has_default"]:
+            inv.column_defaults.setdefault(key, set()).add(r["name"])
+        if r["is_identity"]:
+            inv.identity_columns.setdefault(key, set()).add(r["name"])
+    for r in conn.query(_PG_CONSTRAINTS_SQL, params):
+        key = (r["schema"], r["table"])
+        obj = TargetObject(name=r["name"], columns=tuple(r["columns"] or ()))
+        if r["kind"] == "p":
+            inv.primary_keys[key] = obj
+        elif r["kind"] == "c":
+            inv.checks.setdefault(key, []).append(obj)
+        else:
+            inv.foreign_keys.setdefault(key, []).append(obj)
+    for r in conn.query(_PG_INDEXES_SQL, params):
+        inv.indexes.setdefault((r["schema"], r["table"]), []).append(
+            TargetObject(name=r["name"], columns=tuple(r["columns"] or ()),
+                         is_unique=bool(r["is_unique"]))
+        )
     return inv
 
 
@@ -241,6 +365,116 @@ def _sentence(text: str) -> str:
     return (text[:1].upper() + text[1:] + ".") if text else ""
 
 
+def _cols(names) -> str:
+    return ", ".join(names) if names else "—"
+
+
+def _post_data_rollup(
+    t: TableInfo,
+    inv: TargetInventory,
+    mapped: tuple[str, str],
+    *,
+    kind: ObjectKind,
+    expected: list[tuple[str, str, str, tuple[str, ...] | None]],
+    present: list[TargetObject],
+    fix_for: dict[str, str],
+    label: str,
+    recommendation: str,
+) -> ValidationItem | None:
+    """Compare one table's objects of a single post-data kind into one item.
+
+    ``expected`` is (target name, display name, source definition, columns to
+    compare or None to compare existence only) per source object; ``present``
+    is what the target has. ``fix_for`` maps a target name to the DDL that
+    creates it, so the item's ``fix_sql`` recreates exactly what is missing.
+
+    Returns None when the source table has none of this kind AND the target has
+    none either — there is nothing to report, and an empty "0 of 0" row on every
+    table would be pure noise.
+    """
+    by_name = {p.name: p for p in present}
+    diffs: list[ObjectDiff] = []
+    fixes: list[str] = []
+    matched = 0
+
+    for target_name, display, definition, columns in expected:
+        found = by_name.get(target_name)
+        if found is None:
+            diffs.append(ObjectDiff(
+                name=display, status=MatchStatus.MISSING,
+                detail=f'not found in the target (expected "{target_name}")',
+                source_definition=definition,
+            ))
+            if fix_for.get(target_name):
+                fixes.append(fix_for[target_name])
+            continue
+        # Columns are compared only where both sides are genuinely comparable
+        # (keys, index columns). Predicates and default expressions are compared
+        # by existence — see TargetObject.
+        if columns is not None and found.columns and tuple(columns) != found.columns:
+            diffs.append(ObjectDiff(
+                name=display, status=MatchStatus.MISMATCH,
+                detail=f"columns differ — source ({_cols(columns)}), "
+                       f"target ({_cols(found.columns)})",
+                source_definition=definition,
+            ))
+            continue
+        matched += 1
+        diffs.append(ObjectDiff(name=display, status=MatchStatus.MATCHED,
+                                source_definition=definition))
+
+    claimed = {name for name, _, _, _ in expected}
+    for p in present:
+        if p.name in claimed:
+            continue
+        diffs.append(ObjectDiff(
+            name=p.name, status=MatchStatus.EXTRA,
+            detail="exists in Lakebase but not in the source",
+        ))
+
+    if not expected and not present:
+        return None
+
+    missing = sum(d.status is MatchStatus.MISSING for d in diffs)
+    mismatched = sum(d.status is MatchStatus.MISMATCH for d in diffs)
+    extra = sum(d.status is MatchStatus.EXTRA for d in diffs)
+
+    problems: list[str] = []
+    if missing:
+        problems.append(f"{missing} missing in the target")
+    if mismatched:
+        problems.append(f"{mismatched} with different columns")
+    if extra:
+        problems.append(f"{extra} only in the target")
+
+    if missing or mismatched:
+        status, severity = MatchStatus.MISMATCH, Severity.HIGH
+    elif extra:
+        # Nothing the source asked for is absent — an extra index is a review
+        # item, not a migration gap.
+        status, severity = MatchStatus.MISMATCH, Severity.LOW
+    else:
+        status, severity = MatchStatus.MATCHED, Severity.INFO
+
+    fqn_src, fqn_tgt = f"{t.schema_name}.{t.table_name}", f"{mapped[0]}.{mapped[1]}"
+    total = len(expected)
+    return ValidationItem(
+        id=f"{kind.value}:{fqn_src}",
+        kind=kind,
+        source_name=fqn_src,
+        target_name=fqn_tgt,
+        status=status,
+        severity=severity,
+        detail=(f"{matched} of {total} {label} present · " + "; ".join(problems)
+                if problems else f"All {total} {label} present."),
+        recommendation=recommendation if problems else "",
+        objects=diffs,
+        objects_expected=total,
+        objects_present=matched,
+        fix_sql="\n\n".join(fixes),
+    )
+
+
 def _table_recommendation(problems: list[str], unverified: bool) -> str:
     """Advice for a table with findings — an unverified count is a scan problem,
     not something re-copying fixes."""
@@ -251,6 +485,128 @@ def _table_recommendation(problems: list[str], unverified: bool) -> str:
                 "target — the row count could not be counted or estimated.")
     return ("Re-copy the table to reconcile the data. Structural gaps can be "
             "fixed with the SQL below or the AI fix.")
+
+
+_POST_DATA_REC = (
+    "These are created after the data load — a gap usually means the post-data "
+    "phase did not run or partly failed. Apply the SQL below, or re-run the "
+    "migration's post-data step."
+)
+
+
+def post_data_items(
+    t: TableInfo,
+    inv: TargetInventory,
+    mapped: tuple[str, str],
+    target_schema: str,
+    identifier_case: IdentifierCase | str,
+) -> list[ValidationItem]:
+    """One rollup item per post-data kind for a single table.
+
+    The expected target names come from ``schema_migration/naming`` — the same
+    rules ``ddl_generator`` used to create the objects — and the ``fix_sql`` for
+    a missing object is generated by the very function that would have created
+    it, so remediation needs no AI and cannot drift from the migration.
+    """
+    tgt_schema = mapped[0]
+    items: list[ValidationItem] = []
+
+    # --- Constraints: PK, checks, column defaults, identity ---
+    #
+    # These four are one ObjectKind (mirroring the migration plan, where they are
+    # all CONSTRAINT items) because they share a cause: they are what the
+    # post-data phase adds to a loaded table.
+    expected: list[tuple[str, str, str, tuple[str, ...] | None]] = []
+    present: list[TargetObject] = []
+    fix_for: dict[str, str] = {}
+    cols_by_name = {c.name: c for c in t.columns}
+
+    if t.primary_key:
+        pk_name = primary_key_name(t.table_name, identifier_case)
+        expected.append((pk_name, f"PRIMARY KEY ({_cols(t.primary_key)})", "",
+                         tuple(t.primary_key)))
+        fix_for[pk_name] = primary_key_ddl(t, tgt_schema, identifier_case)
+    pk = inv.primary_keys.get(mapped)
+    if pk:
+        present.append(pk)
+
+    for chk in t.check_constraints:
+        name = mapped_identifier(chk.name, identifier_case)
+        expected.append((name, f"CHECK {chk.name}", chk.definition, None))
+        fix_for[name] = check_constraint_ddl(chk, t.table_name, tgt_schema, identifier_case)
+    present.extend(inv.checks.get(mapped, []))
+
+    # Defaults and identity are column attributes, not named constraints, so they
+    # are keyed by column name on both sides.
+    target_defaults = inv.column_defaults.get(mapped, set())
+    for d in t.column_defaults:
+        expected.append((d.column, f"DEFAULT on {d.column}", d.definition, None))
+        fix_for[d.column] = column_default_ddl(
+            d, t.table_name, tgt_schema, column=cols_by_name.get(d.column),
+            target_schema=target_schema, identifier_case=identifier_case,
+        )
+    if t.identity_column:
+        # An identity column also carries a DEFAULT in some target shapes (a
+        # sequence-backed default for non-integer types), so accept either
+        # signal rather than reporting a correctly-migrated identity as missing.
+        ident = t.identity_column
+        expected.append((ident, f"IDENTITY on {ident}", "", None))
+        fix_for[ident] = identity_ddl(t, tgt_schema, identifier_case)
+        if ident in inv.identity_columns.get(mapped, set()):
+            target_defaults = target_defaults | {ident}
+    # Only column-keyed entries participate here; a target column with a default
+    # the source didn't have is reported as extra by the same rollup.
+    column_keyed = {d.column for d in t.column_defaults} | (
+        {t.identity_column} if t.identity_column else set()
+    )
+    present.extend(
+        TargetObject(name=name) for name in sorted(target_defaults)
+        if name in column_keyed or name in inv.columns.get(mapped, {})
+    )
+
+    item = _post_data_rollup(
+        t, inv, mapped, kind=ObjectKind.CONSTRAINT, expected=expected, present=present,
+        fix_for=fix_for, label="constraints", recommendation=_POST_DATA_REC,
+    )
+    if item:
+        items.append(item)
+
+    # --- Indexes (source unique constraints are scanned as unique indexes) ---
+    expected, fix_for = [], {}
+    for idx in t.indexes:
+        name = index_name(idx.name, t.table_name, identifier_case)
+        label = f"{'UNIQUE ' if idx.is_unique else ''}INDEX {idx.name}"
+        expected.append((name, label, idx.filter_definition or "",
+                         tuple(c.name for c in idx.columns)))
+        fix_for[name] = index_ddl(idx, t.table_name, tgt_schema, identifier_case)
+    item = _post_data_rollup(
+        t, inv, mapped, kind=ObjectKind.INDEX, expected=expected,
+        present=inv.indexes.get(mapped, []), fix_for=fix_for,
+        label="indexes", recommendation=_POST_DATA_REC,
+    )
+    if item:
+        items.append(item)
+
+    # --- Foreign keys ---
+    expected, fix_for = [], {}
+    for fk in t.foreign_keys:
+        name = mapped_identifier(fk.name, identifier_case)
+        ref = (f"{map_schema(fk.ref_schema, target_schema, identifier_case)}."
+               f"{map_object(fk.ref_table, identifier_case)}")
+        expected.append((name, f"{fk.name} → {ref} ({_cols(fk.ref_columns)})", "",
+                         tuple(fk.columns)))
+        fix_for[name] = foreign_key_ddl(
+            fk, t.table_name, tgt_schema, target_schema, identifier_case
+        )
+    item = _post_data_rollup(
+        t, inv, mapped, kind=ObjectKind.FOREIGN_KEY, expected=expected,
+        present=inv.foreign_keys.get(mapped, []), fix_for=fix_for,
+        label="foreign keys", recommendation=_POST_DATA_REC,
+    )
+    if item:
+        items.append(item)
+
+    return items
 
 
 def expected_schemas(
@@ -292,11 +648,20 @@ def compare(
     ``include_tables=False`` (the objects-only re-scan) compares just schemas
     and code objects: callers pass ``tables=[]``, and target tables are not
     flagged as extra — the previous full report already covers them.
+
+    Constraints, indexes, and foreign keys are compared as one rollup item per
+    table per kind (see ``post_data_items``), and only when the inventory
+    actually read those catalogs.
     """
     source_counts = source_counts or {}
     target_counts = target_counts or {}
     approximate_counts = approximate_counts or set()
     items: list[ValidationItem] = []
+    # Post-data kinds are compared whenever the target catalogs were read — the
+    # objects scope included, since verifying an agent's constraint fix is
+    # exactly what that fast re-scan is for. It stays fast because these are
+    # catalog reads on both sides; no table is counted.
+    compare_post_data = inventory.post_data_scanned
 
     # --- Schemas ---
     src_schemas = sorted({t.schema_name for t in tables} | {o.schema_name for o in objects})
@@ -331,19 +696,20 @@ def compare(
         fqn_src, fqn_tgt = f"{t.schema_name}.{t.table_name}", f"{mapped[0]}.{mapped[1]}"
 
         if mapped not in inventory.tables:
-            items.append(ValidationItem(
-                id=f"table:{fqn_src}",
-                kind=ObjectKind.TABLE,
-                source_name=fqn_src,
-                target_name=fqn_tgt,
-                status=MatchStatus.MISSING,
-                severity=Severity.HIGH,
-                detail=f'Table "{fqn_tgt}" does not exist in the target database.',
-                recommendation="Apply the generated CREATE TABLE, then copy the data "
-                               "(Data Migration / Create Sync).",
-                source_rows=source_counts.get(key, t.row_count),
-                fix_sql=table_ddl(t, mapped[0], identifier_case),
-            ))
+            if include_tables:
+                items.append(ValidationItem(
+                    id=f"table:{fqn_src}",
+                    kind=ObjectKind.TABLE,
+                    source_name=fqn_src,
+                    target_name=fqn_tgt,
+                    status=MatchStatus.MISSING,
+                    severity=Severity.HIGH,
+                    detail=f'Table "{fqn_tgt}" does not exist in the target database.',
+                    recommendation="Apply the generated CREATE TABLE, then copy the data "
+                                   "(Data Migration / Create Sync).",
+                    source_rows=source_counts.get(key, t.row_count),
+                    fix_sql=table_ddl(t, mapped[0], identifier_case),
+                ))
             continue
 
         target_cols = inventory.columns.get(mapped, {})
@@ -391,6 +757,21 @@ def compare(
         if cols_extra:
             problems.append(f"extra columns in target: {', '.join(cols_extra)}")
             severity = max(severity, Severity.LOW, key=lambda s: _PENALTY[s])
+
+        # Constraints/indexes/FKs for a table that exists on both sides. A table
+        # missing from the target is already a HIGH finding whose fix is the
+        # CREATE TABLE plus a re-copy; listing its constraints too would just
+        # repeat the same problem three more times.
+        if compare_post_data:
+            items.extend(
+                post_data_items(t, inventory, mapped, target_schema, identifier_case)
+            )
+        if not include_tables:
+            # Objects scope: post-data rollups above are re-checked (they are the
+            # agent's work and must reflect the fixes it just applied), but the
+            # table's own structure/row-count item is not — no counts were taken,
+            # and the previous full report's item carries over in the merge.
+            continue
 
         fix = "\n".join(_add_column_sql(mapped[0], mapped[1], c)
                         for c in t.columns if c.name in cols_missing)
@@ -542,12 +923,17 @@ def _rollup(
 def merge_object_rescan(previous: ValidationReport, rescan: ValidationReport) -> ValidationReport:
     """Overlay an objects-only re-scan onto the previous full report.
 
-    Schema and code-object items come from the re-scan (so a fixed procedure
-    flips to matched, and one the agent failed to fix shows missing again);
-    table items — structure and row counts — carry over unchanged, keeping the
-    hero stats meaningful without re-counting every table. A schema that hosts
-    only tables is invisible to the objects scope (its schemas derive from the
-    code objects), so its previous item carries over too instead of vanishing.
+    Schema, code-object, and post-data (constraint/index/FK) items come from the
+    re-scan, so a fixed procedure or a newly created foreign key flips to
+    matched, and one the agent failed to fix shows missing again. Only the table
+    items — structure and row counts — carry over unchanged, keeping the hero
+    stats meaningful without re-counting every table. A schema that hosts only
+    tables is invisible to the objects scope (its schemas derive from the code
+    objects), so its previous item carries over too instead of vanishing.
+
+    Post-data items must NOT be carried over: they are precisely what the repair
+    agent fixes, so a stale copy would keep reporting a constraint the agent just
+    created as missing.
     """
     fresh = [i for i in rescan.items if i.kind is not ObjectKind.TABLE]
     fresh_ids = {i.id for i in fresh}
@@ -588,7 +974,11 @@ def run_validation(
     objects_only = scope == "objects"
 
     notify("Scanning source", 0, 0, "")
-    tables = [] if objects_only else scan_tables(source)
+    # Tables are scanned in both scopes: the objects scope skips their *row
+    # counts* (the slow part), but it still needs the table metadata to re-check
+    # constraints, indexes, and foreign keys — which the repair agent fixes, and
+    # which this fast pass exists to verify. The scan is catalog-only.
+    tables = scan_tables(source)
     objects = scan_objects(source)
 
     notify("Scanning Lakebase", 0, 0, "")
@@ -596,8 +986,9 @@ def run_validation(
     inventory = fetch_target_inventory(target, schemas)
 
     # Count only where the table exists on both sides — a missing table is
-    # already a finding; counting it would just fail.
-    both = [
+    # already a finding; counting it would just fail. The objects scope counts
+    # nothing at all: that is what makes it finish in seconds.
+    both = [] if objects_only else [
         t for t in tables
         if (
             map_schema(t.schema_name, target_schema, identifier_case),

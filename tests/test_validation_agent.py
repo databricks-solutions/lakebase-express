@@ -8,6 +8,7 @@ from backend.migration.models import ItemResult, ItemStatus, LakebaseConnRequest
 from backend.validation import agent
 from backend.validation.models import (
     MatchStatus,
+    ObjectDiff,
     RepairAttempt,
     RepairTarget,
     ValidationItem,
@@ -251,6 +252,54 @@ def test_sql_fixable_matches_the_fix_semantics():
     assert not agent.sql_fixable(_item(status=MatchStatus.EXTRA, source_name=""))  # removal, not conversion
     assert not agent.sql_fixable(_row_drift_item())                                # rows only
     assert agent.sql_fixable(_row_drift_item().model_copy(update={"columns_missing": ["Total"]}))
+
+
+def _rollup_item(**overrides) -> ValidationItem:
+    """A constraint/index/FK rollup: one item covering a table's objects of one kind."""
+    base = dict(
+        id="foreign_key:dbo.Orders", kind=ObjectKind.FOREIGN_KEY,
+        source_name="dbo.Orders", target_name="public.orders",
+        status=MatchStatus.MISMATCH, source_definition="",
+        detail="0 of 1 foreign keys present · 1 missing in the target",
+        objects=[ObjectDiff(name="FK_Cust", status=MatchStatus.MISSING)],
+        objects_expected=1, objects_present=0,
+        fix_sql='ALTER TABLE "public"."orders" ADD CONSTRAINT "fk_cust" '
+                'FOREIGN KEY ("CustomerId") REFERENCES "public"."customer" ("Id");',
+    )
+    base.update(overrides)
+    return ValidationItem(**base)
+
+
+def test_missing_constraint_rollup_is_agent_work():
+    # A rollup carries deterministic DDL for what is missing, so the agent can fix it.
+    assert agent.sql_fixable(_rollup_item())
+
+
+def test_extras_only_rollup_is_flagged_for_review_not_conversion(monkeypatch):
+    """Nothing the source defines is absent — the leftovers are target-only
+    objects, so this is a review-and-drop, not a conversion the agent should try."""
+    monkeypatch.setattr(
+        agent, "_propose",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("extras must not reach the model")),
+    )
+    monkeypatch.setattr(
+        agent, "apply_plan",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("nothing must be applied")),
+    )
+
+    extras_only = _rollup_item(
+        id="index:dbo.Orders", kind=ObjectKind.INDEX,
+        detail="1 of 1 indexes present · 1 only in the target",
+        objects=[ObjectDiff(name="orders_ix_adhoc", status=MatchStatus.EXTRA)],
+        objects_expected=1, objects_present=1,
+        fix_sql="",   # nothing missing to create
+    )
+    state = _run(_req(items=[extras_only]))
+    item = state.items[0]
+    assert item.gave_up and item.status == "failed"
+    # It must NOT get the row-count-drift advice, which is the wrong action here.
+    assert "only in Lakebase" in item.attempts[0].analysis
+    assert "Re-copy" not in item.attempts[0].analysis
 
 
 def _resp(content: str, finish_reason: str = "stop"):

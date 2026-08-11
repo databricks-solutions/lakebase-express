@@ -21,7 +21,7 @@ export const MODULES: { id: ModuleId; label: string; desc: string; step: number;
   { id: "schema", label: "Schema & Code", desc: "Generate and review the AI migration plan — DDL and translated Postgres code.", step: 3 },
   { id: "data", label: "Data Migration", desc: "Select the tables and load options to migrate.", step: 4 },
   { id: "sync", label: "Create Sync", desc: "Run the migration now in-app, or offload it to a re-runnable (optionally scheduled) Databricks snapshot job.", step: 5 },
-  { id: "validation", label: "Validation", desc: "Compare source and Lakebase — object coverage, row counts, and structure — then let the AI repair agent resolve inconsistencies, or fix them manually.", step: 0, group: "post" },
+  { id: "validation", label: "Validation", desc: "Compare source and Lakebase — object coverage, row counts, structure, and constraints/indexes/foreign keys — then let the AI repair agent resolve inconsistencies, or fix them manually.", step: 0, group: "post" },
   { id: "parity", label: "Query Parity", desc: "Generate synthetic read-only queries, run them against source and Lakebase, and compare row count, result format, and performance.", step: 0, group: "post" },
 ];
 

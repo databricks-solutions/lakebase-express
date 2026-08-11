@@ -126,6 +126,11 @@ def _clip_err(text: str) -> str:
     return text if len(text) <= _MAX_ERR_CHARS else text[:_MAX_ERR_CHARS] + "\n… (truncated)"
 
 
+# Kinds the comparator reports as one rollup item per table (constraints,
+# indexes, foreign keys) rather than one item per object.
+_ROLLUP_KINDS = frozenset({ObjectKind.CONSTRAINT, ObjectKind.INDEX, ObjectKind.FOREIGN_KEY})
+
+
 def sql_fixable(item: ValidationItem) -> bool:
     """Whether the agent should resolve the inconsistency. Missing objects always
     have a CREATE fix; a mismatch does only when it is structural — pure row-count
@@ -204,6 +209,16 @@ def _execute(run_id: str, req: ValidationRepairRequest) -> None:
                 analysis = ("This object exists only in the target — there is nothing "
                             "to convert. Review it and use Remove from target instead.")
                 error = "Removal, not conversion — not agent work."
+            elif item.kind in _ROLLUP_KINDS:
+                # A constraint/index/FK rollup with no fix SQL has nothing
+                # missing: every remaining entry is an extra object in the
+                # target, which is a review-and-drop, not a conversion.
+                analysis = (
+                    f"Every {item.kind.value.replace('_', ' ')} the source defines is present. "
+                    "The remaining differences are objects that exist only in Lakebase — "
+                    "review them and drop any that should not be there."
+                )
+                error = "Target-only objects — removal, not conversion."
             elif item.kind is ObjectKind.TABLE and item.target_rows is None:
                 analysis = ("The target row count could not be counted or estimated, so the "
                             "match is unverified — re-run the validation instead. If it "

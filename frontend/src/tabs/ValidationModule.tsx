@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type MatchStatus, type ObjectKind, type RepairState, type RunState, type ValidationItem, type ValidationRunState } from "../api";
+import { api, type MatchStatus, type ObjectDiff, type ObjectKind, type RepairState, type RunState, type ValidationItem, type ValidationRunState } from "../api";
 import type { MigrationState } from "../App";
 
 interface Props {
@@ -9,9 +9,13 @@ interface Props {
   fmEndpoint?: string;
 }
 
-// Validation currently compares the six original kinds; the post-data kinds
-// (constraint/index/foreign_key) are listed for label completeness.
-const KIND_ORDER: ObjectKind[] = ["schema", "table", "view", "function", "procedure", "trigger"];
+// Post-data kinds (constraint/index/foreign_key) come last, mirroring the order
+// the migration creates them in. They are compared as one rollup row per table
+// per kind rather than one row per object — a database can have hundreds.
+const KIND_ORDER: ObjectKind[] = [
+  "schema", "table", "view", "function", "procedure", "trigger",
+  "constraint", "index", "foreign_key",
+];
 const KIND_LABEL: Record<ObjectKind, string> = {
   schema: "Schemas", table: "Tables", view: "Views",
   function: "Functions", procedure: "Procedures", trigger: "Triggers",
@@ -32,6 +36,15 @@ const STATUS_ORDER: MatchStatus[] = ["missing", "mismatch", "extra", "matched"];
 // explanation without having to expand the row.
 const isNoteworthyMatch = (i: ValidationItem) =>
   i.status === "matched" && i.id.startsWith("trigger-fn:") && !!i.detail;
+
+// Constraints, indexes, and foreign keys are compared per table, as a count with
+// a per-object breakdown (backend/validation/models.ObjectDiff) — not one report
+// row per object, which would bury everything else on a real database.
+const ROLLUP_KINDS: ReadonlySet<ObjectKind> = new Set<ObjectKind>([
+  "constraint", "index", "foreign_key",
+]);
+const isRollup = (i: ValidationItem): i is ValidationItem & { objects: ObjectDiff[] } =>
+  ROLLUP_KINDS.has(i.kind) && Array.isArray(i.objects);
 
 type Tone = "ok" | "warn" | "err";
 const VERDICT: Record<Tone, { title: string; desc: string }> = {
@@ -641,6 +654,9 @@ function MatchRow({ item, open, onToggle, state, setState, fmEndpoint }: {
 }) {
   const meta = STATUS_META[item.status];
   const rows = item.kind === "table" && item.source_rows != null;
+  // Post-data rollups summarise many objects in one row — show the count so the
+  // collapsed row already says how much was checked, not just pass/fail.
+  const rollup = isRollup(item) ? item : null;
   return (
     <div className={`planrow ${open ? "is-open" : ""}`}>
       <button className="planrow__head" onClick={onToggle}>
@@ -650,6 +666,11 @@ function MatchRow({ item, open, onToggle, state, setState, fmEndpoint }: {
           {item.source_name || item.target_name}
           {item.source_name && <span className="trow__target"> → {item.target_name}</span>}
         </span>
+        {rollup && (
+          <span className="trow__rows">
+            {rollup.objects_present} / {rollup.objects_expected}
+          </span>
+        )}
         {rows && (
           <span className="trow__rows">
             {item.rows_approximate ? "≈ " : ""}
@@ -667,6 +688,9 @@ function MatchRow({ item, open, onToggle, state, setState, fmEndpoint }: {
         <div className="planrow__body">
           {item.detail && <div className="finding__detail">{item.detail}</div>}
           {item.recommendation && <div className="finding__rec">{item.recommendation}</div>}
+          {/* The rollup's counts are only actionable if the user can see WHICH
+              objects are missing — list them, worst first. */}
+          {rollup && <ObjectList objects={rollup.objects!} />}
           {item.remediated && (
             <div className="banner banner--ok">A fix was applied — re-run the validation to verify it.</div>
           )}
@@ -814,7 +838,9 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
 
   const hasStructDiff = item.kind === "table" &&
     (rowsDiffer || item.columns_missing.length > 0 || item.columns_extra.length > 0 || item.type_drift.length > 0);
-  const hasSourcePane = !!item.source_definition || hasStructDiff;
+  // A rollup's breakdown is already listed above the panel by MatchRow, so the
+  // editor gets the full width instead of repeating it in a source pane.
+  const hasSourcePane = (!!item.source_definition || hasStructDiff) && !isRollup(item);
 
   return (
     <div className="phasebox">
@@ -928,6 +954,46 @@ function FixPane({ title, copyText, children }: { title: string; copyText?: stri
 }
 
 /** Structured source-vs-target diff for a mismatched table (rows + columns). */
+/** The objects behind a constraint/index/FK rollup, problems first — a "3 of 5
+ *  present" count is only useful next to the names of the missing two. Matched
+ *  objects are listed too (collapsed to the tail) so the row also answers
+ *  "what DID migrate?". */
+function ObjectList({ objects }: { objects: ObjectDiff[] }) {
+  const SIGN: Record<MatchStatus, { sign: string; cls: string }> = {
+    missing: { sign: "−", cls: "err" },
+    mismatch: { sign: "≠", cls: "warn" },
+    extra: { sign: "+", cls: "info" },
+    matched: { sign: "✓", cls: "ok" },
+  };
+  const ordered = [...objects].sort(
+    (a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status),
+  );
+  return (
+    <div className="coldiff">
+      {ordered.map((o, i) => (
+        <div key={i} className="coldiff__row">
+          <span className={`coldiff__sign coldiff__sign--${SIGN[o.status].cls}`}>
+            {SIGN[o.status].sign}
+          </span>
+          <span className="coldiff__name">{o.name}</span>
+          <span className="coldiff__note">
+            {o.detail}
+            {/* Check predicates and defaults are compared by existence, not text
+                (T-SQL and Postgres spell the same predicate differently), so show
+                the source expression for the user to eyeball. */}
+            {o.source_definition && (
+              <>
+                {o.detail ? " · " : ""}
+                <code>{o.source_definition}</code>
+              </>
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function TableDiff({ item }: { item: ValidationItem }) {
   const rows: { sign: string; cls: string; name: string; note: string }[] = [];
   if (item.source_rows != null && item.target_rows != null && item.source_rows !== item.target_rows) {

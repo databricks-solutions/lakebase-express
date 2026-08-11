@@ -26,18 +26,20 @@ from backend.schema_migration.expr_mapper import (
     map_expression,
     sequence_ref_in,
 )
-from backend.schema_migration.naming import IdentifierCase, map_object, map_schema
+from backend.schema_migration.naming import (
+    IdentifierCase,
+    index_name,
+    map_object,
+    map_schema,
+    mapped_identifier,
+    primary_key_name,
+)
 from backend.schema_migration.type_mapper import map_type
 
-# Postgres truncates identifiers at 63 bytes; generated names are cut explicitly
-# so the DO-block existence checks compare the same name Postgres stores.
-_MAX_IDENT = 63
-
-
-def _ident(
-    name: str, identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE
-) -> str:
-    return map_object(name, identifier_case)[:_MAX_IDENT]
+# Constraint/index naming lives in schema_migration/naming.py — the validation
+# comparator has to look for exactly the names created here, so the rules are
+# shared rather than duplicated.
+_ident = mapped_identifier
 
 
 def _fq(
@@ -94,7 +96,7 @@ def primary_key_ddl(
 ) -> str:
     """ADD PRIMARY KEY, guarded so a re-run (or an already-keyed table) is a no-op."""
     fq = _fq(schema, table.table_name, identifier_case)
-    name = _ident(f"pk_{map_object(table.table_name, identifier_case)}", identifier_case)
+    name = primary_key_name(table.table_name, identifier_case)
     cols = ", ".join(f'"{c}"' for c in table.primary_key)
     return (
         "DO $$\nBEGIN\n"
@@ -156,10 +158,7 @@ def index_ddl(
     """CREATE (UNIQUE) INDEX IF NOT EXISTS. The name is prefixed with the table
     (source index names are per-table; Postgres index names are per-schema)."""
     fq = _fq(schema, table_name, identifier_case)
-    name = _ident(
-        f"{map_object(table_name, identifier_case)}_{map_object(idx.name, identifier_case)}",
-        identifier_case,
-    )
+    name = index_name(idx.name, table_name, identifier_case)
     cols = ", ".join(f'"{c.name}"' + (" DESC" if c.descending else "") for c in idx.columns)
     unique = "UNIQUE " if idx.is_unique else ""
     include_cols = ", ".join(f'"{c}"' for c in idx.include_columns)
