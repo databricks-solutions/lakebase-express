@@ -27,9 +27,9 @@ export const SOURCE_CONNECTORS: Connector[] = [
     color: "#0078D4",
     enabled: true,
     hostPlaceholder: "myserver.database.windows.net",
-    usernamePlaceholder: "user@servername",
+    usernamePlaceholder: "your-username",
     defaultPort: 1433,
-    connectionNote: "Azure SQL requires the login in user@servername form and an open firewall rule for this app's egress IP.",
+    connectionNote: "The Azure SQL firewall must allow this app's egress IP (or \"Allow Azure services\").",
   },
   {
     id: "sql-server",

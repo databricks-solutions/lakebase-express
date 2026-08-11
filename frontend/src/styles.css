@@ -390,6 +390,7 @@ a { color: var(--primary); }
 .banner--ok { background: var(--ok-weak); color: var(--ok); }
 .banner--err { background: var(--err-weak); color: var(--err); }
 .banner--warn { background: var(--warn-weak); color: var(--warn); }
+.banner--info { background: var(--primary-weak); color: var(--primary-ink); }
 
 /* ---------- Report ---------- */
 .metrics { display: flex; gap: 22px; flex-wrap: wrap; }
