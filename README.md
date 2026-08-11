@@ -42,7 +42,8 @@ PostgreSQL, MySQL, …) "Coming soon".
 
 The scan and assessment run without a Databricks workspace; the Foundation Model
 features and the Job-offload/Async data paths require one, plus
-[grants on `system.ai`](#foundation-model-access-unity-catalog-grants).
+[grants on `system.ai`](#foundation-model-access-unity-catalog-grants). The source
+login needs [three grants](#source-database-grants) to be assessable.
 
 ## Quick Start
 
@@ -333,6 +334,25 @@ the public registry to prevent this — npm still downloads from a mirror in you
 If you commit from behind a mirror, run `npm run lockfile:check` in `frontend/`
 first (`lockfile:normalize` fixes it).
 
+### Source database grants
+
+The source user needs some read only grants:
+
+```sql
+GRANT CONNECT             TO [<login>];
+GRANT VIEW DEFINITION     TO [<login>];  -- object definitions to translate
+GRANT VIEW DATABASE STATE TO [<login>];  -- row counts
+ALTER ROLE db_datareader ADD MEMBER [<login>];
+```
+
+Nothing ever writes to the source — no `db_datawriter`, `db_ddladmin`, or
+`db_owner` is required.
+
+Run `scripts/source_grants.sql` to apply all of the above (idempotent, one run per
+database); it ends with a verification query. If a scan still fails or comes back
+short, `scripts/assessment_scan_queries.sql` runs the scanner's queries
+individually to show which one is the problem.
+
 ### Testing and debugging the source connection
 
 `scripts/azure_sql_connect.py` reproduces a failing **Test connection** from a
@@ -352,6 +372,7 @@ PYTHONPATH=. python3 scripts/azure_sql_connect.py
 # Or keep them in a file the probe parses itself
 cp .vscode/azure_sql.env.sample .vscode/azure_sql.env   # gitignored — fill it in
 PYTHONPATH=. python3 scripts/azure_sql_connect.py --env-file .vscode/azure_sql.env
+```
 
 To step through it in VS Code, use the **Azure SQL probe (env file)** launch
 configuration in `.vscode/launch.json`, which reads `.vscode/azure_sql.env` and
