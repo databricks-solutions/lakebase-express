@@ -107,12 +107,56 @@ missing.
 | **Schema & Code** | Build an editable plan (DDL + AI-translated code) and apply it to Lakebase |
 | **Data Migration** | Stream data into Lakebase (batched `COPY`) with live per-table progress |
 | **Create Sync** | Sync now (in-app) or offload a re-runnable PySpark snapshot to a Databricks Job (run now, create unstarted, or schedule) |
-| **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
+| **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, column collations, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
 | **Query Parity** *(post-migration)* | Generate N synthetic read-only queries, run each against both sides, and compare row count, result format, and performance — with a side-by-side result preview on any mismatch |
 
 Target identifiers are lower-cased by default (PostgreSQL convention); a project
 can instead **preserve source casing** (double-quoted, case-sensitive). System
 objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
+
+### Collations
+
+Column **collations are translated, not dropped**. SQL Server's usual collations
+are case-insensitive (`SQL_Latin1_General_CP1_CI_AS`, the Azure SQL default),
+while PostgreSQL's default is case-**sensitive** — so a migration that ignores
+collation silently changes results: `'ana' = 'ANA'` flips to false, `ORDER BY`
+returns a different order, `GROUP BY`/`DISTINCT` stop collapsing rows that used
+to match, and a unique index starts accepting pairs the source rejected. Nothing
+errors; the answers just change.
+
+Each distinct source collation therefore becomes a Postgres ICU collation created
+before the tables that use it, and every character column carries a `COLLATE`
+clause:
+
+```sql
+CREATE COLLATION IF NOT EXISTS "public"."sql_latin1_general_cp1_ci_as"
+    (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+
+CREATE TABLE IF NOT EXISTS "public"."customer" (
+    "Name" varchar(50) COLLATE "public"."sql_latin1_general_cp1_ci_as" NOT NULL
+);
+```
+
+The source's comparison strength maps to an ICU level — `CS_AS` → `level3`,
+`CI_AS` → `level2`, `CS_AI` → `level1-kc-true`, `CI_AI` → `level1` — and the
+locale maps to the closest ICU tag (`Modern_Spanish` → `es`,
+`Chinese_Taiwan_Stroke` → `zh-Hant-u-co-stroke`; `Latin1_General` carries no
+language, so it maps to the ICU root `und`). A `_BIN`/`_BIN2` collation becomes
+the built-in `C`.
+
+**The one trade-off:** case- or accent-insensitive equality requires a
+*nondeterministic* collation — a deterministic one still compares bytes for
+equality and would fix only sort order. PostgreSQL does not support `LIKE` or
+regex pattern matching on a nondeterministic collation, so queries that
+pattern-match those columns need `lower(col) LIKE lower(?)` or an explicit
+`COLLATE "C"` on the operand.
+
+The assessment reports this up front rather than letting it surface at apply
+time: `COLLATION_INSENSITIVE` (MEDIUM) lists every affected column, and
+`COLLATION_PATTERN_MATCH` (HIGH) flags each CHECK constraint or filtered index
+that pattern-matches one — those are certain to fail when applied. Validation
+then compares the collation of each target column, so a dropped or wrong one is
+reported alongside type drift and can be fixed with generated SQL.
 
 ## How it works
 
@@ -127,6 +171,9 @@ objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
   the UI polls; large tables can be offloaded to a Databricks Job or a PySpark
   **snapshot** (range-partitioned reads → per-partition `COPY`, tables loaded
   concurrently, idempotent re-runs).
+- **Collations** are mirrored as ICU collations created before the tables whose
+  columns reference them, so string comparison keeps the source's case/accent
+  semantics (see [Collations](#collations)).
 - **Constraints, indexes, FKs, and triggers** are created **after** the data
   load, so the bulk copy pays no per-row maintenance and identity sequences sync
   to `MAX+1` once rows exist.

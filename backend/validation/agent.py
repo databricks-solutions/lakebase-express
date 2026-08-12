@@ -141,7 +141,10 @@ def sql_fixable(item: ValidationItem) -> bool:
         return True
     if item.status is MatchStatus.EXTRA:
         return False
-    return bool(item.columns_missing or item.columns_extra or item.type_drift or item.fix_sql)
+    return bool(
+        item.columns_missing or item.columns_extra or item.type_drift
+        or item.collation_drift or item.fix_sql
+    )
 
 
 def _build_user_prompt(item: ValidationItem, state: RepairItemState, target_schema: str) -> str:

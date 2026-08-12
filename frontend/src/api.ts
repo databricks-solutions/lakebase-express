@@ -215,7 +215,7 @@ export interface LakebaseConn {
 }
 
 export type ObjectKind =
-  | "schema" | "table" | "function" | "view" | "procedure" | "trigger"
+  | "schema" | "collation" | "table" | "function" | "view" | "procedure" | "trigger"
   | "constraint" | "index" | "foreign_key";
 
 // Mirror of backend/migration/models.py POST_DATA_KINDS: plan items applied
@@ -364,6 +364,8 @@ export interface ValidationItem {
   columns_missing: string[];
   columns_extra: string[];
   type_drift: string[];
+  // Same values, different string comparison (case-sensitivity, sort order).
+  collation_drift?: string[];
   // Constraint/index/foreign-key rollups only.
   objects?: ObjectDiff[];
   objects_expected?: number;

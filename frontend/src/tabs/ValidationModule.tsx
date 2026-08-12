@@ -13,11 +13,11 @@ interface Props {
 // the migration creates them in. They are compared as one rollup row per table
 // per kind rather than one row per object — a database can have hundreds.
 const KIND_ORDER: ObjectKind[] = [
-  "schema", "table", "view", "function", "procedure", "trigger",
+  "schema", "collation", "table", "view", "function", "procedure", "trigger",
   "constraint", "index", "foreign_key",
 ];
 const KIND_LABEL: Record<ObjectKind, string> = {
-  schema: "Schemas", table: "Tables", view: "Views",
+  schema: "Schemas", collation: "Collations", table: "Tables", view: "Views",
   function: "Functions", procedure: "Procedures", trigger: "Triggers",
   constraint: "Constraints", index: "Indexes", foreign_key: "Foreign keys",
 };
@@ -314,7 +314,8 @@ function MatchDonut({ value, tone }: { value: number; tone: Tone }) {
 function sqlFixable(i: ValidationItem): boolean {
   if (i.status === "missing") return true;
   if (i.status === "extra") return false;
-  return i.columns_missing.length > 0 || i.columns_extra.length > 0 || i.type_drift.length > 0 || !!i.fix_sql;
+  return i.columns_missing.length > 0 || i.columns_extra.length > 0 || i.type_drift.length > 0 ||
+    (i.collation_drift ?? []).length > 0 || !!i.fix_sql;
 }
 
 /** The repair-agent idea, moved here from Create Sync: one click hands every open
@@ -837,7 +838,8 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
   }
 
   const hasStructDiff = item.kind === "table" &&
-    (rowsDiffer || item.columns_missing.length > 0 || item.columns_extra.length > 0 || item.type_drift.length > 0);
+    (rowsDiffer || item.columns_missing.length > 0 || item.columns_extra.length > 0 ||
+      item.type_drift.length > 0 || (item.collation_drift ?? []).length > 0);
   // A rollup's breakdown is already listed above the panel by MatchRow, so the
   // editor gets the full width instead of repeating it in a source pane.
   const hasSourcePane = (!!item.source_definition || hasStructDiff) && !isRollup(item);
@@ -1007,6 +1009,13 @@ function TableDiff({ item }: { item: ValidationItem }) {
   item.type_drift.forEach((d) => {
     const [name, ...rest] = d.split(":");
     rows.push({ sign: "≠", cls: "warn", name: name.trim(), note: rest.join(":").trim() });
+  });
+  (item.collation_drift ?? []).forEach((d) => {
+    const [name, ...rest] = d.split(":");
+    rows.push({
+      sign: "≠", cls: "warn", name: name.trim(),
+      note: `collation — ${rest.join(":").trim()}`,
+    });
   });
   return (
     <div className="coldiff">

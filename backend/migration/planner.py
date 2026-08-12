@@ -4,8 +4,8 @@ Each plan item carries the exact SQL that will be applied to Lakebase, so the
 user can review and edit it before execution. Table DDL is generated from the
 type mapper; code objects are (optionally) translated by the Foundation Model.
 
-The plan has two phases. Pre-data items (schemas, tables, functions, views,
-procedures) are applied before the data load; post-data items (constraints,
+The plan has two phases. Pre-data items (schemas, collations, tables, functions,
+views, procedures) are applied before the data load; post-data items (constraints,
 indexes, foreign keys, triggers — see POST_DATA_KINDS) only after it, so the
 bulk COPY runs against bare tables and identity sequences can sync to the
 loaded data.
@@ -17,6 +17,7 @@ from typing import Callable
 from backend.assessment.models import ProgrammableObject, TableInfo
 from backend.migration.models import ObjectKind, PlanItem
 from backend.schema_migration.ai_translator import translate_all
+from backend.schema_migration.collation_mapper import collect_collations
 from backend.schema_migration.ddl_generator import (
     check_constraint_ddl,
     column_default_ddl,
@@ -54,6 +55,15 @@ def build_plan(
     # distinct source schema.
     sources = [t.schema_name for t in tables] + [o.schema_name for o in objects]
     schema_map = {s: map_schema(s, target_schema, identifier_case) for s in sources}
+
+    # Created before the tables that reference them, all in the default target
+    # schema since a collation is shared across schemas.
+    collation_schema = map_schema("dbo", target_schema, identifier_case)
+    usage = collect_collations(tables)
+
+    # The collation schema gets an item too, even when no table maps to it — the
+    # collations are created there and would otherwise have nowhere to land.
+    schemas = set(schema_map.values()) | ({collation_schema} if usage.created() else set())
     items: list[PlanItem] = [
         PlanItem(
             id=f"schema:{ms}",
@@ -62,8 +72,38 @@ def build_plan(
             sql=schema_ddl(ms),
             notes="Creates the target schema if it does not exist.",
         )
-        for ms in sorted(set(schema_map.values()))
+        for ms in sorted(schemas)
     ]
+
+    for coll in usage.created():
+        used_by = usage.columns.get(coll.name, [])
+        source_name = coll.source.name if coll.source else coll.name
+        strength = coll.source.strength_label if coll.source else ""
+        note = (
+            f"Mirrors the source collation {source_name} ({strength}) so string "
+            f"comparison keeps the source's semantics. Used by {len(used_by)} column(s)."
+        )
+        if not coll.deterministic:
+            note += (
+                " Created as nondeterministic — that is what makes equality itself "
+                "ignore case/accents, as in SQL Server. Postgres does not support "
+                "LIKE or pattern matching on these columns."
+            )
+        if coll.locale_fallback:
+            note += (
+                f" The source locale was not recognised, so the ICU root locale is used "
+                f"with the same strength — review the sort order if this collation is "
+                f"language-specific."
+            )
+        items.append(
+            PlanItem(
+                id=f"collation:{source_name}",
+                kind=ObjectKind.COLLATION,
+                name=f"{collation_schema}.{coll.name}",
+                sql=coll.ddl(collation_schema),
+                notes=note,
+            )
+        )
 
     for t in tables:
         ms = schema_map[t.schema_name]
@@ -72,7 +112,7 @@ def build_plan(
                 id=f"table:{t.schema_name}.{t.table_name}",
                 kind=ObjectKind.TABLE,
                 name=f"{ms}.{map_object(t.table_name, identifier_case)}",
-                sql=table_ddl(t, ms, identifier_case),
+                sql=table_ddl(t, ms, identifier_case, collation_schema),
                 notes=f"{t.column_count} columns · {t.row_count:,} rows · source {t.fqn}.",
             )
         )
