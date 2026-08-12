@@ -127,13 +127,25 @@ level (`CI_AS` → `level2`, `CI_AI` → `level1`, `CS_AS` → `level3`), the lo
 the closest ICU tag, and `_BIN`/`_BIN2` to the built-in `C`.
 
 Case- or accent-insensitive collations must be **nondeterministic** — otherwise
-equality stays byte-wise and only sorting changes. PostgreSQL rejects pattern
-matching on those, so `LIKE` needs a deterministic collation on the operand
-(`email COLLATE "C" ILIKE '%gmail%'`; `lower(email) LIKE …` does *not* work, since
-`lower()` keeps the column's collation). The assessment flags every affected column
-(`COLLATION_INSENSITIVE`) and any CHECK or filtered index that pattern-matches one
-(`COLLATION_PATTERN_MATCH`, which will fail to apply); Validation compares each
-target column's collation and reports drift with a fix.
+equality stays byte-wise and only sorting changes. The assessment flags every
+affected column (`COLLATION_INSENSITIVE`) and any CHECK or filtered index that
+pattern-matches one (`COLLATION_PATTERN_MATCH`, which will fail to apply);
+Validation compares each target column's collation and reports drift with a fix.
+
+**Queries that `LIKE` those columns must be rewritten.** PostgreSQL rejects
+pattern matching on a nondeterministic collation, so put a deterministic
+collation on the operand and use `ILIKE` to keep the case-insensitive result:
+
+```sql
+WHERE email LIKE '%gmail%'                  -- ERROR: not supported for LIKE
+WHERE email COLLATE "C" ILIKE '%gmail%'     -- same rows as the source
+```
+
+Two traps: plain `LIKE` after `COLLATE "C"` is case-**sensitive** (fewer rows than
+the source), and `lower(email) LIKE lower(?)` is rejected too — `lower()`'s result
+keeps the column's collation. For an accent-*insensitive* source collation
+(`..._CI_AI`), `ILIKE` alone still under-matches; wrap both sides in `unaccent()`
+(available on Lakebase via `CREATE EXTENSION unaccent`).
 
 ## How it works
 
