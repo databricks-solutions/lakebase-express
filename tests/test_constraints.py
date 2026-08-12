@@ -162,6 +162,59 @@ def test_bit_column_default_becomes_boolean():
     assert off.endswith('SET DEFAULT false;')
 
 
+def test_bit_comparison_in_filtered_index_becomes_boolean():
+    # A filtered index on a bit column ("WHERE ([Active]=(1))") failed to apply:
+    # bit maps to Postgres boolean, and "boolean = integer" is an error there
+    # rather than a silent coercion. The predicate needs the column's type, which
+    # a DEFAULT gets but an index filter historically did not.
+    cols = [ColumnInfo(name="Email", data_type="nvarchar", max_length=120),
+            ColumnInfo(name="Active", data_type="bit")]
+    idx = IndexInfo(name="IX_Active", columns=[IndexColumnInfo(name="Email")],
+                    filter_definition="([Active]=(1))")
+    ddl = index_ddl(idx, "CollationSearch", "public", IdentifierCase.LOWERCASE, cols)
+    assert 'WHERE ("Active" = (true))' in ddl
+    assert "=(1)" not in ddl
+
+
+def test_bit_comparison_keeps_parentheses_balanced():
+    # The literal's own parens must be kept and the predicate's outer paren left
+    # alone; a greedy match would swallow it and emit unbalanced SQL.
+    cols = [ColumnInfo(name="Active", data_type="bit")]
+    for src, want in [
+        ("([Active]=(1))", '("Active" = (true))'),
+        ("([Active]=1)", '("Active" = true)'),
+        ("([Active]<>(0))", '("Active" <> (false))'),
+        ("((([Active]=(1))))", '((("Active" = (true))))'),
+    ]:
+        got = map_expression(src, columns=cols)
+        assert got == want, f"{src} -> {got}"
+        assert got.count("(") == got.count(")")
+
+
+def test_bit_rewrite_only_touches_bit_columns():
+    cols = [ColumnInfo(name="Active", data_type="bit"),
+            ColumnInfo(name="Qty", data_type="int"),
+            ColumnInfo(name="Code", data_type="nvarchar", max_length=5)]
+    # An int compared to 1 is already valid Postgres; a '1' string literal is not
+    # a boolean; IS NULL works on boolean unchanged. None may be rewritten.
+    assert map_expression("([Qty]=(1))", columns=cols) == '("Qty"=(1))'
+    assert map_expression("([Code]='1')", columns=cols) == '("Code"=\'1\')'
+    assert map_expression("([Active] IS NULL)", columns=cols) == '("Active" IS NULL)'
+    # Not a 0/1 literal: left verbatim to fail visibly rather than be guessed at.
+    assert map_expression("([Active]=(2))", columns=cols) == '("Active"=(2))'
+    # No column context: unchanged, so callers that can't supply it still work.
+    assert map_expression("([Active]=(1))") == '("Active"=(1))'
+
+
+def test_bit_comparison_in_check_constraint_becomes_boolean():
+    cols = [ColumnInfo(name="Active", data_type="bit")]
+    ddl = check_constraint_ddl(
+        CheckConstraintInfo(name="CK_Active", definition="([Active]=(1))"),
+        "Thing", "public", IdentifierCase.LOWERCASE, cols,
+    )
+    assert 'CHECK (("Active" = (true)))' in ddl
+
+
 def test_convert_default_becomes_postgres_cast():
     # (CONVERT([datetime2](7),getdate())) is a very common SQL Server default. The
     # bracketed type must not survive as a quoted identifier: "datetime2"(7) reads

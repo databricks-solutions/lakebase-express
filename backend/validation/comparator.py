@@ -608,7 +608,9 @@ def post_data_items(
     for chk in t.check_constraints:
         name = mapped_identifier(chk.name, identifier_case)
         expected.append((name, f"CHECK {chk.name}", chk.definition, None))
-        fix_for[name] = check_constraint_ddl(chk, t.table_name, tgt_schema, identifier_case)
+        fix_for[name] = check_constraint_ddl(
+            chk, t.table_name, tgt_schema, identifier_case, t.columns
+        )
     present.extend(inv.checks.get(mapped, []))
 
     # Defaults and identity are column attributes, not named constraints, so they
@@ -653,7 +655,7 @@ def post_data_items(
         label = f"{'UNIQUE ' if idx.is_unique else ''}INDEX {idx.name}"
         expected.append((name, label, idx.filter_definition or "",
                          tuple(c.name for c in idx.columns)))
-        fix_for[name] = index_ddl(idx, t.table_name, tgt_schema, identifier_case)
+        fix_for[name] = index_ddl(idx, t.table_name, tgt_schema, identifier_case, t.columns)
     item = _post_data_rollup(
         t, inv, mapped, kind=ObjectKind.INDEX, expected=expected,
         present=inv.indexes.get(mapped, []), fix_for=fix_for,

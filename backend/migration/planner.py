@@ -213,7 +213,7 @@ def _post_data_items(
                     id=f"check:{src}.{chk.name}",
                     kind=ObjectKind.CONSTRAINT,
                     name=f"{target} · CHECK {map_object(chk.name, identifier_case)}",
-                    sql=check_constraint_ddl(chk, t.table_name, ms, identifier_case),
+                    sql=check_constraint_ddl(chk, t.table_name, ms, identifier_case, t.columns),
                     notes=f"Check constraint (source: {chk.definition}) — translated "
                           f"mechanically, review the predicate. {_POST_DATA_NOTE}",
                 )
@@ -229,7 +229,7 @@ def _post_data_items(
                     id=f"index:{t.schema_name}.{t.table_name}.{idx.name}",
                     kind=ObjectKind.INDEX,
                     name=f"{target} · {map_object(idx.name, identifier_case)}",
-                    sql=index_ddl(idx, t.table_name, ms, identifier_case),
+                    sql=index_ddl(idx, t.table_name, ms, identifier_case, t.columns),
                     notes=f"{'Unique index' if idx.is_unique else 'Index'} on ({cols}). "
                           f"{_POST_DATA_NOTE}",
                 )

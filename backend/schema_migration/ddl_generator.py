@@ -18,6 +18,7 @@ from __future__ import annotations
 from backend.assessment.models import (
     CheckConstraintInfo,
     ColumnDefaultInfo,
+    ColumnInfo,
     ForeignKeyInfo,
     IndexInfo,
     TableInfo,
@@ -174,16 +175,23 @@ def index_ddl(
     table_name: str,
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    columns: list[ColumnInfo] | None = None,
 ) -> str:
     """CREATE (UNIQUE) INDEX IF NOT EXISTS. The name is prefixed with the table
-    (source index names are per-table; Postgres index names are per-schema)."""
+    (source index names are per-table; Postgres index names are per-schema).
+
+    ``columns`` is the table's scanned columns, needed to translate a filter that
+    compares a ``bit`` column to 0/1 (see ``expr_mapper.map_expression``)."""
     fq = _fq(schema, table_name, identifier_case)
     name = index_name(idx.name, table_name, identifier_case)
     cols = ", ".join(f'"{c.name}"' + (" DESC" if c.descending else "") for c in idx.columns)
     unique = "UNIQUE " if idx.is_unique else ""
     include_cols = ", ".join(f'"{c}"' for c in idx.include_columns)
     include = f" INCLUDE ({include_cols})" if idx.include_columns else ""
-    where = f" WHERE {map_expression(idx.filter_definition)}" if idx.filter_definition else ""
+    where = (
+        f" WHERE {map_expression(idx.filter_definition, columns=columns)}"
+        if idx.filter_definition else ""
+    )
     return f'CREATE {unique}INDEX IF NOT EXISTS "{name}" ON {fq} ({cols}){include}{where};'
 
 
@@ -220,10 +228,14 @@ def check_constraint_ddl(
     table_name: str,
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    columns: list[ColumnInfo] | None = None,
 ) -> str:
+    """ADD CONSTRAINT ... CHECK (guarded by constraint name). ``columns`` is the
+    table's scanned columns, needed to translate a ``bit`` comparison in the
+    predicate (see ``expr_mapper.map_expression``)."""
     fq = _fq(schema, table_name, identifier_case)
     name = _ident(chk.name, identifier_case)
-    predicate = map_expression(chk.definition)
+    predicate = map_expression(chk.definition, columns=columns)
     return (
         "DO $$\nBEGIN\n"
         "    IF NOT EXISTS (\n"
@@ -312,7 +324,7 @@ def post_data_ddl(
         for chk in t.check_constraints:
             out.append((
                 f"{name} · CHECK {map_object(chk.name, identifier_case)}",
-                check_constraint_ddl(chk, t.table_name, schema, identifier_case),
+                check_constraint_ddl(chk, t.table_name, schema, identifier_case, t.columns),
             ))
     for t in tables:
         schema = map_schema(t.schema_name, target_schema, identifier_case)
@@ -320,7 +332,7 @@ def post_data_ddl(
         for idx in t.indexes:
             out.append((
                 f"{name} · INDEX {map_object(idx.name, identifier_case)}",
-                index_ddl(idx, t.table_name, schema, identifier_case),
+                index_ddl(idx, t.table_name, schema, identifier_case, t.columns),
             ))
     for t in tables:
         schema = map_schema(t.schema_name, target_schema, identifier_case)
