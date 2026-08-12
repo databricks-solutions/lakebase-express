@@ -116,47 +116,24 @@ objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
 
 ### Collations
 
-Column **collations are translated, not dropped**. SQL Server's usual collations
-are case-insensitive (`SQL_Latin1_General_CP1_CI_AS`, the Azure SQL default),
-while PostgreSQL's default is case-**sensitive** — so a migration that ignores
-collation silently changes results: `'ana' = 'ANA'` flips to false, `ORDER BY`
-returns a different order, `GROUP BY`/`DISTINCT` stop collapsing rows that used
-to match, and a unique index starts accepting pairs the source rejected. Nothing
-errors; the answers just change.
+Column collations are **translated, not dropped**. SQL Server's usual collations
+are case-insensitive (`SQL_Latin1_General_CP1_CI_AS`, the Azure SQL default) and
+PostgreSQL's default is case-sensitive, so ignoring them silently changes results —
+`'ana' = 'ANA'`, sort order, `GROUP BY`, unique indexes — without raising an error.
 
-Each distinct source collation therefore becomes a Postgres ICU collation created
-before the tables that use it, and every character column carries a `COLLATE`
-clause:
+Each source collation becomes an ICU collation created before the tables using it,
+and every character column carries a `COLLATE` clause. Strength maps to an ICU
+level (`CI_AS` → `level2`, `CI_AI` → `level1`, `CS_AS` → `level3`), the locale to
+the closest ICU tag, and `_BIN`/`_BIN2` to the built-in `C`.
 
-```sql
-CREATE COLLATION IF NOT EXISTS "public"."sql_latin1_general_cp1_ci_as"
-    (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
-
-CREATE TABLE IF NOT EXISTS "public"."customer" (
-    "Name" varchar(50) COLLATE "public"."sql_latin1_general_cp1_ci_as" NOT NULL
-);
-```
-
-The source's comparison strength maps to an ICU level — `CS_AS` → `level3`,
-`CI_AS` → `level2`, `CS_AI` → `level1-kc-true`, `CI_AI` → `level1` — and the
-locale maps to the closest ICU tag (`Modern_Spanish` → `es`,
-`Chinese_Taiwan_Stroke` → `zh-Hant-u-co-stroke`; `Latin1_General` carries no
-language, so it maps to the ICU root `und`). A `_BIN`/`_BIN2` collation becomes
-the built-in `C`.
-
-**The one trade-off:** case- or accent-insensitive equality requires a
-*nondeterministic* collation — a deterministic one still compares bytes for
-equality and would fix only sort order. PostgreSQL does not support `LIKE` or
-regex pattern matching on a nondeterministic collation, so queries that
-pattern-match those columns need `lower(col) LIKE lower(?)` or an explicit
-`COLLATE "C"` on the operand.
-
-The assessment reports this up front rather than letting it surface at apply
-time: `COLLATION_INSENSITIVE` (MEDIUM) lists every affected column, and
-`COLLATION_PATTERN_MATCH` (HIGH) flags each CHECK constraint or filtered index
-that pattern-matches one — those are certain to fail when applied. Validation
-then compares the collation of each target column, so a dropped or wrong one is
-reported alongside type drift and can be fixed with generated SQL.
+Case- or accent-insensitive collations must be **nondeterministic** — otherwise
+equality stays byte-wise and only sorting changes. PostgreSQL rejects pattern
+matching on those, so `LIKE` needs a deterministic collation on the operand
+(`email COLLATE "C" ILIKE '%gmail%'`; `lower(email) LIKE …` does *not* work, since
+`lower()` keeps the column's collation). The assessment flags every affected column
+(`COLLATION_INSENSITIVE`) and any CHECK or filtered index that pattern-matches one
+(`COLLATION_PATTERN_MATCH`, which will fail to apply); Validation compares each
+target column's collation and reports drift with a fix.
 
 ## How it works
 

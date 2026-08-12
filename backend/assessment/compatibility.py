@@ -234,9 +234,11 @@ def check_collations(tables: Iterable[TableInfo]) -> list[Finding]:
                 ),
                 recommendation=(
                     "Keep the mirrored collation for identical comparison semantics, and "
-                    "check whether queries LIKE/pattern-match these columns — those need "
-                    "an explicit COLLATE (e.g. \"C\") on the pattern operand, or a "
-                    "case-folded expression such as lower(col) LIKE lower(?)."
+                    "check whether queries LIKE/pattern-match these columns. Those need an "
+                    'explicit deterministic collation on the operand — col COLLATE "C" '
+                    "ILIKE '...' keeps the case-insensitive result. Note that lower(col) "
+                    "alone is NOT enough: the result of lower() inherits the column's "
+                    'collation, so it is still rejected (lower(col) COLLATE "C" works).'
                 ),
             ))
 
@@ -284,9 +286,11 @@ def check_collations(tables: Iterable[TableInfo]) -> list[Finding]:
                         f"collation, so this object will fail to apply. Predicate: {predicate}"
                     ),
                     recommendation=(
-                        "Rewrite the predicate to compare a case-folded value "
-                        "(e.g. lower(col) LIKE lower('...')) or to force a deterministic "
-                        'collation on the operand (col COLLATE "C" LIKE \'...\').'
+                        'Force a deterministic collation on the operand: col COLLATE "C" '
+                        "ILIKE '...' preserves the source's case-insensitive result "
+                        '(plain LIKE after COLLATE "C" becomes case-SENSITIVE). '
+                        "lower(col) on its own does not help — its result keeps the "
+                        "column's collation and is rejected just the same."
                     ),
                 ))
 
