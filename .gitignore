@@ -26,6 +26,10 @@ sqladmin.md
 *.secrets.md
 .databrickscfg
 
+# Local test fixtures that write to a real source database — kept out of the
+# repo so nobody runs them against a database they did not mean to.
+scripts/*_demo_source.py
+
 # Build artifacts
 frontend/test-results/
 frontend/tsconfig.tsbuildinfo

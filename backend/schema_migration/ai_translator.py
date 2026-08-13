@@ -42,6 +42,16 @@ Rules:
 - Convert: ISNULL->COALESCE, GETDATE()->now(), TOP n->LIMIT n, [id]->"id",
   '+' string concat-> ||, @@IDENTITY/SCOPE_IDENTITY-> RETURNING, TRY/CATCH->
   BEGIN...EXCEPTION, #temp-> TEMP TABLE, INSERTED/DELETED-> NEW/OLD.
+- COLLATE: a SQL Server collation name is not a Postgres one. The migration creates
+  each source collation in the target under its own lower-cased name (e.g.
+  COLLATE SQL_Latin1_General_CP1_CI_AS -> COLLATE "sql_latin1_general_cp1_ci_as"),
+  so keep the clause and just requote the name that way. A binary collation
+  (_BIN/_BIN2) becomes COLLATE "C". Note that case-insensitive collations are
+  nondeterministic in Postgres, so LIKE/regex against such a column is rejected.
+  If the source code pattern-matches one, put an explicit deterministic collation on
+  the operand: col COLLATE "C" ILIKE '...' keeps the case-insensitive result. Do NOT
+  use lower(col) LIKE lower(...) — lower()'s result inherits the column collation and
+  is rejected the same way. Say what you changed in notes.
 - If a construct has no faithful equivalent, keep best-effort code and explain in notes.
 - "translated" must contain ONLY executable PostgreSQL / PL-pgSQL — never prose,
   markdown fences, or JSON.

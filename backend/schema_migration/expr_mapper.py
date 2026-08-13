@@ -246,6 +246,51 @@ _NEXT_VALUE_FOR = re.compile(
 # the column maps to Postgres boolean, which won't take an integer default.
 _BOOL_LITERAL = re.compile(r"^\(*\s*([01])\s*\)*$")
 
+# ``"Col" = (1)`` / ``"Col" <> 0`` against a bit column, as T-SQL writes it in a
+# filtered-index or CHECK predicate. The column becomes Postgres boolean, where
+# comparing to an integer is an error ("operator does not exist: boolean =
+# integer") rather than a silent coercion — so the literal is rewritten to
+# true/false. Matched after the bracket pass, hence the double-quoted name.
+#
+# The literal's own parentheses are matched as a balanced pair rather than with a
+# greedy ``\)*``: T-SQL wraps the whole predicate too (``([Active]=(1))``), and a
+# greedy match would swallow that outer ``)`` and unbalance the expression.
+_BIT_COMPARISON = re.compile(
+    r'"(?P<col>[^"]+)"\s*(?P<op>=|<>|!=)\s*'
+    r'(?P<open>\(*)\s*(?P<value>[01])\s*(?P<close>\)*)'
+)
+
+# ``"Col" IS NULL`` and arithmetic on a bit column are left alone: IS NULL is
+# valid for boolean, and anything beyond a straight 0/1 comparison is unusual
+# enough that guessing would risk changing meaning (this module's fail-visibly
+# policy). Only the two-value equality form above is rewritten.
+
+
+def _bit_columns(columns) -> frozenset[str]:
+    """Names of ``bit`` columns, which become Postgres boolean."""
+    return frozenset(
+        c.name for c in (columns or []) if (c.data_type or "").lower() == "bit"
+    )
+
+
+def _rewrite_bit_comparisons(expr: str, bit_columns: frozenset[str]) -> str:
+    """Rewrite ``bit`` comparisons against 0/1 to boolean true/false."""
+    if not bit_columns:
+        return expr
+
+    def _repl(m: re.Match[str]) -> str:
+        if m.group("col") not in bit_columns:
+            return m.group(0)
+        literal = "true" if m.group("value") == "1" else "false"
+        op = "<>" if m.group("op") in {"<>", "!="} else "="
+        # Keep only the parens that wrap the literal itself; any extra closer
+        # belongs to an enclosing group and must stay where it was.
+        depth = min(len(m.group("open")), len(m.group("close")))
+        kept = m.group("close")[depth:]
+        return f'"{m.group("col")}" {op} {"(" * depth}{literal}{")" * depth}{kept}'
+
+    return _BIT_COMPARISON.sub(_repl, expr)
+
 
 def _translate_time_zones(expr: str) -> str:
     """Rewrite the zone name in any ``AT TIME ZONE 'name'`` clause from its
@@ -261,13 +306,19 @@ def _translate_time_zones(expr: str) -> str:
     return _AT_TIME_ZONE.sub(_repl, expr)
 
 
-def map_expression(expr: str) -> str:
+def map_expression(expr: str, *, columns=None) -> str:
     """Translate a T-SQL scalar expression to its Postgres form.
 
     Handles bracket quoting ([Col] -> "Col", case preserved to match the
     scanned column names the tables keep), N'..' literals, the common
     date/uuid/null functions, and Windows time-zone names in AT TIME ZONE
     clauses. Unknown constructs pass through verbatim.
+
+    ``columns`` is the scanned column list of the table the expression belongs
+    to. It is what makes a ``bit`` column's ``= 1`` comparison translatable:
+    ``bit`` maps to Postgres boolean, and ``boolean = integer`` is an error
+    there, so the predicate needs the column's type to be fixed up. Without it
+    the expression is still translated, just not that part.
     """
     out = (expr or "").strip()
 
@@ -280,6 +331,9 @@ def map_expression(expr: str) -> str:
     # with brackets in practice, so plain regex passes are sufficient.
     out = _BRACKET_IDENT.sub(r'"\1"', out)
     out = _NSTRING.sub(r"\1", out)
+
+    # After the bracket pass, so the column name is already double-quoted.
+    out = _rewrite_bit_comparisons(out, _bit_columns(columns))
 
     for pat, repl in _CALL_REWRITES:
         out = pat.sub(repl, out)

@@ -78,6 +78,17 @@ def _build_user_prompt(item: ValidationItem, target_schema: str) -> str:
         parts.append(f"Extra columns in the target: {', '.join(item.columns_extra)}.")
     if item.type_drift:
         parts.append(f"Column type drift: {'; '.join(item.type_drift)}.")
+    if item.collation_drift:
+        # Spelled out because the model otherwise reaches for ALTER COLUMN SET,
+        # which cannot change a collation.
+        parts.append(
+            f"Column collation drift: {'; '.join(item.collation_drift)}. "
+            "A column's collation is changed with ALTER TABLE ... ALTER COLUMN <col> "
+            "TYPE <same type> COLLATE <collation>. If the collation itself does not "
+            "exist yet, create it first with CREATE COLLATION IF NOT EXISTS "
+            "(provider = icu, locale = '<icu locale>', deterministic = <bool>); a "
+            "case- or accent-insensitive collation must be nondeterministic."
+        )
     if item.objects:
         # Constraint/index/FK rollup: the item covers every object of one kind on
         # one table, so the model needs the per-object breakdown to know which

@@ -88,6 +88,12 @@ class ColumnInfo(BaseModel):
     precision: int | None = None
     scale: int | None = None
     is_nullable: bool = True
+    # Collation of a character column, e.g. "SQL_Latin1_General_CP1_CI_AS" (None for
+    # other types). Drives the target's COLLATE clause — Postgres defaults to
+    # case-SENSITIVE, so dropping it silently changes equality, ORDER BY, GROUP BY
+    # and unique-index results (schema_migration/collation_mapper). Optional so
+    # reports saved before collations were scanned still load.
+    collation_name: str | None = None
 
 
 class ForeignKeyInfo(BaseModel):

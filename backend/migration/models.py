@@ -40,6 +40,8 @@ class LakebaseConnRequest(BaseModel):
 
 class ObjectKind(str, Enum):
     SCHEMA = "schema"
+    # Mirrored from the source, created before the tables whose columns use it.
+    COLLATION = "collation"
     TABLE = "table"
     FUNCTION = "function"
     VIEW = "view"
@@ -59,14 +61,15 @@ class ObjectKind(str, Enum):
 # fire during the bulk COPY).
 KIND_ORDER: dict[ObjectKind, int] = {
     ObjectKind.SCHEMA: 0,
-    ObjectKind.TABLE: 1,
-    ObjectKind.FUNCTION: 2,
-    ObjectKind.VIEW: 3,
-    ObjectKind.PROCEDURE: 4,
-    ObjectKind.CONSTRAINT: 5,
-    ObjectKind.INDEX: 6,
-    ObjectKind.FOREIGN_KEY: 7,
-    ObjectKind.TRIGGER: 8,
+    ObjectKind.COLLATION: 1,   # before the tables whose columns COLLATE them
+    ObjectKind.TABLE: 2,
+    ObjectKind.FUNCTION: 3,
+    ObjectKind.VIEW: 4,
+    ObjectKind.PROCEDURE: 5,
+    ObjectKind.CONSTRAINT: 6,
+    ObjectKind.INDEX: 7,
+    ObjectKind.FOREIGN_KEY: 8,
+    ObjectKind.TRIGGER: 9,
 }
 
 # Kinds applied after the data load. Mirrored by the SPA (CreateSync splits the

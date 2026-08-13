@@ -63,6 +63,10 @@ class ValidationItem(BaseModel):
     columns_missing: list[str] = []      # in the source, absent in the target
     columns_extra: list[str] = []        # in the target, absent in the source
     type_drift: list[str] = []           # "col: expected X, found Y" (normalized)
+    # "col: expected X, found Y" for collations that don't match the source's.
+    # Separate from type_drift: the column stores the same values but compares them
+    # differently (case-sensitivity, sort order, unique-index collisions).
+    collation_drift: list[str] = []
 
     # Constraint/index/foreign-key rollups only: the per-object breakdown behind
     # the counts, and the counts themselves (so the UI need not recompute them).

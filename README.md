@@ -107,12 +107,45 @@ missing.
 | **Schema & Code** | Build an editable plan (DDL + AI-translated code) and apply it to Lakebase |
 | **Data Migration** | Stream data into Lakebase (batched `COPY`) with live per-table progress |
 | **Create Sync** | Sync now (in-app) or offload a re-runnable PySpark snapshot to a Databricks Job (run now, create unstarted, or schedule) |
-| **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
+| **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, column collations, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
 | **Query Parity** *(post-migration)* | Generate N synthetic read-only queries, run each against both sides, and compare row count, result format, and performance — with a side-by-side result preview on any mismatch |
 
 Target identifiers are lower-cased by default (PostgreSQL convention); a project
 can instead **preserve source casing** (double-quoted, case-sensitive). System
 objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
+
+### Collations
+
+Column collations are **translated, not dropped**. SQL Server's usual collations
+are case-insensitive (`SQL_Latin1_General_CP1_CI_AS`, the Azure SQL default) and
+PostgreSQL's default is case-sensitive, so ignoring them silently changes results —
+`'ana' = 'ANA'`, sort order, `GROUP BY`, unique indexes — without raising an error.
+
+Each source collation becomes an ICU collation created before the tables using it,
+and every character column carries a `COLLATE` clause. Strength maps to an ICU
+level (`CI_AS` → `level2`, `CI_AI` → `level1`, `CS_AS` → `level3`), the locale to
+the closest ICU tag, and `_BIN`/`_BIN2` to the built-in `C`.
+
+Case- or accent-insensitive collations must be **nondeterministic** — otherwise
+equality stays byte-wise and only sorting changes. The assessment flags every
+affected column (`COLLATION_INSENSITIVE`) and any CHECK or filtered index that
+pattern-matches one (`COLLATION_PATTERN_MATCH`, which will fail to apply);
+Validation compares each target column's collation and reports drift with a fix.
+
+**Queries that `LIKE` those columns must be rewritten.** PostgreSQL rejects
+pattern matching on a nondeterministic collation, so put a deterministic
+collation on the operand and use `ILIKE` to keep the case-insensitive result:
+
+```sql
+WHERE email LIKE '%gmail%'                  -- ERROR: not supported for LIKE
+WHERE email COLLATE "C" ILIKE '%gmail%'     -- same rows as the source
+```
+
+Two traps: plain `LIKE` after `COLLATE "C"` is case-**sensitive** (fewer rows than
+the source), and `lower(email) LIKE lower(?)` is rejected too — `lower()`'s result
+keeps the column's collation. For an accent-*insensitive* source collation
+(`..._CI_AI`), `ILIKE` alone still under-matches; wrap both sides in `unaccent()`
+(available on Lakebase via `CREATE EXTENSION unaccent`).
 
 ## How it works
 
@@ -127,6 +160,9 @@ objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
   the UI polls; large tables can be offloaded to a Databricks Job or a PySpark
   **snapshot** (range-partitioned reads → per-partition `COPY`, tables loaded
   concurrently, idempotent re-runs).
+- **Collations** are mirrored as ICU collations created before the tables whose
+  columns reference them, so string comparison keeps the source's case/accent
+  semantics (see [Collations](#collations)).
 - **Constraints, indexes, FKs, and triggers** are created **after** the data
   load, so the bulk copy pays no per-row maintenance and identity sequences sync
   to `MAX+1` once rows exist.

@@ -1,8 +1,9 @@
 """Generates Postgres DDL from scanned Azure SQL table metadata.
 
-Emits a runnable script: schema creation + CREATE TABLE per table with mapped
-types and nullability. Identifiers are double-quoted to preserve casing and
-neutralise T-SQL [bracket] quoting.
+Emits a runnable script: schema creation, the collations the source columns use,
+then CREATE TABLE per table with mapped types, collations, and nullability.
+Identifiers are double-quoted to preserve casing and neutralise T-SQL [bracket]
+quoting.
 
 Constraints and indexes (PKs, FKs, unique/plain indexes, column defaults,
 check constraints, identity columns) are generated as **post-data** DDL: they
@@ -17,9 +18,14 @@ from __future__ import annotations
 from backend.assessment.models import (
     CheckConstraintInfo,
     ColumnDefaultInfo,
+    ColumnInfo,
     ForeignKeyInfo,
     IndexInfo,
     TableInfo,
+)
+from backend.schema_migration.collation_mapper import (
+    collect_collations,
+    column_collation,
 )
 from backend.schema_migration.expr_mapper import (
     map_default_expression,
@@ -51,10 +57,14 @@ def _fq(
     return f'"{schema}"."{map_object(table, identifier_case)}"'
 
 
-def _column_ddl(col, *, indent: str = "    ") -> str:
+def _column_ddl(col, *, indent: str = "    ", collation_schema: str = "") -> str:
     null = "" if col.is_nullable else " NOT NULL"
+    # Character columns keep their source collation, so comparisons keep the
+    # source's case/accent semantics rather than Postgres's case-sensitive default.
+    target = column_collation(col)
+    collate = f" COLLATE {target.qualified(collation_schema)}" if target else ""
     # Column names are preserved as scanned so the COPY column list keeps matching.
-    return f'{indent}"{col.name}" {map_type(col)}{null}'
+    return f'{indent}"{col.name}" {map_type(col)}{collate}{null}'
 
 
 def schema_ddl(schema: str) -> str:
@@ -62,14 +72,24 @@ def schema_ddl(schema: str) -> str:
     return f'CREATE SCHEMA IF NOT EXISTS "{schema}";'
 
 
+def collation_ddl(collation, schema: str) -> str:
+    """CREATE COLLATION for one migrated collation (idempotent)."""
+    return collation.ddl(schema)
+
+
 def table_ddl(
     table: TableInfo,
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    collation_schema: str = "",
 ) -> str:
     """CREATE TABLE for a single table (idempotent). ``schema`` is the resolved
-    (already-mapped) Postgres schema; the table name follows ``identifier_case``."""
-    cols = ",\n".join(_column_ddl(c) for c in table.columns)
+    (already-mapped) Postgres schema; the table name follows ``identifier_case``.
+    ``collation_schema`` is where the migration created its collations — passing it
+    schema-qualifies each COLLATE so ``search_path`` can't break it."""
+    cols = ",\n".join(
+        _column_ddl(c, collation_schema=collation_schema) for c in table.columns
+    )
     return (
         f'CREATE TABLE IF NOT EXISTS "{schema}".'
         f'"{map_object(table.table_name, identifier_case)}" (\n{cols}\n);'
@@ -80,9 +100,10 @@ def _table_ddl(
     table: TableInfo,
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    collation_schema: str = "",
 ) -> str:
     return f"-- source: {table.fqn}  ({table.row_count:,} rows)\n" + table_ddl(
-        table, schema, identifier_case
+        table, schema, identifier_case, collation_schema
     )
 
 
@@ -154,16 +175,23 @@ def index_ddl(
     table_name: str,
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    columns: list[ColumnInfo] | None = None,
 ) -> str:
     """CREATE (UNIQUE) INDEX IF NOT EXISTS. The name is prefixed with the table
-    (source index names are per-table; Postgres index names are per-schema)."""
+    (source index names are per-table; Postgres index names are per-schema).
+
+    ``columns`` is the table's scanned columns, needed to translate a filter that
+    compares a ``bit`` column to 0/1 (see ``expr_mapper.map_expression``)."""
     fq = _fq(schema, table_name, identifier_case)
     name = index_name(idx.name, table_name, identifier_case)
     cols = ", ".join(f'"{c.name}"' + (" DESC" if c.descending else "") for c in idx.columns)
     unique = "UNIQUE " if idx.is_unique else ""
     include_cols = ", ".join(f'"{c}"' for c in idx.include_columns)
     include = f" INCLUDE ({include_cols})" if idx.include_columns else ""
-    where = f" WHERE {map_expression(idx.filter_definition)}" if idx.filter_definition else ""
+    where = (
+        f" WHERE {map_expression(idx.filter_definition, columns=columns)}"
+        if idx.filter_definition else ""
+    )
     return f'CREATE {unique}INDEX IF NOT EXISTS "{name}" ON {fq} ({cols}){include}{where};'
 
 
@@ -200,10 +228,14 @@ def check_constraint_ddl(
     table_name: str,
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    columns: list[ColumnInfo] | None = None,
 ) -> str:
+    """ADD CONSTRAINT ... CHECK (guarded by constraint name). ``columns`` is the
+    table's scanned columns, needed to translate a ``bit`` comparison in the
+    predicate (see ``expr_mapper.map_expression``)."""
     fq = _fq(schema, table_name, identifier_case)
     name = _ident(chk.name, identifier_case)
-    predicate = map_expression(chk.definition)
+    predicate = map_expression(chk.definition, columns=columns)
     return (
         "DO $$\nBEGIN\n"
         "    IF NOT EXISTS (\n"
@@ -292,7 +324,7 @@ def post_data_ddl(
         for chk in t.check_constraints:
             out.append((
                 f"{name} · CHECK {map_object(chk.name, identifier_case)}",
-                check_constraint_ddl(chk, t.table_name, schema, identifier_case),
+                check_constraint_ddl(chk, t.table_name, schema, identifier_case, t.columns),
             ))
     for t in tables:
         schema = map_schema(t.schema_name, target_schema, identifier_case)
@@ -300,7 +332,7 @@ def post_data_ddl(
         for idx in t.indexes:
             out.append((
                 f"{name} · INDEX {map_object(idx.name, identifier_case)}",
-                index_ddl(idx, t.table_name, schema, identifier_case),
+                index_ddl(idx, t.table_name, schema, identifier_case, t.columns),
             ))
     for t in tables:
         schema = map_schema(t.schema_name, target_schema, identifier_case)
@@ -322,19 +354,37 @@ def generate_ddl(
 
     ``target_schema`` is where the source ``dbo`` schema lands; every other source
     schema maps according to ``identifier_case``. The script has two
-    sections: the pre-data DDL (schemas + tables), then the post-data DDL
-    (constraints & indexes) to run AFTER the data load.
+    sections: the pre-data DDL (schemas + collations + tables), then the post-data
+    DDL (constraints & indexes) to run AFTER the data load.
     """
-    schemas = sorted({map_schema(t.schema_name, target_schema, identifier_case) for t in tables})
+    # Collations live in the default target schema, created before their tables.
+    # It is included in the schema list even when no table maps to it, since the
+    # CREATE COLLATION statements below need it to exist.
+    collation_schema = map_schema("dbo", target_schema, identifier_case)
+    usage = collect_collations(tables)
+    schemas = sorted({map_schema(t.schema_name, target_schema, identifier_case) for t in tables}
+                     | ({collation_schema} if usage.created() else set()))
     header = (
         "-- Generated by Lakebase Express — schema migration\n"
         "-- Review before running. Constraints & indexes are in the post-data\n"
         "-- section at the end — run that part only AFTER the data load.\n\n"
         + "".join(f'CREATE SCHEMA IF NOT EXISTS "{s}";\n' for s in schemas)
     )
+
+    created = usage.created()
+    if created:
+        header += (
+            "\n-- Source collations, mirrored so string comparison keeps the source's\n"
+            "-- case/accent semantics. Insensitive collations must be nondeterministic\n"
+            "-- for equality itself to ignore case — Postgres then rejects LIKE on them.\n"
+            + "\n".join(f"{c.ddl(collation_schema)}" for c in created)
+            + "\n"
+        )
+
     blocks = [
         _table_ddl(
-            t, map_schema(t.schema_name, target_schema, identifier_case), identifier_case
+            t, map_schema(t.schema_name, target_schema, identifier_case), identifier_case,
+            collation_schema,
         )
         for t in tables
     ]
@@ -347,4 +397,4 @@ def generate_ddl(
             + "\n\n".join(f"-- {label}\n{sql}" for label, sql in post)
             + "\n"
         )
-    return script, len(blocks) + len(schemas) + len(post)
+    return script, len(blocks) + len(schemas) + len(created) + len(post)

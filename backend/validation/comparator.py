@@ -27,6 +27,7 @@ from backend.assessment.models import ProgrammableObject, Severity, TableInfo
 from backend.assessment.scanner import scan_objects, scan_tables
 from backend.connectors.lakebase import LakebaseConnection
 from backend.migration.models import KIND_ORDER, ObjectKind
+from backend.schema_migration.collation_mapper import column_collation
 from backend.schema_migration.ddl_generator import (
     check_constraint_ddl,
     column_default_ddl,
@@ -113,10 +114,13 @@ FROM   information_schema.triggers
 WHERE  trigger_schema = ANY(%(schemas)s)
 """
 
+# collation_name is the column's *explicit* collation — NULL when it inherits the
+# database default, which is exactly the "no COLLATE applied" case to detect.
 _PG_COLUMNS_SQL = """
 SELECT table_schema AS schema, table_name AS "table", column_name AS name, data_type,
        column_default IS NOT NULL AS has_default,
-       is_identity = 'YES' AS is_identity
+       is_identity = 'YES' AS is_identity,
+       collation_name
 FROM   information_schema.columns
 WHERE  table_schema = ANY(%(schemas)s)
 """
@@ -202,6 +206,9 @@ class TargetInventory:
     triggers: set[tuple[str, str]] = field(default_factory=set)
     # (schema, table) -> {column name: information_schema data_type}
     columns: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
+    # (schema, table) -> {column: explicit collation}. Columns on the database
+    # default have no entry — that absence is how a dropped collation is spotted.
+    column_collations: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
 
     # Whether the post-data catalogs below were actually queried. An empty dict
     # is ambiguous on its own — it means both "this target has no constraints"
@@ -236,6 +243,8 @@ def fetch_target_inventory(conn: LakebaseConnection, schemas: list[str]) -> Targ
     for r in conn.query(_PG_COLUMNS_SQL, params):
         key = (r["schema"], r["table"])
         inv.columns.setdefault(key, {})[r["name"]] = r["data_type"]
+        if r.get("collation_name"):
+            inv.column_collations.setdefault(key, {})[r["name"]] = r["collation_name"]
         if r["has_default"]:
             inv.column_defaults.setdefault(key, set()).add(r["name"])
         if r["is_identity"]:
@@ -341,11 +350,77 @@ def _expected_pg_type(col) -> str:
     return _PG_TYPE_ALIASES.get(base, base)
 
 
-def _add_column_sql(schema: str, table: str, col) -> str:
+def _collation_drift(t: TableInfo, target_collations: dict[str, str], target_cols: dict) -> list[str]:
+    """Columns whose target collation isn't the one the source collation maps to.
+
+    Invisible to every other check: the column holds exactly the right bytes and
+    passes type and row-count comparison while comparing them differently —
+    ``'ana' = 'ANA'`` flips, sort order changes, unique indexes accept pairs the
+    source rejected. A source column with no (or untranslatable) collation makes no
+    claim about the target and is skipped.
+    """
+    drift: list[str] = []
+    for c in t.columns:
+        if c.name not in target_cols:
+            continue  # already reported as a missing column
+        expected = column_collation(c)
+        if expected is None:
+            continue
+        found = target_collations.get(c.name)
+        if found == expected.name:
+            continue
+        drift.append(
+            f"{c.name}: expected {expected.name} "
+            f"(source {c.collation_name}), found {found or 'the database default'}"
+        )
+    return drift
+
+
+def _recollate_sql(
+    t: TableInfo, schema: str, table: str, collation_schema: str,
+    target_collations: dict[str, str],
+) -> str:
+    """SQL that puts the source collation back on the drifted columns.
+
+    The CREATE is included (guarded) because the usual reason a column lacks a
+    collation is that step never ran. ALTER COLUMN TYPE is how an existing column
+    gets a collation; it rewrites and reindexes the table, which the emitted SQL
+    notes since that isn't free on a large table.
+    """
+    creates: dict[str, str] = {}
+    alters: list[str] = []
+    for c in t.columns:
+        expected = column_collation(c)
+        if expected is None or target_collations.get(c.name) == expected.name:
+            continue
+        ddl = expected.ddl(collation_schema)
+        if ddl:
+            creates.setdefault(expected.name, ddl)
+        alters.append(
+            f"ALTER TABLE {_pg_ident(schema)}.{_pg_ident(table)} "
+            f'ALTER COLUMN "{c.name}" TYPE {map_type(c)} '
+            f"COLLATE {expected.qualified(collation_schema)};"
+        )
+    if not alters:
+        return ""
+    header = (
+        "-- Restores the source collation on these columns. ALTER COLUMN ... TYPE\n"
+        "-- rewrites the table and rebuilds its indexes — on a large table, plan for it."
+    )
+    return "\n".join([header, *creates.values(), *alters])
+
+
+def _add_column_sql(schema: str, table: str, col, collation_schema: str = "") -> str:
+    """ADD COLUMN for a column missing from the target, carrying its source
+    collation like the original CREATE TABLE does. Re-added without it the column
+    takes the case-sensitive default, and being *missing* rather than drifted, no
+    collation finding would flag it afterwards."""
     null = "" if col.is_nullable else " NOT NULL"
+    target = column_collation(col)
+    collate = f" COLLATE {target.qualified(collation_schema)}" if target else ""
     return (
         f"ALTER TABLE {_pg_ident(schema)}.{_pg_ident(table)} "
-        f'ADD COLUMN "{col.name}" {map_type(col)}{null};'
+        f'ADD COLUMN "{col.name}" {map_type(col)}{collate}{null};'
     )
 
 
@@ -533,7 +608,9 @@ def post_data_items(
     for chk in t.check_constraints:
         name = mapped_identifier(chk.name, identifier_case)
         expected.append((name, f"CHECK {chk.name}", chk.definition, None))
-        fix_for[name] = check_constraint_ddl(chk, t.table_name, tgt_schema, identifier_case)
+        fix_for[name] = check_constraint_ddl(
+            chk, t.table_name, tgt_schema, identifier_case, t.columns
+        )
     present.extend(inv.checks.get(mapped, []))
 
     # Defaults and identity are column attributes, not named constraints, so they
@@ -578,7 +655,7 @@ def post_data_items(
         label = f"{'UNIQUE ' if idx.is_unique else ''}INDEX {idx.name}"
         expected.append((name, label, idx.filter_definition or "",
                          tuple(c.name for c in idx.columns)))
-        fix_for[name] = index_ddl(idx, t.table_name, tgt_schema, identifier_case)
+        fix_for[name] = index_ddl(idx, t.table_name, tgt_schema, identifier_case, t.columns)
     item = _post_data_rollup(
         t, inv, mapped, kind=ObjectKind.INDEX, expected=expected,
         present=inv.indexes.get(mapped, []), fix_for=fix_for,
@@ -708,7 +785,10 @@ def compare(
                     recommendation="Apply the generated CREATE TABLE, then copy the data "
                                    "(Data Migration / Create Sync).",
                     source_rows=source_counts.get(key, t.row_count),
-                    fix_sql=table_ddl(t, mapped[0], identifier_case),
+                    fix_sql=table_ddl(
+                        t, mapped[0], identifier_case,
+                        map_schema("dbo", target_schema, identifier_case),
+                    ),
                 ))
             continue
 
@@ -721,6 +801,7 @@ def compare(
             for c in t.columns
             if c.name in target_cols and target_cols[c.name].lower() != _expected_pg_type(c)
         ]
+        coll_drift = _collation_drift(t, inventory.column_collations.get(mapped, {}), target_cols)
 
         src_rows = source_counts.get(key, t.row_count)
         tgt_rows = target_counts.get(key)
@@ -754,6 +835,11 @@ def compare(
         if drift:
             problems.append(f"column type drift: {'; '.join(drift)}")
             severity = max(severity, Severity.MEDIUM, key=lambda s: _PENALTY[s])
+        if coll_drift:
+            # MEDIUM like type drift: the data is intact, but string comparison
+            # differs from the source until the collation is put back.
+            problems.append(f"column collation drift: {'; '.join(coll_drift)}")
+            severity = max(severity, Severity.MEDIUM, key=lambda s: _PENALTY[s])
         if cols_extra:
             problems.append(f"extra columns in target: {', '.join(cols_extra)}")
             severity = max(severity, Severity.LOW, key=lambda s: _PENALTY[s])
@@ -773,8 +859,25 @@ def compare(
             # and the previous full report's item carries over in the merge.
             continue
 
-        fix = "\n".join(_add_column_sql(mapped[0], mapped[1], c)
-                        for c in t.columns if c.name in cols_missing)
+        collation_schema = map_schema("dbo", target_schema, identifier_case)
+        readded = [c for c in t.columns if c.name in cols_missing]
+        fix_parts: list[str] = []
+        # A re-added column COLLATEs its collation, which may never have been created.
+        for ddl in dict.fromkeys(
+            c.ddl(collation_schema)
+            for c in (column_collation(col) for col in readded)
+            if c is not None and c.needs_create
+        ):
+            fix_parts.append(ddl)
+        fix_parts.extend(
+            _add_column_sql(mapped[0], mapped[1], c, collation_schema) for c in readded
+        )
+        if coll_drift:
+            fix_parts.append(_recollate_sql(
+                t, mapped[0], mapped[1], collation_schema,
+                inventory.column_collations.get(mapped, {}),
+            ))
+        fix = "\n".join(p for p in fix_parts if p)
         items.append(ValidationItem(
             id=f"table:{fqn_src}",
             kind=ObjectKind.TABLE,
@@ -793,6 +896,7 @@ def compare(
             columns_missing=cols_missing,
             columns_extra=cols_extra,
             type_drift=drift,
+            collation_drift=coll_drift,
             fix_sql=fix,
         ))
 

@@ -39,10 +39,13 @@ _SYSTEM_SCHEMAS = (
 )
 _SCHEMA_EXCLUSION = ", ".join(_SYSTEM_SCHEMAS)
 
+# COLLATION_NAME (NULL for non-character columns) decides comparison semantics: a
+# ..._CI_AS column compares case-insensitively where Postgres defaults to
+# case-sensitive, so the migration mirrors it (schema_migration/collation_mapper).
 _COLUMNS_SQL = f"""
 SELECT  c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE,
         c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE,
-        c.IS_NULLABLE
+        c.IS_NULLABLE, c.COLLATION_NAME
 FROM    INFORMATION_SCHEMA.COLUMNS c
 JOIN    sys.tables t      ON t.name = c.TABLE_NAME
 JOIN    sys.schemas s     ON s.schema_id = t.schema_id AND s.name = c.TABLE_SCHEMA
@@ -276,6 +279,7 @@ def scan_tables(conn: AzureSqlConnection) -> list[TableInfo]:
                 precision=r["NUMERIC_PRECISION"],
                 scale=r["NUMERIC_SCALE"],
                 is_nullable=(r["IS_NULLABLE"] == "YES"),
+                collation_name=r.get("COLLATION_NAME") or None,
             )
         )
 

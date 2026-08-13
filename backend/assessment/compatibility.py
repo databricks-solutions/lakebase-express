@@ -1,9 +1,13 @@
 """T-SQL -> Postgres/Lakebase compatibility rule engine.
 
-Two rule families:
+Three rule families:
 
   * **Type rules** run over scanned columns and flag SQL Server types that don't
     map 1:1 to Postgres (most are auto-handled and reported as INFO).
+  * **Collation rules** run over character columns and flag collations whose
+    comparison semantics need attention on the target — chiefly the
+    case-insensitive ones, which are mirrored faithfully but at the cost of
+    ``LIKE`` support (see schema_migration/collation_mapper).
   * **Code rules** are regex patterns run over the bodies of stored procedures,
     views, functions, and triggers. They surface the constructs that drive manual
     migration effort (cursors, dynamic SQL, T-SQL-only built-ins, etc.).
@@ -178,7 +182,138 @@ def check_code(objects: Iterable[ProgrammableObject]) -> list[Finding]:
     return findings
 
 
+# --- Collation compatibility -------------------------------------------------------
+
+# Operators Postgres refuses on a nondeterministic collation (NOT LIKE / NOT
+# SIMILAR are covered by the LIKE/SIMILAR alternatives).
+_PATTERN_MATCH = _rx(r"\b(like|similar\s+to)\b|~")
+
+
+def check_collations(tables: Iterable[TableInfo]) -> list[Finding]:
+    """Findings for column collations that change behaviour on the target.
+
+    Grouped per table per collation, not per column: a wide table can have dozens
+    of text columns sharing one collation, and a finding each would bury the rest
+    of the report and tank the readiness score over a single fact.
+    """
+    from backend.schema_migration.collation_mapper import column_collation, parse_collation
+
+    findings: list[Finding] = []
+    for t in tables:
+        insensitive: dict[str, list[str]] = {}
+        unmapped: dict[str, list[str]] = {}
+        fallback: dict[str, list[str]] = {}
+
+        for col in t.columns:
+            if not col.collation_name:
+                continue
+            target = column_collation(col)
+            if target is None:
+                # Report only a name that failed to parse — a non-character column
+                # carrying a collation is not a problem.
+                if parse_collation(col.collation_name) is None:
+                    unmapped.setdefault(col.collation_name, []).append(col.name)
+                continue
+            if not target.deterministic:
+                insensitive.setdefault(col.collation_name, []).append(col.name)
+            if target.locale_fallback:
+                fallback.setdefault(col.collation_name, []).append(col.name)
+
+        for name, cols in sorted(insensitive.items()):
+            findings.append(Finding(
+                rule_id="COLLATION_INSENSITIVE",
+                title=f"Case/accent-insensitive collation '{name}'",
+                severity=Severity.MEDIUM,
+                object_name=f"{t.fqn} ({', '.join(sorted(cols))})",
+                detail=(
+                    f"{name} compares strings case- and/or accent-insensitively, so the "
+                    "migration mirrors it with a nondeterministic Postgres ICU collation — "
+                    "without it, equality, ORDER BY, GROUP BY and unique indexes would all "
+                    "turn case-sensitive on the target. PostgreSQL does not allow LIKE or "
+                    "regex pattern matching against a nondeterministic collation."
+                ),
+                recommendation=(
+                    "Keep the mirrored collation for identical comparison semantics, and "
+                    "check whether queries LIKE/pattern-match these columns. Those need an "
+                    'explicit deterministic collation on the operand — col COLLATE "C" '
+                    "ILIKE '...' keeps the case-insensitive result. Note that lower(col) "
+                    "alone is NOT enough: the result of lower() inherits the column's "
+                    'collation, so it is still rejected (lower(col) COLLATE "C" works).'
+                ),
+            ))
+
+        for name, cols in sorted(fallback.items()):
+            findings.append(Finding(
+                rule_id="COLLATION_LOCALE_FALLBACK",
+                title=f"Unrecognised collation locale '{name}'",
+                severity=Severity.LOW,
+                object_name=f"{t.fqn} ({', '.join(sorted(cols))})",
+                detail=(
+                    f"The comparison strength of {name} is mirrored, but its locale has no "
+                    "known ICU equivalent, so the ICU root locale is used instead. "
+                    "Case/accent behaviour matches; language-specific sort order may not."
+                ),
+                recommendation=(
+                    "Confirm the sort order suits this data, or edit the generated "
+                    "CREATE COLLATION to the correct ICU locale in the plan."
+                ),
+            ))
+
+        # Postgres rejects pattern matching on a nondeterministic collation
+        # outright, so these objects are certain to fail in the post-data phase —
+        # HIGH, and reported here rather than discovered at apply time.
+        ci_columns = {c for cols in insensitive.values() for c in cols}
+        if ci_columns:
+            for obj_name, predicate in [
+                *((f"CHECK {chk.name}", chk.definition) for chk in t.check_constraints),
+                *((f"index {ix.name}", ix.filter_definition or "")
+                  for ix in t.indexes if ix.filter_definition),
+            ]:
+                if not _PATTERN_MATCH.search(predicate):
+                    continue
+                hit = sorted(c for c in ci_columns if c.lower() in predicate.lower())
+                if not hit:
+                    continue
+                findings.append(Finding(
+                    rule_id="COLLATION_PATTERN_MATCH",
+                    title="Pattern match on a case-insensitive column",
+                    severity=Severity.HIGH,
+                    object_name=f"{t.fqn} · {obj_name}",
+                    detail=(
+                        f"{obj_name} pattern-matches {', '.join(hit)}, whose collation is "
+                        "case/accent-insensitive and therefore nondeterministic in Postgres. "
+                        "PostgreSQL rejects LIKE and regex matching against a nondeterministic "
+                        f"collation, so this object will fail to apply. Predicate: {predicate}"
+                    ),
+                    recommendation=(
+                        'Force a deterministic collation on the operand: col COLLATE "C" '
+                        "ILIKE '...' preserves the source's case-insensitive result "
+                        '(plain LIKE after COLLATE "C" becomes case-SENSITIVE). '
+                        "lower(col) on its own does not help — its result keeps the "
+                        "column's collation and is rejected just the same."
+                    ),
+                ))
+
+        for name, cols in sorted(unmapped.items()):
+            findings.append(Finding(
+                rule_id="COLLATION_UNMAPPED",
+                title=f"Collation '{name}' not translated",
+                severity=Severity.LOW,
+                object_name=f"{t.fqn} ({', '.join(sorted(cols))})",
+                detail=(
+                    f"{name} could not be parsed, so these columns are created with the "
+                    "target database's default collation — which is case-sensitive, unlike "
+                    "most SQL Server collations."
+                ),
+                recommendation=(
+                    "Add an explicit COLLATE to these columns in the plan if their "
+                    "comparison semantics matter."
+                ),
+            ))
+    return findings
+
+
 def run_all_rules(
     tables: Iterable[TableInfo], objects: Iterable[ProgrammableObject]
 ) -> list[Finding]:
-    return check_types(tables) + check_code(objects)
+    return check_types(tables) + check_collations(tables) + check_code(objects)
