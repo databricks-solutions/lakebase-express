@@ -9,6 +9,8 @@ Lakebase itself, with live progress.
 Enabled sources today: **Azure SQL** and **SQL Server**. More (Oracle,
 PostgreSQL, MySQL, …) "Coming soon".
 
+![The Lakebase Express migrations list: each saved project with its source, its Lakebase target, and per-stage progress across Assess, Size, Schema and Data.](images/lakebase-express-image-01.png)
+
 > **Disclaimer.** This is **not an official Databricks product or service**. It is
 > an independent, community/solution accelerator provided **"as is", without any
 > warranty or support commitment**, and carries **no SLA**. Databricks is not
