@@ -42,4 +42,7 @@ frontend/tsconfig.tsbuildinfo
 
 # From the databricks-solutions scaffold
 *conf*.json
+# ...but that pattern also matches tsconfig.json, which the frontend needs
+# tracked. Vite projects add tsconfig.node.json / tsconfig.app.json too.
+!tsconfig*.json
 .idea/
