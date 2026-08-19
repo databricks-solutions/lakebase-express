@@ -16,8 +16,8 @@ PostgreSQL, MySQL, …) "Coming soon".
 > artifact, validating the migration against your own requirements, testing on
 > non-production data first, securing credentials, and verifying the results
 > before relying on them. Migrating databases is inherently risky — always keep
-> verified backups of your source and target. See [`LICENSE`](LICENSE) for the
-> full terms.
+> verified backups of your source and target. See [`LICENSE.md`](LICENSE.md) for
+> the full terms.
 
 > **Try it in dev/QA first.** Point the app at a non-production source and a
 > throwaway Lakebase target until you've seen a full cycle — assessment, plan,
@@ -430,7 +430,22 @@ Not commitments — the gaps we'd close next, in rough priority order.
   single-user today; persisting it would allow concurrent users and multi-worker
   deployments.
 
+## How to get help
+
+Databricks support doesn't cover this content. For questions or bugs, please open
+a GitHub issue and the team will help on a best effort basis. See
+[`NOTICE.md`](NOTICE.md).
+
 ## License
 
-Released under the [MIT License](LICENSE) and provided **"as is", without warranty
-of any kind**. Not an official Databricks product — see the disclaimer at the top.
+&copy; 2026 Databricks, Inc. All rights reserved. The source in this repository is
+provided subject to the Databricks License
+[https://databricks.com/db-license-source](https://databricks.com/db-license-source).
+All included or referenced third party libraries are subject to the licenses set
+forth below.
+
+Provided **"as is", without warranty of any kind** — not an official Databricks
+product; see the disclaimer at the top. Full terms in [`LICENSE.md`](LICENSE.md).
+
+| library | description | license | source |
+|---------|-------------|---------|--------|

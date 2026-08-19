@@ -39,3 +39,7 @@ frontend/tsconfig.tsbuildinfo
 .local-backup/
 .isaac/config.json
 .DS_Store
+
+# From the databricks-solutions scaffold
+*conf*.json
+.idea/
