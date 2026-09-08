@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TableInfo } from "../api";
 import type { MigrationState } from "../App";
 import { mapObject, mapSchema } from "../naming";
@@ -35,6 +35,44 @@ export default function DataMigration({ state, setState, onGoConnection, onConti
   const dflt = state.targetSchema;
   const selected = useMemo(() => new Set(state.selection), [state.selection]);
 
+  // Foreign-key graph over the scanned tables, keyed the same way as `selection`.
+  // Self-references are dropped (a table's own rows satisfy them) and edges to
+  // tables outside the scan are ignored — no selection here can satisfy those.
+  const { parentsOf, childrenOf } = useMemo(() => {
+    const known = new Set(tables.map(key));
+    const parentsOf = new Map<string, Set<string>>();
+    const childrenOf = new Map<string, Set<string>>();
+    const link = (m: Map<string, Set<string>>, k: string, v: string) => {
+      let set = m.get(k);
+      if (!set) m.set(k, (set = new Set()));
+      set.add(v);
+    };
+    for (const t of tables) {
+      const child = key(t);
+      for (const fk of t.foreign_keys ?? []) {
+        const parent = `${fk.ref_schema}.${fk.ref_table}`;
+        if (parent === child || !known.has(parent)) continue;
+        link(parentsOf, child, parent);
+        link(childrenOf, parent, child);
+      }
+    }
+    return { parentsOf, childrenOf };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tables]);
+
+  // Deselected tables that selected tables point at. Postgres validates existing
+  // rows when a foreign key is added, so a loaded child against an unloaded (empty)
+  // parent fails the post-data FK step — surfaced here, while selection is editable.
+  const fkGaps = useMemo(() => {
+    const gaps = new Map<string, string[]>();
+    for (const [parent, kids] of childrenOf) {
+      if (selected.has(parent)) continue;
+      const refs = [...kids].filter((c) => selected.has(c)).sort();
+      if (refs.length) gaps.set(parent, refs);
+    }
+    return gaps;
+  }, [childrenOf, selected]);
+
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
     const by: Record<string, TableInfo[]> = {};
@@ -62,6 +100,28 @@ export default function DataMigration({ state, setState, onGoConnection, onConti
       keys.forEach((k) => (on ? set.add(k) : set.delete(k)));
       return { ...s, selection: [...set] };
     });
+  /** Unselected FK ancestors of `roots`, walked transitively (cycle-safe). */
+  const missingParents = (roots: string[]) => {
+    const out = new Set<string>();
+    const seen = new Set(roots);
+    const stack = [...roots];
+    while (stack.length) {
+      for (const p of parentsOf.get(stack.pop()!) ?? []) {
+        if (seen.has(p)) continue;
+        seen.add(p);
+        stack.push(p);
+        if (!selected.has(p)) out.add(p);
+      }
+    }
+    return [...out];
+  };
+  // Pull a referenced table in together with whatever it references in turn, so
+  // one click can't leave a fresh gap behind.
+  const includeWithParents = (keys: string[]) =>
+    setMany([...new Set([...keys, ...missingParents(keys)])], true);
+  // Everything the selection transitively needs but doesn't have yet.
+  const fkClosure = fkGaps.size ? missingParents([...selected]) : [];
+
   const setOpt = (patch: Partial<MigrationState["dataOptions"]>) =>
     setState((s) => ({ ...s, dataOptions: { ...s.dataOptions, ...patch } }));
 
@@ -93,6 +153,23 @@ export default function DataMigration({ state, setState, onGoConnection, onConti
           </div>
         </div>
 
+        {fkGaps.size > 0 && (
+          <div className="banner banner--warn fkbanner">
+            <span>
+              <strong>{fkGaps.size.toLocaleString()}</strong> deselected{" "}
+              {fkGaps.size === 1 ? "table is" : "tables are"} referenced by tables you are migrating.
+              Foreign keys pointing at {fkGaps.size === 1 ? "it" : "them"} will fail to apply after the
+              load — Postgres validates the loaded rows against a parent that stays empty.
+              {fkClosure.length > fkGaps.size &&
+                " Including them pulls in what they reference in turn."}
+            </span>
+            <button className="link fkbanner__fix" onClick={() => setMany(fkClosure, true)}>
+              Include {fkClosure.length.toLocaleString()} referenced{" "}
+              {fkClosure.length === 1 ? "table" : "tables"}
+            </button>
+          </div>
+        )}
+
         <div className="tablelist">
           {groups.length === 0 && <div className="trow"><span className="muted">No tables match your search.</span></div>}
           {groups.map(([schema, ts]) => {
@@ -111,16 +188,34 @@ export default function DataMigration({ state, setState, onGoConnection, onConti
                   </span>
                   <span className="tgroup__count">{selCount}/{ts.length}</span>
                 </div>
-                {ts.map((t) => (
-                  <label key={key(t)} className="trow">
-                    <input type="checkbox" checked={selected.has(key(t))} onChange={() => toggle(key(t))} />
-                    <span className="trow__name">{t.table_name}</span>
-                    <span className="trow__target">
-                      {mapSchema(schema, dflt, state.identifierCase)}.{mapObject(t.table_name, state.identifierCase)}
-                    </span>
-                    <span className="trow__rows">{t.row_count.toLocaleString()} rows</span>
-                  </label>
-                ))}
+                {ts.map((t) => {
+                  const k = key(t);
+                  const refs = fkGaps.get(k);
+                  return (
+                    <Fragment key={k}>
+                      <label className="trow">
+                        <input type="checkbox" checked={selected.has(k)} onChange={() => toggle(k)} />
+                        <span className="trow__name">{t.table_name}</span>
+                        <span className="trow__target">
+                          {mapSchema(schema, dflt, state.identifierCase)}.{mapObject(t.table_name, state.identifierCase)}
+                        </span>
+                        <span className="trow__rows">{t.row_count.toLocaleString()} rows</span>
+                      </label>
+                      {refs && (
+                        <div className="fkgap">
+                          <span>
+                            {refs.length.toLocaleString()} selected{" "}
+                            {refs.length === 1 ? "table references" : "tables reference"} this —{" "}
+                            <span className="fkgap__refs">{refList(refs)}</span>
+                          </span>
+                          <button className="link fkgap__fix" onClick={() => includeWithParents([k])}>
+                            Include {t.table_name}
+                          </button>
+                        </div>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </div>
             );
           })}
@@ -158,6 +253,13 @@ export default function DataMigration({ state, setState, onGoConnection, onConti
       </section>
     </div>
   );
+}
+
+/** Referencing tables, trimmed so a widely-referenced parent stays one line. */
+function refList(keys: string[]): string {
+  return keys.length <= 3
+    ? keys.join(", ")
+    : `${keys.slice(0, 3).join(", ")} +${keys.length - 3} more`;
 }
 
 /** Checkbox that supports the indeterminate (partial) state for group headers. */

@@ -619,6 +619,18 @@ a { color: var(--primary); }
 .tgroup__arrow { color: var(--muted-2); }
 .tgroup__count { font-size: 11px; font-weight: 700; color: var(--muted); background: rgba(27,49,57,0.06); border-radius: 10px; padding: 1px 9px; }
 
+/* Foreign-key selection gaps — a deselected table that selected tables reference.
+   Warns in place (rather than locking the checkbox) and offers the FK closure. */
+.fkbanner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.fkgap {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 7px 14px 8px 41px; border-bottom: 1px solid var(--border);
+  background: var(--warn-weak); color: var(--warn); font-size: 12.5px;
+}
+.fkgap:last-child { border-bottom: none; }
+.fkgap__refs { font-family: ui-monospace, monospace; }
+.fkbanner__fix, .fkgap__fix { color: inherit; font-weight: 700; text-decoration: underline; flex: 0 0 auto; }
+
 /* Run options + start button bar */
 .runbar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; padding-top: 16px; margin-top: 4px; border-top: 1px solid var(--border); }
 .runbar .field { margin-bottom: 0; }
