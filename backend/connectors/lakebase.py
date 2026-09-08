@@ -11,6 +11,29 @@ from dataclasses import dataclass
 import psycopg
 from psycopg.rows import dict_row
 
+# Retryable: connection dropped, server briefly unable to serve, sessions collided.
+_TRANSIENT_SQLSTATES = frozenset({
+    "08000", "08001", "08003", "08004", "08006", "08007", "08P01",  # connection_exception
+    "53300", "53400",           # too_many_connections, configuration_limit_exceeded
+    "55P03",                    # lock_not_available
+    "57P01", "57P02", "57P03",  # admin_shutdown, crash_shutdown, cannot_connect_now
+    "40001", "40P01",           # serialization_failure, deadlock_detected
+})
+
+
+def transient_reason(exc: BaseException) -> str | None:
+    """Short description if ``exc`` is a retryable Postgres error, else None."""
+    if not isinstance(exc, psycopg.Error):
+        return None
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate in _TRANSIENT_SQLSTATES:
+        return f"SQLSTATE {sqlstate}"
+    # No SQLSTATE means the server never answered (unreachable, TLS timeout, socket
+    # closed). Rejections that must not be retried do carry one — 28P01, 3D000.
+    if sqlstate is None and isinstance(exc, psycopg.OperationalError):
+        return "connection error"
+    return None
+
 
 @dataclass(frozen=True)
 class LakebaseConnection:

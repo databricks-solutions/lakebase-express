@@ -12,11 +12,12 @@ API as plaintext beyond the initial (TLS-protected) store step.
 from __future__ import annotations
 
 import logging
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import pymssql
+
+from backend.retry import DB_POLICY, call_with_retry
 
 log = logging.getLogger("lakebase_express.azure_sql")
 
@@ -29,11 +30,8 @@ _TRANSIENT_CODES = {40197, 40501, 40613, 49918, 49919, 49920}
 # fall back to matching the resume wording itself.
 _TRANSIENT_MARKERS = ("is not currently available", "is currently unavailable")
 
-_MAX_ATTEMPTS = 4
-_BACKOFF_SECONDS = (5.0, 10.0, 20.0)  # waits between attempts 1→2, 2→3, 3→4
 
-
-def _transient_reason(exc: BaseException) -> str | None:
+def transient_reason(exc: BaseException) -> str | None:
     """Return a short description if ``exc`` is a transient Azure SQL error, else None."""
     if not isinstance(exc, pymssql.Error):
         return None
@@ -84,21 +82,13 @@ class AzureSqlConnection:
         # Retry only transient failures (serverless auto-pause resume, service
         # busy). Anything else — bad credentials, missing database, firewall —
         # raises immediately.
-        conn = None
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            try:
-                conn = self._connect_once(timeout)
-                break
-            except pymssql.Error as exc:
-                reason = _transient_reason(exc)
-                if reason is None or attempt == _MAX_ATTEMPTS:
-                    raise
-                delay = _BACKOFF_SECONDS[min(attempt - 1, len(_BACKOFF_SECONDS) - 1)]
-                log.warning(
-                    "Transient Azure SQL error on %s/%s (%s) — retrying in %.0fs (attempt %d/%d)",
-                    self.host, self.database, reason, delay, attempt, _MAX_ATTEMPTS,
-                )
-                time.sleep(delay)
+        conn = call_with_retry(
+            lambda: self._connect_once(timeout),
+            policy=DB_POLICY,
+            transient=transient_reason,
+            what=f"Azure SQL connect to {self.host}/{self.database}",
+            log=log,
+        )
         try:
             yield conn
         finally:

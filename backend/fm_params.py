@@ -34,11 +34,35 @@ from __future__ import annotations
 import logging
 import re
 
+from databricks.sdk.errors import (
+    DeadlineExceeded,
+    InternalError,
+    TemporarilyUnavailable,
+    TooManyRequests,
+)
 from databricks.sdk.service.serving import QueryEndpointResponse
 
 from backend.config import FM_API, FM_API_GATEWAY, workspace_client
+from backend.retry import FM_POLICY, call_with_retry
 
 log = logging.getLogger("lakebase_express.fm_params")
+
+# The SDK retries connection errors and timeouts itself but not on *status*, so a
+# 429/5xx comes straight back. RequestLimitExceeded and ResourceExhausted subclass
+# TooManyRequests, so they are covered too.
+_TRANSIENT_ERRORS = (
+    TooManyRequests,         # 429
+    InternalError,           # 500
+    TemporarilyUnavailable,  # 503
+    DeadlineExceeded,        # 504
+)
+
+
+def transient_reason(exc: BaseException) -> str | None:
+    """Short description if ``exc`` is a retryable endpoint error, else None. A
+    rejected parameter is not transient — ``query_chat`` handles those itself."""
+    return type(exc).__name__ if isinstance(exc, _TRANSIENT_ERRORS) else None
+
 
 # Endpoint-name substring -> parameters the model rejects. Extend as new
 # model families land; the adaptive fallback in query_chat covers the gap
@@ -149,13 +173,28 @@ def query_chat(endpoint: str, messages, api: str | None = None, **params):
     with a smaller output window reject the value with a range error naming
     their cap, so it is clamped to that cap and retried.
 
+    Transient failures (429/500/503/504) retry under ``FM_POLICY``; the negotiated
+    parameters are owned here so a rejection is discovered once, not per attempt.
+
     ``api`` picks the wire route — ``"serving"`` or ``"gateway"`` (see the module
     docstring); it defaults to ``config.FM_API``. Use ``"gateway"`` to address a
     model by its ``system.ai.<model>`` id.
     """
     w = workspace_client()
     api = (api or FM_API).strip().lower()
-    params = allowed_params(endpoint, params)
+    negotiated = allowed_params(endpoint, params)
+    return call_with_retry(
+        lambda: _query_negotiated(w, api, endpoint, messages, negotiated),
+        policy=FM_POLICY,
+        transient=transient_reason,
+        what=f"foundation-model call to {endpoint}",
+        log=log,
+    )
+
+
+def _query_negotiated(w, api: str, endpoint: str, messages, params: dict):
+    """One chat call. ``params`` is mutated in place so a dropped parameter or
+    clamped ``max_tokens`` outlives it; anything else raises for the retry layer."""
     while True:
         try:
             if api == FM_API_GATEWAY:
