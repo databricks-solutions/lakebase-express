@@ -2,8 +2,7 @@
 
 Same pattern as backend/validation/runs.py: a daemon thread runs each query pair
 against the source and the Lakebase target, compares the two results, and updates
-a shared state the API polls. Process-memory state is fine for a single-user
-accelerator App.
+a state the API polls, persisted through backend/run_registry.py.
 
 Every query is guarded read-only before it executes on either side — the AI is
 told to emit only SELECTs, but the runner never trusts that: anything that isn't
@@ -29,12 +28,12 @@ from backend.query_parity.models import (
     SideResult,
     SyntheticQuery,
 )
+from backend.run_registry import RunRegistry
 from datetime import datetime, timezone
 
 log = logging.getLogger("lakebase_express.query_parity.runner")
 
-_RUNS: dict[str, QueryParityRunState] = {}
-_LOCK = threading.Lock()
+_REGISTRY: RunRegistry[QueryParityRunState] = RunRegistry("query_parity", QueryParityRunState)
 
 # Per-query timeouts. Synthetic parity queries are meant to be small (the prompt
 # asks for LIMIT/TOP), so keep both sides snappy and treat a slow query as a
@@ -73,25 +72,18 @@ def is_read_only(sql: str) -> bool:
 
 
 def get_run(run_id: str) -> QueryParityRunState | None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        # Return a copy so the caller never observes a half-mutated object.
-        return state.model_copy(deep=True) if state else None
+    return _REGISTRY.get(run_id)
 
 
 def start_run(req: QueryParityRunRequest) -> str:
     run_id = uuid.uuid4().hex[:12]
-    with _LOCK:
-        _RUNS[run_id] = QueryParityRunState(run_id=run_id, queries_total=len(req.queries))
+    _REGISTRY.create(QueryParityRunState(run_id=run_id, queries_total=len(req.queries)))
     threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
     return run_id
 
 
 def _set(run_id: str, mutate) -> None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        if state:
-            mutate(state)
+    _REGISTRY.update(run_id, mutate)
 
 
 def _run_source(source, sql: str) -> tuple[SideResult, list[dict]]:

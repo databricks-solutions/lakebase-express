@@ -193,6 +193,11 @@ in `backend/retry.py` — the source scan, plan executor, data loader and
 foundation-model calls. A resuming serverless database or a rate-limited endpoint
 is retried; a bad password or a syntax error still fails on the first attempt.
 
+Run state (data loads, plan builds, validation, repair, query parity) is held in
+memory and written through to a Lakebase table when the project store is Postgres
+— so runs survive a restart, are visible to other workers, and leave a history at
+`GET /api/runs`. `LBX_RUNS_BACKEND=memory|postgres` overrides.
+
 The app is bound to exactly **one** Databricks workspace, not selectable in the
 UI: locally the CLI profile it was started with, and when deployed the workspace
 the App is published in. Restart with a different profile to switch.

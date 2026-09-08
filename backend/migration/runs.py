@@ -1,8 +1,7 @@
-"""In-memory registry of data-migration runs + background execution.
+"""Data-migration runs + background execution.
 
-A run streams each selected table on a daemon thread and updates a shared
-RunState the API polls. State lives in process memory — fine for a single-user
-accelerator App; swap for a Lakebase table or Redis to make it multi-worker.
+A run streams each selected table on a daemon thread and updates a RunState the
+API polls, persisted through backend/run_registry.py.
 """
 from __future__ import annotations
 
@@ -14,19 +13,16 @@ from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
 from backend.migration.data_loader import capture_and_drop_fks, load_table, restore_fks
 from backend.migration.models import DataLoadRequest, RunState, TableProgress
+from backend.run_registry import RunRegistry
 from backend.schema_migration.naming import map_object, map_schema
 
 log = logging.getLogger("lakebase_express.runs")
 
-_RUNS: dict[str, RunState] = {}
-_LOCK = threading.Lock()
+_REGISTRY: RunRegistry[RunState] = RunRegistry("data_migration", RunState)
 
 
 def get_run(run_id: str) -> RunState | None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        # Return a copy so the caller never observes a half-mutated object.
-        return state.model_copy(deep=True) if state else None
+    return _REGISTRY.get(run_id)
 
 
 def start_run(req: DataLoadRequest) -> str:
@@ -44,17 +40,13 @@ def start_run(req: DataLoadRequest) -> str:
             for t in req.tables
         ],
     )
-    with _LOCK:
-        _RUNS[run_id] = state
+    _REGISTRY.create(state)
     threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
     return run_id
 
 
 def _set(run_id: str, mutate) -> None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        if state:
-            mutate(state)
+    _REGISTRY.update(run_id, mutate)
 
 
 def _execute(run_id: str, req: DataLoadRequest) -> None:

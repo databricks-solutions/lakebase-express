@@ -985,8 +985,7 @@ def _run_request():
 
 def _execute_inline(req):
     run_id = "test-run"
-    with runs._LOCK:
-        runs._RUNS[run_id] = ValidationRunState(run_id=run_id)
+    runs._REGISTRY.create(ValidationRunState(run_id=run_id))
     runs._execute(run_id, req)
     return runs.get_run(run_id)
 
