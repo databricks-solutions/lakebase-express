@@ -1,5 +1,6 @@
-// Connector catalog (Airbyte-style). Only Azure SQL is enabled in this release;
-// the rest are shown as "Coming soon" so the roadmap is visible in the UI.
+// Connector catalog (Airbyte-style). Azure SQL and SQL Server are enabled in this
+// release; the remaining relational sources are shown as "Coming soon" so the
+// roadmap is visible in the UI.
 
 export interface Connector {
   id: string;
@@ -48,12 +49,6 @@ export const SOURCE_CONNECTORS: Connector[] = [
   { id: "postgres", name: "PostgreSQL", category: "Database", description: "Self-managed or cloud Postgres.", abbr: "PG", color: "#336791", enabled: false },
   { id: "mysql", name: "MySQL", category: "Database", description: "MySQL 5.7 / 8.x.", abbr: "My", color: "#4479A1", enabled: false },
   { id: "mariadb", name: "MariaDB", category: "Database", description: "MariaDB server.", abbr: "Ma", color: "#003545", enabled: false },
-  { id: "db2", name: "IBM Db2", category: "Database", description: "IBM Db2 LUW / z/OS.", abbr: "DB", color: "#052FAD", enabled: false },
-  { id: "mongodb", name: "MongoDB", category: "NoSQL", description: "Document store migration to relational.", abbr: "Mo", color: "#47A248", enabled: false },
-  { id: "snowflake", name: "Snowflake", category: "Warehouse", description: "Snowflake data warehouse.", abbr: "SF", color: "#29B5E8", enabled: false },
-  { id: "redshift", name: "Amazon Redshift", category: "Warehouse", description: "AWS Redshift cluster.", abbr: "RS", color: "#8C4FFF", enabled: false },
-  { id: "bigquery", name: "Google BigQuery", category: "Warehouse", description: "GCP BigQuery datasets.", abbr: "BQ", color: "#4285F4", enabled: false },
-  { id: "cockroachdb", name: "CockroachDB", category: "Database", description: "Distributed SQL.", abbr: "CR", color: "#6933FF", enabled: false },
 ];
 
 // Single, fixed destination for this accelerator.
