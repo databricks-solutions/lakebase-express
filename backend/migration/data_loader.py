@@ -15,6 +15,9 @@ foreign keys touching the target tables are captured and dropped up front (a
 re-sync would otherwise fail the TRUNCATE and pay per-row FK validation) and
 restored afterwards, and user triggers are disabled during each table's COPY so
 translated triggers don't fire once per bulk-loaded row.
+
+Transient failures on either side retry. Safe because each runs in one transaction
+that rolls back, so a retry re-copies into a table the failed attempt left empty.
 """
 from __future__ import annotations
 
@@ -22,8 +25,11 @@ import logging
 from typing import Callable
 
 from backend.connectors.azure_sql import AzureSqlConnection
+from backend.connectors.azure_sql import transient_reason as source_transient
 from backend.connectors.lakebase import LakebaseConnection
+from backend.connectors.lakebase import transient_reason as target_transient
 from backend.migration.models import TableLoadSpec
+from backend.retry import DB_POLICY, LOAD_POLICY, call_with_retry
 from backend.schema_migration.naming import map_object, map_schema
 from backend.schema_migration.naming import IdentifierCase
 
@@ -35,11 +41,32 @@ ProgressFn = Callable[[int], None]
 DroppedFk = tuple[str, str, str]
 
 
+def _transient(exc: BaseException) -> str | None:
+    """Either end of the copy can blip."""
+    return source_transient(exc) or target_transient(exc)
+
+
 def capture_and_drop_fks(target: LakebaseConnection, fq_tables: list[str]) -> list[DroppedFk]:
     """Drop every FK that involves (either side) one of the target tables,
     returning enough to recreate each one. Keeps TRUNCATE working on re-syncs
     and removes per-row FK validation from the COPY hot path; the plan's
-    post-data FK items (or restore_fks for data-only runs) put them back."""
+    post-data FK items (or restore_fks for data-only runs) put them back.
+
+    Retried — losing this setup step fails every table. Safe because the single
+    commit means a failed attempt drops nothing.
+    """
+    return call_with_retry(
+        lambda: _capture_and_drop_fks_once(target, fq_tables),
+        policy=DB_POLICY,
+        transient=target_transient,
+        what="capture and drop foreign keys",
+        log=log,
+    )
+
+
+def _capture_and_drop_fks_once(
+    target: LakebaseConnection, fq_tables: list[str]
+) -> list[DroppedFk]:
     pg = target.connect()
     try:
         with pg.cursor() as cur:
@@ -78,17 +105,37 @@ def restore_fks(target: LakebaseConnection, dropped: list[DroppedFk]) -> list[st
     pg = target.connect()
     try:
         for tbl, name, definition in dropped:
-            try:
+            def restore(tbl=tbl, name=name, definition=definition) -> None:
                 with pg.cursor() as cur:
                     cur.execute(f'ALTER TABLE {tbl} ADD CONSTRAINT "{name}" {definition}')
                 pg.commit()
+
+            try:
+                # Retried so a blip isn't reported as an unrestorable FK; orphan
+                # rows (the real failure) are not transient and still surface.
+                call_with_retry(
+                    restore,
+                    policy=DB_POLICY,
+                    transient=target_transient,
+                    what=f"restore foreign key {name} on {tbl}",
+                    log=log,
+                    before_retry=lambda: _safe_rollback(pg),
+                )
             except Exception as exc:
-                pg.rollback()
+                _safe_rollback(pg)
                 log.warning("FK restore failed for %s on %s: %s", name, tbl, exc)
                 failures.append(f"{tbl} {name}: {exc}")
         return failures
     finally:
         pg.close()
+
+
+def _safe_rollback(pg) -> None:
+    """Best-effort — the connection may already be gone."""
+    try:
+        pg.rollback()
+    except Exception:
+        pass
 
 
 def _bit_indices(columns, col_names: list[str]) -> set[int]:
@@ -140,7 +187,33 @@ def load_table(
 
     ``target_schema`` is where the source ``dbo`` schema lands; each table is
     written to its own mapped schema so the source namespaces are preserved.
+
+    A transient failure retries the whole table from row zero; reported progress
+    is rewound to 0 to match.
     """
+    return call_with_retry(
+        lambda: _load_table_once(
+            source, target, spec, target_schema, truncate_first, batch_size,
+            on_progress, identifier_case,
+        ),
+        policy=LOAD_POLICY,
+        transient=_transient,
+        what=f"load {spec.schema_name}.{spec.table_name}",
+        log=log,
+        before_retry=lambda: on_progress(0),
+    )
+
+
+def _load_table_once(
+    source: AzureSqlConnection,
+    target: LakebaseConnection,
+    spec: TableLoadSpec,
+    target_schema: str,
+    truncate_first: bool,
+    batch_size: int,
+    on_progress: ProgressFn,
+    identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+) -> int:
     target_table = map_object(spec.target_table or spec.table_name, identifier_case)
     dst_schema = map_schema(spec.schema_name, target_schema, identifier_case)
     src_sql = f'SELECT {_source_select(spec.columns)} FROM [{spec.schema_name}].[{spec.table_name}]'

@@ -188,6 +188,11 @@ In production the SPA is built and served by the same FastAPI process. Database
 passwords are typed per session or referenced by a workspace-bound Databricks
 secret scope/key (including Key Vault-backed scopes on Azure).
 
+Everything that crosses a network retries transient failures under a shared policy
+in `backend/retry.py` — the source scan, plan executor, data loader and
+foundation-model calls. A resuming serverless database or a rate-limited endpoint
+is retried; a bad password or a syntax error still fails on the first attempt.
+
 The app is bound to exactly **one** Databricks workspace, not selectable in the
 UI: locally the CLI profile it was started with, and when deployed the workspace
 the App is published in. Restart with a different profile to switch.
