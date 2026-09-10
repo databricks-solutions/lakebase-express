@@ -1,11 +1,9 @@
 """In-memory run state, written through to the configured RunStore.
 
-Replaces the per-module ``{run_id: state}`` dicts. Memory stays the hot path for
-polling; reads fall back to the store, so a run owned by another worker (or
-started before a restart) is still visible.
-
-Progress ticks fire per COPY batch, so writes are throttled: a status change or a
-terminal state flushes at once, anything else at most every ``_FLUSH_SECONDS``.
+Memory stays the hot path for polling; reads fall back to the store, so a run owned
+by another worker (or started before a restart) is still visible. Progress ticks
+fire per COPY batch, so writes are throttled — a status change or a terminal state
+flushes at once, anything else at most every ``_FLUSH_SECONDS``.
 """
 from __future__ import annotations
 
@@ -97,9 +95,8 @@ class RunRegistry(Generic[S]):
     def _persist(self, state: S, version: int) -> None:
         run_id = state.run_id  # type: ignore[attr-defined]
         with self._write_lock:
-            # Snapshots are taken under the main lock but written outside it, so an
-            # older one can arrive late. Dropping it keeps a finished run from being
-            # overwritten by a stale "running".
+            # Snapshots are written outside the main lock, so a late older one must
+            # not overwrite a finished run with a stale "running".
             if self._written.get(run_id, 0) >= version:
                 return
             self._written[run_id] = version

@@ -195,7 +195,7 @@ class TableProgress(BaseModel):
     rows_copied: int = 0
     total_rows: int = 0
     error: str | None = None
-    # UTC ISO 8601, set as the table starts and finishes.
+    # UTC ISO 8601.
     started_at: str | None = None
     finished_at: str | None = None
 
@@ -220,9 +220,8 @@ class TaskProgress(BaseModel):
 class AsyncRunState(BaseModel):
     """A load handed to a Databricks job (async mode).
 
-    Stored as ``async_job`` (a provisioned job) or ``async_run`` (one execution) —
-    see migration/async_runs. Nothing here observes a job finish: the generated
-    notebooks advance their own run's status from inside the job.
+    Stored as ``async_job`` (provisioned) or ``async_run`` (one execution) — see
+    migration/async_runs. The notebooks advance their own run's status.
     """
     run_id: str                          # ours (uuid), not the Databricks run id
     # async_job: created|scheduled, both terminal.
@@ -237,8 +236,7 @@ class AsyncRunState(BaseModel):
     scheduled: bool = False
     quartz_cron: str | None = None
     error: str | None = None
-    # Per task, keyed by the Databricks job task key. Written by the notebooks, so
-    # it fills in as the chain runs — including for runs this app never saw.
+    # Keyed by Databricks job task key, filled in by the notebooks as the chain runs.
     tasks: dict[str, TaskProgress] = {}
     started_at: str | None = None
     finished_at: str | None = None

@@ -325,6 +325,8 @@ export interface AsyncSetupResult {
   lbx_run_id?: string | null;
   // Set when the job cannot record its own state (no run store, or no grant).
   run_state_warning?: string | null;
+  // What to run to fix it, when it is fixable.
+  run_state_fix?: string | null;
   url?: string | null;
   run_url?: string | null;
   scheduled: boolean;
@@ -669,6 +671,9 @@ export const api = {
     post<{ job_id: number; run_id: number; url: string | null; run_url: string | null; notebook_path: string }>("/api/migration/job/submit", body),
   scheduleJob: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string }) =>
     post<{ job_id: number; url: string | null; notebook_path: string; scheduled: boolean }>("/api/migration/job/schedule", body),
+  runStateAccess: (body: { job_id: number }) =>
+    post<{ ok: boolean; warning?: string | null; fix?: string | null }>(
+      "/api/migration/async/run-state-access", body),
   asyncSetup: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string; run_now: boolean }) =>
     post<AsyncSetupResult>("/api/migration/async/setup", body),
   ensureSecrets: (body: {

@@ -25,13 +25,11 @@ log = logging.getLogger("lakebase_express.job_offload")
 # carries no project id.
 JOB_NAME = "lakebase-express-snapshot"
 
-# The id identifies the project durably (names change, and so can the job's own
-# name); the name is carried alongside it so the Jobs UI is readable.
+# The id identifies the job durably; the name only makes the Jobs UI readable.
 PROJECT_ID_TAG = "lbx_project_id"
 PROJECT_NAME_TAG = "lbx_project"
 
-# How far to look for a job by tag when its name no longer matches. Bounded: the
-# fallback runs only when we would otherwise create a duplicate.
+# Bounded: the tag scan only runs when we would otherwise create a duplicate.
 _TAG_SCAN_LIMIT = 500
 
 # Cap on the project name in a job title.
@@ -39,8 +37,8 @@ _NAME_LIMIT = 60
 
 
 def project_name(project_id: str) -> str:
-    """The project's display name, best effort — bookkeeping must not fail a
-    provision, and API clients may reference a project this app never stored."""
+    """The project's display name, best effort — decoration must not fail a
+    provision."""
     if not project_id:
         return ""
     try:
@@ -54,28 +52,25 @@ def project_name(project_id: str) -> str:
 
 
 def job_name(project_id: str, name: str | None = None) -> str:
-    """One job per migration project, titled by the project so it is recognisable in
-    a list of jobs. Titles are not unique — two projects may share a name — so what
-    identifies the job is the project id in its tags, not this (see _find_job)."""
+    """One job per migration project, titled by the project so it is recognisable.
+    Titles are not unique; the id tag is what identifies it (see _find_job)."""
     if not project_id:
         return JOB_NAME
     label = (name if name is not None else project_name(project_id)).strip()
     label = " ".join(label.split())[:_NAME_LIMIT]
-    # No resolvable name: fall back to the id rather than a title shared with every
-    # other project we cannot name.
+    # No name: the id, rather than a title shared by every unnameable project.
     return f"{JOB_NAME} · {label}" if label else f"{JOB_NAME} ({project_id})"
 
 
 def _tag_value(value: str) -> str:
-    """Job tags reach the cloud provider, which rejects characters Databricks
-    itself allows in a project name."""
+    """Tags reach the cloud provider, which rejects characters Databricks allows in
+    a project name."""
     kept = "".join(c if (c.isalnum() or c in " +-=._:/@") else "-" for c in value)
     return " ".join(kept.split())[:255]
 
 
 def job_tags(project_id: str, name: str | None = None) -> dict[str, str]:
-    """Tags let the Jobs UI filter by project, and identify the job even after it
-    or the project is renamed."""
+    """Lets the Jobs UI filter by project, and survives either being renamed."""
     if not project_id:
         return {}
     tags = {PROJECT_ID_TAG: _tag_value(project_id)}
@@ -86,9 +81,8 @@ def job_tags(project_id: str, name: str | None = None) -> dict[str, str]:
 
 
 def project_dir(workspace_dir: str, project_id: str) -> str:
-    """Per-project notebook folder — the other half of the same collision: separate
-    jobs pointing at one shared folder would both run whichever load was uploaded
-    last."""
+    """Per-project notebook folder — separate jobs sharing one folder would both run
+    whichever load was uploaded last."""
     base = workspace_dir.rstrip("/")
     return f"{base}/{project_id}" if project_id else base
 
@@ -133,10 +127,9 @@ def _project_of(job) -> str | None:
 def _find_job(w, name: str, project_id: str):
     """The job we already manage for this project, if any.
 
-    Titles are not unique, so a same-named job is only ours if it is not tagged for
-    a different project — otherwise two projects sharing a name would repoint each
-    other's job. Failing that, search by tag, which also survives the project (or
-    the job) being renamed.
+    A same-named job is only ours if it is not tagged for another project, or two
+    projects sharing a name would repoint each other's. The tag scan then catches a
+    job whose project (or title) was renamed.
     """
     untagged = None
     for job in w.jobs.list(name=name):
@@ -265,17 +258,30 @@ def create_scheduled_job(
     }
 
 
-def run_as_identity(w, job_id: int) -> str:
-    """The identity a job's tasks run as — who needs write access to the run store.
-    Falls back to the caller, which is what an unset run_as defaults to."""
+def run_as_identity(w, job_id: int) -> tuple[str, str]:
+    """(name, identity_type) of the identity a job's tasks run as — who needs a
+    Lakebase role and write access. Falls back to the caller, as run_as does."""
     try:
         job = w.jobs.get(job_id=job_id)
+        run_as = getattr(getattr(job, "settings", None), "run_as", None)
+        if run_as is not None:
+            if getattr(run_as, "service_principal_name", None):
+                return run_as.service_principal_name, "SERVICE_PRINCIPAL"
+            if getattr(run_as, "user_name", None):
+                return run_as.user_name, "USER"
         name = getattr(job, "run_as_user_name", None)
         if name:
-            return name
+            return name, _identity_type(name)
     except Exception:
         pass
-    return w.current_user.me().user_name
+    name = w.current_user.me().user_name
+    return name, _identity_type(name)
+
+
+def _identity_type(name: str) -> str:
+    """Only for a job with no structured run_as: user names are emails, a service
+    principal's is its application id."""
+    return "USER" if "@" in name else "SERVICE_PRINCIPAL"
 
 
 def job_status(run_id: int) -> dict:

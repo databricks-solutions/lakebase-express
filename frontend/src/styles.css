@@ -379,6 +379,8 @@ a { color: var(--primary); }
 .btn--danger { background: var(--err); color: #fff; border-color: var(--err); }
 .btn--danger:hover:not(:disabled) { background: #a82424; border-color: #a82424; }
 .btn--sm { padding: 4px 10px; font-size: 12px; }
+/* Icon-only: square, no text gap. */
+.btn--icon { padding: 4px 7px; gap: 0; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .saved-flag { display: inline-flex; align-items: center; color: var(--ok); font-size: 13px; font-weight: 600; }

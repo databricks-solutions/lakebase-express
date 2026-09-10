@@ -52,9 +52,7 @@ PG_PASSWORD = dbutils.secrets.get(scope="__SCOPE__", key="__PG_PWD_KEY__")'''
 
 
 # Emitted when the app has a Lakebase-backed run store: the job records its own
-# status there. Authentication is a short-lived OAuth credential minted from the
-# job's identity, so no password is embedded. The app owns the table and granted
-# this identity INSERT/UPDATE; see run_store.grant_writer.
+# status there, over a short-lived OAuth credential so no password is embedded.
 _RUN_STATE = '''\
 RUN_STORE_HOST = "__RS_HOST__"
 RUN_STORE_PORT = __RS_PORT__
@@ -63,8 +61,7 @@ RUN_STORE_TABLE = "__RS_TABLE__"
 RUN_STORE_ENDPOINT = "__RS_ENDPOINT__"
 RUN_STORE_PROJECT = "__RS_PROJECT__"
 RUN_STATE_PHASE = "__RS_PHASE__"
-# Every task of this job, in chain order, so a task can tell whether the run as a
-# whole is finished or whether post-load tasks still follow.
+# This job's tasks in chain order, so a task knows whether it is the last.
 RUN_STATE_TASKS = __RS_TASKS__
 
 dbutils.widgets.text("job_id", "")
@@ -74,8 +71,8 @@ _task_started_at = None
 
 
 def _run_state_id():
-    """One id per job run, identical in every task of the chain — so the load and
-    the post-load tasks update the same row. Also derivable by the app."""
+    """One id per job run, shared by every task of the chain and derivable by the
+    app, so they all update the same row."""
     import uuid
 
     key = f'{dbutils.widgets.get("job_id")}:{dbutils.widgets.get("job_run_id")}'
@@ -83,8 +80,8 @@ def _run_state_id():
 
 
 def _report_run_state(status, error=None):
-    """Record this task's state in the app's run store. Best effort: bookkeeping
-    must never fail a migration, so any problem is printed and swallowed."""
+    """Record this task's state. Best effort — bookkeeping must never fail a
+    migration, so problems are printed and swallowed."""
     global _task_started_at
     try:
         import json
@@ -96,8 +93,7 @@ def _report_run_state(status, error=None):
         now = datetime.now(timezone.utc).isoformat()
         if status == "running":
             _task_started_at = now
-        # The run is finished only once its last task is: a task succeeding
-        # part-way through the chain still has post-load tasks to go.
+        # Only the last task finishing finishes the run.
         last = RUN_STATE_PHASE == RUN_STATE_TASKS[-1]
         overall = status if (status == "failed" or last) else "running"
         data = {
@@ -114,8 +110,7 @@ def _report_run_state(status, error=None):
                 "error": error,
             }},
         }
-        # Only the first task stamps the run's start; the merge below leaves keys a
-        # later payload does not carry, so it survives.
+        # Only the first task stamps the run's start; the merge keeps it.
         if status == "running" and RUN_STATE_PHASE == RUN_STATE_TASKS[0]:
             data["started_at"] = now
         if overall != "running":
@@ -127,8 +122,7 @@ def _report_run_state(status, error=None):
             "(run_id, kind, project_id, status, data, updated_at) "
             "VALUES (%s::uuid, %s, %s::uuid, %s, %s::jsonb, now()) "
             "ON CONFLICT (run_id) DO UPDATE SET status = EXCLUDED.status, "
-            # Merge one level into "tasks" so each task adds its own entry instead
-            # of replacing what the earlier tasks recorded.
+            # Merge into "tasks", or each task would erase the others.
             f"data = {table}.data || (EXCLUDED.data - 'tasks') "
             f"|| jsonb_build_object('tasks', "
             f"COALESCE({table}.data -> 'tasks', '{{}}'::jsonb) || (EXCLUDED.data -> 'tasks')), "
@@ -671,8 +665,8 @@ def _post_load_rows(statements: list[PostLoadStatement]) -> str:
 
 
 def _render_run_state(req: DataGenRequest, phase: str) -> tuple[str, str]:
-    """(reporter block, extra pip packages) for one notebook. Without a run store
-    the reporter is a no-op stub, so the templates' calls stay valid."""
+    """(reporter block, extra pip packages). Without a run store the reporter is a
+    no-op stub, so the templates' calls stay valid."""
     rs = req.run_store
     if rs is None:
         return _RUN_STATE_STUB, ""
@@ -740,19 +734,16 @@ LOADER_TASK_KEY = "load"
 
 
 def task_key(filename_stem: str) -> str:
-    """Job task key derived from the notebook filename stem, minus its numeric
-    prefix: 02_post_load_constraints -> post_load_constraints. The snapshot loader
-    keeps the stable key "load". Shared with job_offload, which builds the task
-    graph, and with the run-state reporter, so recorded task keys are the ones the
-    Jobs UI shows."""
+    """Task key from the notebook filename stem, minus its numeric prefix:
+    02_post_load_constraints -> post_load_constraints; the loader keeps "load".
+    Shared with job_offload, so recorded keys are the ones the Jobs UI shows."""
     parts = filename_stem.split("_", 1)
     stem = parts[1] if len(parts) > 1 and parts[0].isdigit() else filename_stem
     return LOADER_TASK_KEY if stem == "snapshot_load" else stem
 
 
 def run_task_keys(req: DataGenRequest) -> list[str]:
-    """Every task this request will produce, in chain order — so each notebook can
-    tell whether it is the last and the run as a whole has finished."""
+    """Every task this request will produce, in chain order."""
     return [LOADER_TASK_KEY] + [
         f"post_load_{key}" for key, _title, kinds in _POST_LOAD_PHASES
         if any(s.kind in kinds and s.sql.strip() for s in req.post_load_sql)

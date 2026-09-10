@@ -193,6 +193,10 @@ def test_async_setup_create_only_leaves_job_unstarted(monkeypatch):
 
 PROJECT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 PROJECT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+# A service principal's Postgres role name is its application id; a user's is an
+# email. The "@" is what tells them apart when a job carries no structured run_as.
+SP_IDENTITY = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+USER_IDENTITY = "someone@example.com"
 
 
 def _named(monkeypatch, **names):
@@ -233,9 +237,8 @@ def test_an_unnamed_project_is_still_tagged_with_its_id(monkeypatch):
 
 
 def test_renaming_a_project_reuses_its_job_instead_of_duplicating_it(monkeypatch):
-    """The name is part of the job's title, so a rename stops it matching. Matching
-    the tag as well keeps one job per project — a duplicate would carry its own
-    schedule and refresh the same tables."""
+    """A rename stops the title matching; the tag keeps it one job per project. A
+    duplicate would carry its own schedule and refresh the same tables."""
     client = _patch(monkeypatch, existing_job_id=77,
                     existing_name="lakebase-express-snapshot · Old",
                     existing_tags={"lbx_project_id": PROJECT_A, "lbx_project": "Old"})
@@ -301,9 +304,8 @@ def test_an_unresolvable_project_name_does_not_fail_provisioning(monkeypatch):
 
 
 def test_each_project_gets_its_own_job_and_notebook_folder(monkeypatch):
-    """Two projects provisioned in a row used to share one job AND one notebook
-    folder, so the second silently repointed the first at its own load — the bug
-    only shows up when the first project is finally run."""
+    """Two projects in a row used to share one job and one folder, so the second
+    silently repointed the first at its own load."""
     a = _patch(monkeypatch)
     job_offload.create_scheduled_job(_req(project_id=PROJECT_A), "/W/lbx")
     b = _patch(monkeypatch)
@@ -373,9 +375,8 @@ def test_async_setup_records_the_run_so_it_appears_in_history(monkeypatch):
 
 
 def test_create_job_run_later_records_a_job_and_leaves_the_runs_to_the_notebooks(monkeypatch):
-    """The 'create job, run later' path: nothing has executed yet, so there is no
-    run to record — only the job. Its executions are recorded from inside the
-    notebooks, however they are triggered."""
+    """'Create job, run later': nothing has executed, so there is no run yet — each
+    execution records itself from inside the notebooks."""
     _patch(monkeypatch)
     store = _recorded_states(monkeypatch)
     out = async_setup.setup_async(_req(), "/Workspace/Shared/x", run_now=False)
@@ -386,16 +387,16 @@ def test_create_job_run_later_records_a_job_and_leaves_the_runs_to_the_notebooks
 
 
 def test_create_job_run_later_still_grants_and_wires_reporting(monkeypatch):
-    """Whatever the app records, the job must be able to report for itself: the
-    notebooks carry the coordinates and the run-as identity holds the grant before
-    anyone presses Run now."""
+    """The job must be able to report for itself: coordinates in the notebooks, grant
+    in place, before anyone presses Run now."""
     from backend.migration import async_setup as mod
 
     client = _patch(monkeypatch)
     _recorded_states(monkeypatch)
     seen: dict = {}
     monkeypatch.setattr(mod, "get_run_store", lambda: _StoreWithNotebookConfig(seen))
-    monkeypatch.setattr(mod, "run_as_identity", lambda w, job_id: "sp-123")
+    monkeypatch.setattr(mod, "run_as_identity",
+                        lambda w, job_id: ("sp-123", "SERVICE_PRINCIPAL"))
     out = mod.setup_async(_req(), "/Workspace/Shared/x", run_now=False)
 
     assert "run_state_warning" not in out
@@ -485,12 +486,111 @@ def test_a_failed_grant_is_surfaced_not_swallowed(monkeypatch):
 
     _patch(monkeypatch)
     monkeypatch.setattr(mod, "get_run_store", lambda: _StoreThatRefusesGrants())
-    monkeypatch.setattr(mod, "run_as_identity", lambda w, job_id: "sp-123")
+    monkeypatch.setattr(mod, "run_as_identity",
+                        lambda w, job_id: ("sp-123", "SERVICE_PRINCIPAL"))
     out = mod.setup_async(_req(), "/Workspace/Shared/x")
 
     assert "sp-123" in out["run_state_warning"]
     assert "not appear in run history" in out["run_state_warning"]
     assert out["job_id"] == 100  # provisioning still succeeded
+
+
+# --- run-as identity -------------------------------------------------------------
+#
+# The identity decides which Lakebase role the job needs. Deployed, the job runs as
+# the app's service principal, whose Postgres role Lakebase does not create for you.
+
+
+def _job(run_as=None, run_as_user_name=None):
+    settings = SimpleNamespace(run_as=run_as)
+    return SimpleNamespace(settings=settings, run_as_user_name=run_as_user_name)
+
+
+def _client_for(job):
+    return SimpleNamespace(
+        jobs=SimpleNamespace(get=lambda job_id: job),
+        current_user=SimpleNamespace(me=lambda: SimpleNamespace(user_name="caller@x.com")),
+    )
+
+
+def test_a_service_principal_run_as_is_read_from_the_job():
+    job = _job(run_as=SimpleNamespace(service_principal_name=SP_IDENTITY, user_name=None))
+    assert job_offload.run_as_identity(_client_for(job), 1) == (SP_IDENTITY, "SERVICE_PRINCIPAL")
+
+
+def test_a_user_run_as_is_read_from_the_job():
+    job = _job(run_as=SimpleNamespace(service_principal_name=None, user_name="a@b.com"))
+    assert job_offload.run_as_identity(_client_for(job), 1) == ("a@b.com", "USER")
+
+
+def test_an_unset_run_as_falls_back_to_the_jobs_owner():
+    """run_as defaults to whoever created the job, and only the flat field carries it
+    — so the type comes from the name's shape: user names are email addresses."""
+    sp = _job(run_as=None, run_as_user_name=SP_IDENTITY)
+    assert job_offload.run_as_identity(_client_for(sp), 1)[1] == "SERVICE_PRINCIPAL"
+    user = _job(run_as=None, run_as_user_name=USER_IDENTITY)
+    assert job_offload.run_as_identity(_client_for(user), 1) == (USER_IDENTITY, "USER")
+
+
+def test_an_unreadable_job_falls_back_to_the_caller():
+    client = SimpleNamespace(
+        jobs=SimpleNamespace(get=lambda job_id: (_ for _ in ()).throw(RuntimeError("nope"))),
+        current_user=SimpleNamespace(me=lambda: SimpleNamespace(user_name="caller@x.com")),
+    )
+    assert job_offload.run_as_identity(client, 1) == ("caller@x.com", "USER")
+
+
+def test_a_missing_role_is_reported_with_the_command_that_creates_it(monkeypatch):
+    """The app cannot create the role itself, so the one thing it can do is hand over
+    exactly what to run — otherwise every new deployment debugs a password failure."""
+    from backend.migration import async_setup as mod
+
+    _patch(monkeypatch)
+    _recorded_states(monkeypatch)
+    monkeypatch.setattr(mod, "get_run_store", lambda: _StoreWithoutTheRole())
+    monkeypatch.setattr(mod, "run_as_identity",
+                        lambda w, job_id: (SP_IDENTITY, "SERVICE_PRINCIPAL"))
+    out = mod.setup_async(_req(), "/W/lbx", run_now=False)
+
+    assert "no Lakebase Postgres role" in out["run_state_warning"]
+    fix = out["run_state_fix"]
+    assert f"SELECT databricks_create_role('{SP_IDENTITY}', 'SERVICE_PRINCIPAL');" in fix
+    assert "CREATE EXTENSION IF NOT EXISTS databricks_auth;" in fix
+    # Names the project to run it against, not the endpoint path.
+    assert "databricks psql --project p" in fix
+    assert "/endpoints/" not in fix
+    assert out["job_id"] == 100  # provisioning still succeeded
+
+
+def test_the_identity_type_shapes_the_instructions(monkeypatch):
+    """A role created with the wrong type does not authenticate, so a user identity
+    must not be handed service-principal instructions."""
+    from backend.migration import async_setup as mod
+
+    _patch(monkeypatch)
+    _recorded_states(monkeypatch)
+    monkeypatch.setattr(mod, "get_run_store", lambda: _StoreWithoutTheRole())
+    monkeypatch.setattr(mod, "run_as_identity",
+                        lambda w, job_id: (USER_IDENTITY, "USER"))
+    fix = mod.setup_async(_req(), "/W/lbx", run_now=False)["run_state_fix"]
+
+    assert f"SELECT databricks_create_role('{USER_IDENTITY}', 'USER');" in fix
+    assert "SERVICE_PRINCIPAL" not in fix
+
+
+def test_a_grant_failure_that_is_not_a_missing_role_says_so(monkeypatch):
+    from backend.migration import async_setup as mod
+
+    _patch(monkeypatch)
+    _recorded_states(monkeypatch)
+    monkeypatch.setattr(mod, "get_run_store", lambda: _StoreThatRefusesGrants())
+    monkeypatch.setattr(mod, "run_as_identity", lambda w, job_id: ("sp-123", "SERVICE_PRINCIPAL"))
+    out = mod.setup_async(_req(), "/W/lbx", run_now=False)
+
+    assert "permission denied" in out["run_state_warning"]
+    assert "no Lakebase Postgres role" not in out["run_state_warning"]
+    # Still offered, since a missing role is the likeliest cause of any grant failure.
+    assert "databricks_create_role" in out["run_state_fix"]
 
 
 class _StoreWithNotebookConfig:
@@ -514,9 +614,79 @@ class _StoreWithoutNotebookConfig(_StoreWithNotebookConfig):
         return None
 
 
+class _StoreWithoutTheRole(_StoreWithNotebookConfig):
+    """Lakebase has no Postgres role for the grantee — every deployed app starts here."""
+
+    def __init__(self):
+        super().__init__({})
+
+    def grant_writer(self, identity):
+        exc = RuntimeError(f'role "{identity}" does not exist')
+        exc.sqlstate = "42704"
+        raise exc
+
+
 class _StoreThatRefusesGrants(_StoreWithNotebookConfig):
     def __init__(self):
         super().__init__({})
 
     def grant_writer(self, identity):
-        raise RuntimeError("role does not exist")
+        raise RuntimeError("permission denied")
+
+
+# --- re-validating access --------------------------------------------------------
+#
+# The app cannot create the job identity's Lakebase role, so the user does it and
+# then needs to confirm — without provisioning the whole job again to find out.
+
+
+def test_the_recheck_confirms_access_once_the_role_exists(monkeypatch):
+    from backend.api import migration_routes
+    from backend.migration import async_setup as mod
+
+    seen: dict = {}
+    monkeypatch.setattr(mod, "get_run_store", lambda: _StoreWithNotebookConfig(seen))
+    monkeypatch.setattr(mod, "workspace_client", lambda: _patch(monkeypatch))
+    monkeypatch.setattr(mod, "run_as_identity", lambda w, job_id: ("sp-1", "SERVICE_PRINCIPAL"))
+
+    out = migration_routes.run_state_access(migration_routes.RunStateAccessRequest(job_id=100))
+    assert out == {"ok": True}
+    assert seen["granted"] == "sp-1"
+
+
+def test_the_recheck_repeats_the_fix_while_the_role_is_still_missing(monkeypatch):
+    from backend.api import migration_routes
+    from backend.migration import async_setup as mod
+
+    monkeypatch.setattr(mod, "get_run_store", lambda: _StoreWithoutTheRole())
+    monkeypatch.setattr(mod, "workspace_client", lambda: _patch(monkeypatch))
+    monkeypatch.setattr(mod, "run_as_identity", lambda w, job_id: ("sp-1", "SERVICE_PRINCIPAL"))
+
+    out = migration_routes.run_state_access(migration_routes.RunStateAccessRequest(job_id=100))
+    assert out["ok"] is False
+    assert "no Lakebase Postgres role" in out["warning"]
+    assert "databricks_create_role" in out["fix"]
+
+
+def test_the_recheck_reports_a_run_store_that_no_job_can_reach(monkeypatch):
+    """Nothing for the user to fix here, so no snippet is offered."""
+    from backend.api import migration_routes
+    from backend.migration import async_setup as mod
+
+    monkeypatch.setattr(mod, "get_run_store", lambda: _StoreWithoutNotebookConfig())
+    out = migration_routes.run_state_access(migration_routes.RunStateAccessRequest(job_id=100))
+    assert out["ok"] is False and out["fix"] is None
+    assert "will not be recorded" in out["warning"]
+
+
+def test_the_offered_sql_is_valid_postgres():
+    import pglast
+    from backend.migration import async_setup as mod
+
+    ep = "projects/example-project/branches/production/endpoints/primary"
+    pglast.parse_sql(mod.create_role_snippet(SP_IDENTITY, "SERVICE_PRINCIPAL", ep))
+    # A quote in an identity would otherwise end the literal and hand the user
+    # a snippet that does not run.
+    quoted = mod.create_role_snippet("a'b", "USER", ep)
+    assert "'a''b'" in quoted
+    pglast.parse_sql(quoted)

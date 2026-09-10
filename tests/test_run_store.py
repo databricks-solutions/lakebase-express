@@ -116,13 +116,19 @@ def test_memory_store_lists_newest_first_and_filters_by_kind():
 # --- PostgresRunStore (fake psycopg connection; no live DB) ------------------
 
 
+class _UndefinedObject(Exception):
+    """psycopg raises this SQLSTATE when a GRANT names a role that does not exist."""
+    sqlstate = "42704"
+
+
 class _FakeCursor:
     """psycopg-cursor stand-in over a shared dict, enough for the store's SQL."""
 
-    def __init__(self, rows, sql, dict_row=False):
+    def __init__(self, rows, sql, dict_row=False, roles=None):
         self._rows = rows
         self._sql = sql
         self._dict_row = dict_row
+        self._roles = roles if roles is not None else set()
         self._result: list = []
 
     def __enter__(self):
@@ -134,7 +140,12 @@ class _FakeCursor:
     def execute(self, sql, params=None):
         s = " ".join(sql.split())
         self._sql.append(s)
-        if s.startswith(("CREATE TABLE", "CREATE INDEX", "GRANT")):
+        if s.startswith("GRANT"):
+            grantee = s.rsplit(" TO ", 1)[1].strip('"').replace('""', '"')
+            if grantee not in self._roles:
+                raise _UndefinedObject(f'role "{grantee}" does not exist')
+            self._result = []
+        elif s.startswith(("CREATE TABLE", "CREATE INDEX")):
             self._result = []
         elif s.startswith("INSERT INTO"):
             rid, kind, pid, status, payload = params
@@ -171,12 +182,14 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, rows, sql):
+    def __init__(self, rows, sql, roles=None):
         self._rows = rows
         self._sql = sql
+        self._roles = roles if roles is not None else set()
 
     def cursor(self, row_factory=None):
-        return _FakeCursor(self._rows, self._sql, dict_row=row_factory is not None)
+        return _FakeCursor(self._rows, self._sql, dict_row=row_factory is not None,
+                           roles=self._roles)
 
     def commit(self):
         pass
@@ -195,9 +208,13 @@ def pg_store(monkeypatch):
 
     rows: dict = {}
     sql: list[str] = []
-    monkeypatch.setattr(psycopg, "connect", lambda **kw: _FakeConn(rows, sql))
+    # Roles Lakebase already has. Starts empty: only the project owner gets one, and
+    # a deployed app's service principal is not it.
+    roles: set = set()
+    monkeypatch.setattr(psycopg, "connect", lambda **kw: _FakeConn(rows, sql, roles))
     store = PostgresRunStore(host="h", database="databricks_postgres", user="u",
                              port=5432, password="p")
+    store.roles = roles  # type: ignore[attr-defined]
     return store, rows, sql
 
 
@@ -629,6 +646,7 @@ def test_memory_store_offers_no_notebook_config():
 
 def test_grant_writer_is_least_privilege_and_keeps_ownership(pg_store):
     store, _rows, sql = pg_store
+    store.roles.add("sp-client-id")
     store.grant_writer("sp-client-id")
 
     granted = [s for s in sql if s.startswith("GRANT")]
@@ -640,9 +658,19 @@ def test_grant_writer_is_least_privilege_and_keeps_ownership(pg_store):
     assert not any("DELETE" in s or "OWNER" in s for s in granted)
 
 
+def test_grant_writer_reports_a_missing_role_as_undefined_object(pg_store):
+    """Lakebase gives a role only to the project owner. The store cannot create one,
+    so it raises and the caller turns this SQLSTATE into instructions."""
+    store, _rows, _sql = pg_store  # no roles registered
+    with pytest.raises(Exception) as caught:
+        store.grant_writer("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    assert caught.value.sqlstate == "42704"
+
+
 def test_grant_writer_quotes_an_identity_safely(pg_store):
     # Databricks identities are emails or client ids, so the role name must be
     # quoted; an embedded quote must not break out of the identifier.
     store, _rows, sql = pg_store
+    store.roles.add('od"d@example.com')
     store.grant_writer('od"d@example.com')
     assert 'TO "od""d@example.com"' in " | ".join(s for s in sql if s.startswith("GRANT"))

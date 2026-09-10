@@ -18,9 +18,8 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("lakebase_express.run_store")
 
-# One Databricks job run must land on one row, whichever task (or the app) writes
-# it, so the id is derived from the run rather than random. Mirrored by the
-# generated notebooks — see etl_generator._RUN_STATE.
+# Derived, not random, so every task of a job run lands on one row. Mirrored by
+# the generated notebooks (etl_generator._RUN_STATE).
 RUN_ID_PREFIX = "lakebase-express/run/"
 
 
@@ -90,34 +89,31 @@ class MemoryRunStore(RunStore):
 
 
 class PostgresRunStore(RunStore):
-    """One row per run in a Lakebase table.
+    """One row per run in a Lakebase table, keyed by a native ``uuid``.
 
-    ``run_id`` is a native ``uuid`` primary key, matching ``lbx_projects.id``.
-    ``project_id`` references the owning project and is nullable — a run can be
-    started before a project exists. No foreign key: the projects table may live
-    in another backend entirely (local files, a UC volume), and a missing
-    reference must not stop a run being recorded.
+    ``project_id`` is nullable and has no foreign key: the projects table may live
+    in another backend entirely, and a missing reference must not stop a run being
+    recorded.
     """
 
     def __init__(self, *, host: str, database: str, user: str, port: int,
                  password: str, sslmode: str = "require", table: str = "lbx_runs",
                  endpoint: str = ""):
-        # Lakebase endpoint resource path (projects/../branches/../endpoints/..).
-        # Required to mint OAuth credentials; only jobs use it, not the app.
+        # projects/../branches/../endpoints/.. — only jobs use it, to mint OAuth.
         self._endpoint = endpoint
         self._conn_kwargs = dict(
             host=host, dbname=database, user=user, password=password,
             port=port, sslmode=sslmode, connect_timeout=15,
             application_name="lakebase-express-runs",
         )
-        # Identifier is from config, not user input; keep it simple and quote it.
+        # From config, not user input — quoting is enough.
         self._table_raw = table.replace('"', "")
         self._table = f'"{self._table_raw}"'
         self._ensured = False
 
     def notebook_config(self) -> dict | None:
         """Non-secret coordinates for a job to write run state over OAuth. None
-        without an endpoint path, since there is no other way to authenticate."""
+        without an endpoint path — there is no other way to authenticate."""
         if not self._endpoint:
             return None
         return {
@@ -129,8 +125,12 @@ class PostgresRunStore(RunStore):
         }
 
     def grant_writer(self, identity: str) -> None:
-        """Let a Databricks identity record runs. Idempotent, and least privilege:
-        no DDL, no DELETE. The app stays the table's owner."""
+        """Let a Databricks identity record runs — least privilege, idempotent.
+
+        The identity needs a Lakebase role already; the app cannot create one from a
+        password session, so a missing role raises undefined_object and the caller
+        turns that into instructions.
+        """
         role = '"' + identity.replace('"', '""') + '"'
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(f"GRANT USAGE ON SCHEMA public TO {role}")
@@ -159,8 +159,7 @@ class PostgresRunStore(RunStore):
                     "created_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
                     "updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
                 )
-                # Unlike projects, this table grows one row per run: history is read
-                # newest-first per kind, and per project via the link.
+                # This table grows per run: history is read newest-first per kind.
                 cur.execute(
                     f'CREATE INDEX IF NOT EXISTS "{self._table_raw}_kind_updated_idx" '
                     f"ON {self._table} (kind, updated_at DESC)"
@@ -231,10 +230,8 @@ class PostgresRunStore(RunStore):
 
 
 def _runs_endpoint(host: str) -> str:
-    """The Lakebase endpoint path the generated jobs authenticate against. Resolved
-    from the host we already connect to, so it needs no configuring;
-    ``LBX_PROJECTS_PG_ENDPOINT`` overrides it when the identity cannot list
-    Lakebase projects."""
+    """Endpoint path the generated jobs authenticate against, resolved from the host
+    so it needs no configuring. ``LBX_PROJECTS_PG_ENDPOINT`` overrides."""
     configured = os.getenv("LBX_PROJECTS_PG_ENDPOINT", "").strip()
     if configured:
         return configured

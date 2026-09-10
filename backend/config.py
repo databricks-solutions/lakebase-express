@@ -72,15 +72,10 @@ def workspace_client() -> WorkspaceClient:
 def lakebase_endpoint(host: str) -> str:
     """The Lakebase endpoint resource path serving ``host``, or "" if unknown.
 
-    Minting an OAuth database credential needs the resource path
-    (``projects/../branches/../endpoints/..``), which cannot be derived from the
-    hostname — the host carries a server-generated id. So walk the projects the
-    identity can see and match on the host exactly; a near miss would hand out a
-    credential for the wrong database.
-
-    Never raises: the caller can still connect with a password, and listing
-    Lakebase projects is a workspace-level read the deployed app's service
-    principal may not have.
+    The path cannot be derived from the hostname (which carries a server-generated
+    id), so match on the host exactly — a near miss would mint a credential for the
+    wrong database. Never raises: listing Lakebase projects is a workspace read the
+    deployed app's service principal may not have.
     """
     wanted = _host_label(host).lower()
     if not wanted:

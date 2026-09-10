@@ -216,7 +216,16 @@ and on each table.
 
 The notebooks authenticate with a short-lived Lakebase **OAuth** credential minted
 from the job's own identity, so no password is embedded; the app owns the table and
-grants that identity `INSERT`/`UPDATE` when it provisions the job. Minting that
+grants that identity `INSERT`/`UPDATE` when it provisions the job.
+
+That identity needs a Lakebase Postgres role to authenticate against, and Lakebase
+creates one only for the project owner — so a job running as anything else (a
+deployed app's service principal, typically) has none, and the app cannot create it
+on their behalf: `databricks_create_role` requires a session authenticated as a
+Databricks identity, while the app connects with a password. Provisioning detects
+that case and returns the SQL to run, alongside the warning; a **Re-validate
+permission** button re-checks it afterwards, so confirming the fix does not mean
+provisioning the job again. Minting that
 credential needs the Lakebase **endpoint resource path**
 (`projects/<id>/branches/<branch>/endpoints/<endpoint>`), which the hostname does
 not contain — it is resolved by matching `LBX_PROJECTS_PG_HOST` against the
@@ -273,6 +282,48 @@ databricks serving-endpoints query databricks-claude-opus-4-8 \
   --json '{"messages":[{"role":"user","content":"ping"}],"max_tokens":16}' \
   --profile <your-profile>
 ```
+
+### Run-state role (Lakebase)
+
+Async migrations record their progress from inside the generated notebooks, over a
+Lakebase **OAuth** credential — which authenticates against a Postgres role. Lakebase
+creates one only for the project owner, so the identity your jobs run as needs one
+created once per Lakebase branch: your own user locally, the app's service principal
+when deployed. The app grants the privileges itself at provisioning; only the role
+has to exist first.
+
+Find the identity (deployed, it is the app's service principal):
+
+```bash
+databricks apps get <app-name> --profile <your-profile> -o json \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['service_principal_client_id'])"
+```
+
+Create the role. This must run from a session authenticated as a Databricks
+identity — `databricks psql` gives you one, a native password login does **not**,
+which is why the app cannot do it for you:
+
+```bash
+databricks psql --project <lakebase-project> --profile <your-profile>
+```
+
+```sql
+CREATE EXTENSION IF NOT EXISTS databricks_auth;
+-- 'SERVICE_PRINCIPAL' for a deployed app, 'USER' for your own identity
+SELECT databricks_create_role('<identity>', 'SERVICE_PRINCIPAL');
+```
+
+Verify — the new role should appear with `LAKEBASE_OAUTH_V1`:
+
+```bash
+databricks postgres list-roles projects/<project>/branches/<branch> \
+  --profile <your-profile> -o json
+```
+
+Creating roles needs an identity allowed to (the Lakebase project owner, or a member
+of `databricks_superuser`). Skipping this breaks nothing: migrations still run, and
+provisioning shows the same SQL with a **Re-validate** button to confirm the fix
+without provisioning again.
 
 ### Choosing the model and the API
 
@@ -342,7 +393,8 @@ To deploy to another workspace, add a target to `target.yml` and run
 > secret scope; doing so needs **MANAGE** on that scope. You must still give the app
 > network access to the source DB endpoint (firewall rule for its egress IP, or
 > private link). Async-mode runtime scopes need scope create/write. Passwords are
-> never stored in clear text.
+> never stored in clear text. For run history, the app's service principal also needs
+> a Lakebase Postgres role — see [Run-state role](#run-state-role-lakebase).
 
 ## Adding a source connector
 

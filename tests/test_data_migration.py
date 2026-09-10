@@ -299,9 +299,8 @@ def test_every_task_derives_the_same_run_id():
 
 
 def test_the_notebook_derives_the_same_run_id_as_the_app():
-    """The whole point of a derived id: a run this app triggered is already a row,
-    and the notebook must update it rather than open a second one. Executes the
-    generated function so a drifting literal or namespace cannot pass."""
+    """A run this app triggered is already a row, so the notebook must update it.
+    Executes the generated function, so a drifting literal cannot pass."""
     from backend.run_store import run_state_id
 
     code = generate(_spec(_run_store_target()))[0].code

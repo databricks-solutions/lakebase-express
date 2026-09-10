@@ -2,18 +2,13 @@
 
 Two kinds, because provisioning a job and running one are different events:
 
-``async_job``  what a setup produced — created, or created on a schedule. One row
-               per provisioning. It never becomes running/success: the job may
-               execute never, once, or nightly.
-``async_run``  one execution. Written from inside the generated notebooks (see
-               etl_generator._RUN_STATE), so runs started from the Jobs UI or by
-               the schedule — with this app nowhere in the loop — are recorded
-               too. The id is derived from the job run, so every task of the
-               chain updates the same row.
+``async_job``  one row per provisioning — created, or scheduled. Never becomes
+               running/success: the job may execute never, once, or nightly.
+``async_run``  one execution, written from inside the generated notebooks, so runs
+               triggered from the Jobs UI or by the schedule are recorded too.
 
-Only a run this app triggered itself is written here as an ``async_run``, under
-that same derived id, so the notebook's first write updates our row instead of
-adding a second one.
+A run this app triggered is written here under the id the notebooks derive, so
+their first write updates our row instead of adding a second.
 """
 from __future__ import annotations
 
@@ -46,8 +41,8 @@ def record(
     job_run_id = result.get("run_id")
     triggered = bool(job_id and job_run_id)
     state = AsyncRunState(
-        # A triggered run takes the id its notebooks will derive; a job that was
-        # only provisioned has no run to derive one from.
+        # A triggered run takes the id its notebooks derive; a provisioned job has
+        # no run to derive one from.
         run_id=run_state_id(job_id, job_run_id) if triggered else str(uuid.uuid4()),
         status="submitted" if triggered else ("scheduled" if quartz_cron else "created"),
         job_id=job_id,
