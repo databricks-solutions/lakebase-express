@@ -5,7 +5,8 @@ pydantic==2.12.5
 python-multipart==0.0.20
 
 # --- Databricks ---
-databricks-sdk==0.40.0
+# >=0.81.0 for w.postgres (Lakebase projects/endpoints, OAuth credentials).
+databricks-sdk==0.137.0
 
 # --- Azure SQL source connector ---
 # Pure-Python (bundles FreeTDS): no system ODBC driver, works on Py 3.10-3.14 and

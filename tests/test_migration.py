@@ -1,4 +1,5 @@
 """Engine logic that runs without a live database."""
+import uuid
 import time
 
 from backend.assessment.models import ColumnInfo, ProgrammableObject, TableInfo
@@ -187,3 +188,84 @@ def test_plan_run_surfaces_failure(monkeypatch):
 
 def test_unknown_plan_run_is_none():
     assert plan_runs.get_run("nope") is None
+
+
+# --- Sync run timings ------------------------------------------------------------
+#
+# A run row that says only "success" cannot answer how long anything took, so the
+# run and each table stamp their own start and finish.
+
+
+def _load_request(tables=("dbo.Orders", "dbo.Items")):
+    from backend.migration.models import (
+        DataLoadRequest,
+        LakebaseConnRequest,
+        TableLoadSpec,
+    )
+
+    return DataLoadRequest(
+        host="h", database="db", username="u", password="p",
+        lakebase=LakebaseConnRequest(host="lb", database="d", user="u", password="p"),
+        tables=[
+            TableLoadSpec(schema_name=t.split(".")[0], table_name=t.split(".")[1])
+            for t in tables
+        ],
+    )
+
+
+def _run_loader(monkeypatch, load_table):
+    """Run the sync loader inline over fakes and return the final state."""
+    from backend.migration import runs as sync_runs
+
+    monkeypatch.setattr(sync_runs, "build_connector", lambda *a, **k: object())
+    monkeypatch.setattr(sync_runs, "LakebaseConnection", lambda **k: object())
+    monkeypatch.setattr(sync_runs, "capture_and_drop_fks", lambda *a: [])
+    monkeypatch.setattr(sync_runs, "restore_fks", lambda *a: [])
+    monkeypatch.setattr(sync_runs, "load_table", load_table)
+
+    req = _load_request()
+    run_id = str(uuid.uuid4())
+    state = sync_runs.RunState(
+        run_id=run_id,
+        status="running",
+        started_at=sync_runs._now(),
+        tables=[
+            sync_runs.TableProgress(name=f"{t.schema_name}.{t.table_name}", target="public.x")
+            for t in req.tables
+        ],
+    )
+    sync_runs._REGISTRY.create(state, "")
+    sync_runs._execute(run_id, req)
+    return sync_runs.get_run(run_id)
+
+
+def test_a_sync_run_and_each_table_record_start_and_finish(monkeypatch):
+    state = _run_loader(monkeypatch, lambda *a, **k: 10)
+
+    assert state.status == "success"
+    assert state.started_at and state.finished_at
+    assert state.finished_at >= state.started_at
+    for table in state.tables:
+        assert table.status == "success"
+        assert table.started_at and table.finished_at
+        assert table.finished_at >= table.started_at
+    # Tables run in order, so the second cannot start before the first.
+    assert state.tables[1].started_at >= state.tables[0].started_at
+
+
+def test_a_failed_table_is_still_timed(monkeypatch):
+    """Without a finish on the failure path a broken table would look like it never
+    stopped running."""
+    def boom(_source, _target, spec, *a, **k):
+        if spec.table_name == "Items":
+            raise RuntimeError("copy blew up")
+        return 5
+
+    state = _run_loader(monkeypatch, boom)
+
+    assert state.status == "partial"
+    ok, failed = state.tables
+    assert ok.status == "success" and ok.finished_at
+    assert failed.status == "failed" and failed.finished_at
+    assert failed.error == "copy blew up"
+    assert state.finished_at is not None

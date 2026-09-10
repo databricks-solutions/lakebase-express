@@ -320,7 +320,11 @@ export interface TableRef {
 export interface AsyncSetupResult {
   job_id?: number | null;
   job_created?: boolean;
+  // Databricks job run id. Our own run-store id is lbx_run_id.
   run_id?: number | null;
+  lbx_run_id?: string | null;
+  // Set when the job cannot record its own state (no run store, or no grant).
+  run_state_warning?: string | null;
   url?: string | null;
   run_url?: string | null;
   scheduled: boolean;
@@ -647,6 +651,7 @@ export const api = {
   // Background plan build (AI translation runs past the Apps ~120s request
   // timeout): start returns a run_id, then poll planStatus to completion.
   startBuildPlan: (body: {
+    project_id?: string;
     tables: TableInfo[];
     programmable_objects: ProgrammableObject[];
     target_schema: string;

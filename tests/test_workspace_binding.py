@@ -4,7 +4,10 @@ There is no in-app login or workspace switching: locally the workspace comes fro
 the CLI profile the backend was started with, and when deployed as a Databricks
 App from the App's injected identity.
 """
+import functools
+
 import pytest
+from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -111,3 +114,67 @@ def test_config_exposes_no_session_mutators():
     for gone in ("set_workspace_session", "clear_workspace_session", "has_oauth_session",
                  "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET", "OAUTH_SCOPES"):
         assert not hasattr(config, gone), f"{gone} should no longer exist"
+
+
+# --- Lakebase endpoint resolution ------------------------------------------------
+#
+# Minting an OAuth database credential needs the endpoint *resource path*, which the
+# hostname does not contain — so it is resolved from the workspace instead of being
+# configured by hand.
+
+A_HOST = "ep-aaa.database.eastus2.azuredatabricks.net"
+B_HOST = "ep-bbb.database.eastus2.azuredatabricks.net"
+A_PATH = "projects/a/branches/production/endpoints/primary"
+B_PATH = "projects/b/branches/production/endpoints/primary"
+B_REPLICA = "projects/b/branches/production/endpoints/replica"
+
+# Two projects, one with a second endpoint — the shape that makes an exact host
+# match matter.
+TREE = [(A_PATH, A_HOST), (B_PATH, B_HOST), (B_REPLICA, "ep-ccc.database.x.net")]
+
+
+def _postgres(monkeypatch, rows, raises=None):
+    """Fake ``w.postgres`` over rows of (endpoint resource path, host)."""
+    def uniq(values):
+        return [SimpleNamespace(name=v) for v in dict.fromkeys(values)]
+
+    api = SimpleNamespace(
+        list_projects=lambda: uniq(p.split("/branches/")[0] for p, _ in rows),
+        list_branches=lambda project: uniq(
+            p.split("/endpoints/")[0] for p, _ in rows if p.startswith(project + "/")
+        ),
+        list_endpoints=lambda branch: [
+            SimpleNamespace(name=p, status=SimpleNamespace(hosts=SimpleNamespace(host=h)))
+            for p, h in rows if p.startswith(branch + "/")
+        ],
+    )
+    if raises is not None:
+        def boom():
+            raise raises
+        api.list_projects = boom
+    # lru_cached like the real one — this module's fixture clears it on teardown.
+    client = functools.lru_cache(maxsize=1)(lambda: SimpleNamespace(postgres=api))
+    monkeypatch.setattr(config, "workspace_client", client)
+
+
+def test_the_endpoint_is_found_by_its_host(monkeypatch, lakebase_endpoint):
+    _postgres(monkeypatch, TREE)
+    assert lakebase_endpoint(A_HOST) == A_PATH
+    # Picks the endpoint serving that host, not merely the project's first.
+    assert lakebase_endpoint(B_HOST) == B_PATH
+
+
+def test_the_host_match_is_exact(monkeypatch, lakebase_endpoint):
+    """A near miss would mint a credential for the wrong database."""
+    _postgres(monkeypatch, TREE)
+    assert lakebase_endpoint("ep-aaa.database.eastus2.azuredatabricks.NET") == A_PATH
+    assert lakebase_endpoint("ep-aa.database.eastus2.azuredatabricks.net") == ""
+    assert lakebase_endpoint("ep-aaa") == ""
+    assert lakebase_endpoint("") == ""
+
+
+def test_an_unlistable_workspace_resolves_to_nothing(monkeypatch, lakebase_endpoint):
+    """Listing Lakebase projects is a workspace read the deployed service principal
+    may not have — it costs run reporting, never the app."""
+    _postgres(monkeypatch, TREE, raises=PermissionError("cannot list projects"))
+    assert lakebase_endpoint(A_HOST) == ""

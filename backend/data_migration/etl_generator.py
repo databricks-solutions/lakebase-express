@@ -26,6 +26,7 @@ generated Python can contain real f-strings/braces without escaping games.
 from __future__ import annotations
 
 from backend.data_migration.models import Artifact, DataGenRequest, PostLoadStatement, TableRef
+from backend.run_store import RUN_ID_PREFIX
 from backend.schema_migration.naming import map_object, map_schema
 from backend.schema_migration.trigger_sql import sanitize_trigger_sql
 
@@ -48,6 +49,112 @@ PG_USER = "__PG_USER__"
 # Lakebase role password from the secret scope (never embedded). Alternatively,
 # mint a short-lived Postgres OAuth token from the workspace identity and use it here.
 PG_PASSWORD = dbutils.secrets.get(scope="__SCOPE__", key="__PG_PWD_KEY__")'''
+
+
+# Emitted when the app has a Lakebase-backed run store: the job records its own
+# status there. Authentication is a short-lived OAuth credential minted from the
+# job's identity, so no password is embedded. The app owns the table and granted
+# this identity INSERT/UPDATE; see run_store.grant_writer.
+_RUN_STATE = '''\
+RUN_STORE_HOST = "__RS_HOST__"
+RUN_STORE_PORT = __RS_PORT__
+RUN_STORE_DATABASE = "__RS_DATABASE__"
+RUN_STORE_TABLE = "__RS_TABLE__"
+RUN_STORE_ENDPOINT = "__RS_ENDPOINT__"
+RUN_STORE_PROJECT = "__RS_PROJECT__"
+RUN_STATE_PHASE = "__RS_PHASE__"
+# Every task of this job, in chain order, so a task can tell whether the run as a
+# whole is finished or whether post-load tasks still follow.
+RUN_STATE_TASKS = __RS_TASKS__
+
+dbutils.widgets.text("job_id", "")
+dbutils.widgets.text("job_run_id", "")
+
+_task_started_at = None
+
+
+def _run_state_id():
+    """One id per job run, identical in every task of the chain — so the load and
+    the post-load tasks update the same row. Also derivable by the app."""
+    import uuid
+
+    key = f'{dbutils.widgets.get("job_id")}:{dbutils.widgets.get("job_run_id")}'
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"__RS_ID_PREFIX__{key}"))
+
+
+def _report_run_state(status, error=None):
+    """Record this task's state in the app's run store. Best effort: bookkeeping
+    must never fail a migration, so any problem is printed and swallowed."""
+    global _task_started_at
+    try:
+        import json
+        from datetime import datetime, timezone
+
+        import psycopg
+        from databricks.sdk import WorkspaceClient
+
+        now = datetime.now(timezone.utc).isoformat()
+        if status == "running":
+            _task_started_at = now
+        # The run is finished only once its last task is: a task succeeding
+        # part-way through the chain still has post-load tasks to go.
+        last = RUN_STATE_PHASE == RUN_STATE_TASKS[-1]
+        overall = status if (status == "failed" or last) else "running"
+        data = {
+            "run_id": _run_state_id(),
+            "status": overall,
+            "error": error,
+            "phase": RUN_STATE_PHASE,
+            "job_id": int(dbutils.widgets.get("job_id") or 0) or None,
+            "job_run_id": int(dbutils.widgets.get("job_run_id") or 0) or None,
+            "tasks": {RUN_STATE_PHASE: {
+                "status": status,
+                "started_at": _task_started_at or now,
+                "finished_at": None if status == "running" else now,
+                "error": error,
+            }},
+        }
+        # Only the first task stamps the run's start; the merge below leaves keys a
+        # later payload does not carry, so it survives.
+        if status == "running" and RUN_STATE_PHASE == RUN_STATE_TASKS[0]:
+            data["started_at"] = now
+        if overall != "running":
+            data["finished_at"] = now
+
+        table = f'"{RUN_STORE_TABLE}"'
+        sql = (
+            f"INSERT INTO {table} "
+            "(run_id, kind, project_id, status, data, updated_at) "
+            "VALUES (%s::uuid, %s, %s::uuid, %s, %s::jsonb, now()) "
+            "ON CONFLICT (run_id) DO UPDATE SET status = EXCLUDED.status, "
+            # Merge one level into "tasks" so each task adds its own entry instead
+            # of replacing what the earlier tasks recorded.
+            f"data = {table}.data || (EXCLUDED.data - 'tasks') "
+            f"|| jsonb_build_object('tasks', "
+            f"COALESCE({table}.data -> 'tasks', '{{}}'::jsonb) || (EXCLUDED.data -> 'tasks')), "
+            "updated_at = now()"
+        )
+        w = WorkspaceClient()
+        # Minted per write, so the 1-hour token lifetime never matters here.
+        token = w.postgres.generate_database_credential(endpoint=RUN_STORE_ENDPOINT).token
+        identity = w.current_user.me().user_name
+        with psycopg.connect(
+            host=RUN_STORE_HOST, port=RUN_STORE_PORT, dbname=RUN_STORE_DATABASE,
+            user=identity, password=token, sslmode="require",
+        ) as pg:
+            with pg.cursor() as cur:
+                cur.execute(sql, (data["run_id"], "async_run", RUN_STORE_PROJECT or None,
+                                  overall, json.dumps(data)))
+            pg.commit()
+        print(f"Run state recorded: {RUN_STATE_PHASE} {status} (run {overall})")
+    except Exception as exc:
+        print(f"Run state NOT recorded ({RUN_STATE_PHASE} {status}): {exc}")'''
+
+
+# No run store configured — the calls stay valid and do nothing.
+_RUN_STATE_STUB = '''\
+def _report_run_state(status, error=None):
+    pass'''
 
 
 _SNAPSHOT = '''\
@@ -91,7 +198,7 @@ _SNAPSHOT = '''\
 
 # COMMAND ----------
 
-# MAGIC %pip install psycopg[binary]
+# MAGIC %pip install psycopg[binary]__PIP_EXTRA__
 
 # COMMAND ----------
 
@@ -100,6 +207,10 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 __HEADER__
+
+# COMMAND ----------
+
+__RUN_STATE__
 
 # COMMAND ----------
 
@@ -349,6 +460,8 @@ def restore_target_fks(dropped) -> dict:
 
 # COMMAND ----------
 
+_report_run_state("running")
+
 print(f"Snapshotting {len(TABLES)} table(s), up to {MAX_PARALLEL_TABLES} in parallel ...")
 dropped_fks = drop_target_fks()
 if dropped_fks:
@@ -372,11 +485,18 @@ restore_failures = restore_target_fks(dropped_fks)
 
 print(f"Done: {len(TABLES) - len(failures)}/{len(TABLES)} tables, {total_rows:,} rows copied.")
 if failures or restore_failures:
+    _report_run_state(
+        "failed",
+        f"{len(failures)} table(s) and {len(restore_failures)} FK restore(s) failed: "
+        f"{', '.join(sorted(failures) + sorted(restore_failures))}",
+    )
     raise RuntimeError(
         f"{len(failures)} table(s) and {len(restore_failures)} FK restore(s) failed: "
         f"{', '.join(sorted(failures) + sorted(restore_failures))} — each table is truncated "
         "before load, so fixing the cause and re-running is safe."
     )
+# The copy is done; the run itself is only done if no post-load task follows.
+_report_run_state("success")
 '''
 
 
@@ -405,7 +525,7 @@ _POST_LOAD_NB = '''\
 
 # COMMAND ----------
 
-# MAGIC %pip install psycopg[binary]
+# MAGIC %pip install psycopg[binary]__PIP_EXTRA__
 
 # COMMAND ----------
 
@@ -414,6 +534,10 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 __PG_HEADER__
+
+# COMMAND ----------
+
+__RUN_STATE__
 
 # COMMAND ----------
 
@@ -435,6 +559,7 @@ PG_KWARGS = dict(
 )
 
 PHASE = "__PHASE_TITLE__"
+_report_run_state("running")
 failures: dict[str, Exception] = {}
 if not POST_LOAD:
     print(f"Nothing to apply for {PHASE}.")
@@ -458,11 +583,14 @@ else:
 
 if failures:
     detail = "\\n".join(f"  - {name}: {exc}" for name, exc in failures.items())
+    _report_run_state("failed", f"{len(failures)} {PHASE} statement(s) failed")
     raise RuntimeError(
         f"{len(failures)} {PHASE} statement(s) failed:\\n{detail}\\n"
         "Every statement is idempotent — fix the SQL (or edit it in the migration "
         "plan) and re-run this task alone; already-applied items are skipped."
     )
+
+_report_run_state("success")
 '''
 
 
@@ -542,11 +670,39 @@ def _post_load_rows(statements: list[PostLoadStatement]) -> str:
     return ",\n".join(rows)
 
 
+def _render_run_state(req: DataGenRequest, phase: str) -> tuple[str, str]:
+    """(reporter block, extra pip packages) for one notebook. Without a run store
+    the reporter is a no-op stub, so the templates' calls stay valid."""
+    rs = req.run_store
+    if rs is None:
+        return _RUN_STATE_STUB, ""
+    block = (
+        _RUN_STATE
+        .replace("__RS_HOST__", rs.host)
+        .replace("__RS_PORT__", str(rs.port))
+        .replace("__RS_DATABASE__", rs.database)
+        .replace("__RS_TABLE__", rs.table)
+        .replace("__RS_ENDPOINT__", rs.endpoint)
+        .replace("__RS_PROJECT__", req.project_id)
+        .replace("__RS_PHASE__", phase)
+        .replace("__RS_ID_PREFIX__", RUN_ID_PREFIX)
+        .replace("__RS_TASKS__", repr(run_task_keys(req)))
+    )
+    # w.postgres (Lakebase OAuth credentials) needs a recent SDK on the cluster.
+    return block, " databricks-sdk>=0.81.0"
+
+
 def _snapshot(req: DataGenRequest) -> Artifact:
     rows = ",\n".join(
         _snapshot_row(t, req.target_schema, req.identifier_case) for t in req.tables
     )
-    code = _SNAPSHOT.replace("__HEADER__", _render_header(req)).replace("__TABLES__", rows)
+    run_state, pip_extra = _render_run_state(req, LOADER_TASK_KEY)
+    code = (
+        _SNAPSHOT.replace("__HEADER__", _render_header(req))
+        .replace("__TABLES__", rows)
+        .replace("__RUN_STATE__", run_state)
+        .replace("__PIP_EXTRA__", pip_extra)
+    )
     return Artifact(
         name="Snapshot load (PySpark)",
         filename="01_snapshot_load.py",
@@ -558,24 +714,49 @@ def _snapshot(req: DataGenRequest) -> Artifact:
 
 
 def _post_load_notebook(
-    req: DataGenRequest, seq: int, task_key: str, title: str, statements: list[PostLoadStatement]
+    req: DataGenRequest, seq: int, phase: str, title: str, statements: list[PostLoadStatement]
 ) -> Artifact:
     code = (
         _POST_LOAD_NB.replace("__PG_HEADER__", _render_pg_header(req))
         .replace("__POST_LOAD__", _post_load_rows(statements))
+        .replace("__RUN_STATE__", _render_run_state(req, f"post_load_{phase}")[0])
+        .replace("__PIP_EXTRA__", _render_run_state(req, f"post_load_{phase}")[1])
         # Title first — it also appears inside __PHASE_LOWER__'s source line.
         .replace("__PHASE_TITLE__", title)
         .replace("__PHASE_LOWER__", title[0].lower() + title[1:])
     )
     return Artifact(
         name=f"Post-load — {title}",
-        filename=f"{seq:02d}_post_load_{task_key}.py",
+        filename=f"{seq:02d}_post_load_{phase}.py",
         language="python",
         description=f"Applies the plan's {title.lower()} after the snapshot — one idempotent "
         "statement per transaction, with per-item progress; a distinct job task so failures "
         "surface per type and can be repaired alone.",
         code=code,
     )
+
+
+LOADER_TASK_KEY = "load"
+
+
+def task_key(filename_stem: str) -> str:
+    """Job task key derived from the notebook filename stem, minus its numeric
+    prefix: 02_post_load_constraints -> post_load_constraints. The snapshot loader
+    keeps the stable key "load". Shared with job_offload, which builds the task
+    graph, and with the run-state reporter, so recorded task keys are the ones the
+    Jobs UI shows."""
+    parts = filename_stem.split("_", 1)
+    stem = parts[1] if len(parts) > 1 and parts[0].isdigit() else filename_stem
+    return LOADER_TASK_KEY if stem == "snapshot_load" else stem
+
+
+def run_task_keys(req: DataGenRequest) -> list[str]:
+    """Every task this request will produce, in chain order — so each notebook can
+    tell whether it is the last and the run as a whole has finished."""
+    return [LOADER_TASK_KEY] + [
+        f"post_load_{key}" for key, _title, kinds in _POST_LOAD_PHASES
+        if any(s.kind in kinds and s.sql.strip() for s in req.post_load_sql)
+    ]
 
 
 def post_load_artifacts(req: DataGenRequest) -> list[Artifact]:

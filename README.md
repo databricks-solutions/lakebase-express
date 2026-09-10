@@ -193,6 +193,47 @@ in `backend/retry.py` — the source scan, plan executor, data loader and
 foundation-model calls. A resuming serverless database or a rate-limited endpoint
 is retried; a bad password or a syntax error still fails on the first attempt.
 
+Run state (sync and async data loads, plan builds, validation, repair, query
+parity) is held in memory and written through to a Lakebase table when the
+project store is Postgres
+— so runs survive a restart, are visible to other workers, and leave a history at
+`GET /api/runs`, filterable by `kind` and `project_id`. Each run's `run_id` is a
+`uuid` and carries the `lbx_projects` row it belongs to.
+`LBX_RUNS_BACKEND=memory|postgres` overrides.
+
+Async (Databricks job) migrations are recorded as two kinds, because provisioning
+a job and running one are different events: `async_job` is what a setup produced
+(`created` or `scheduled`, one row, terminal), and `async_run` is one execution
+(`running` → `success`/`failed`). Executions record themselves from inside the
+generated notebooks, since they run outside the app — so a job created to run
+later, a re-run triggered from the Jobs UI and a scheduled refresh each get their
+own row, under an id derived from the job run so every task of the chain updates
+one row. Each task records itself under `tasks` (keyed by the Databricks job task
+key) with its own `status`, `started_at` and `finished_at`, and the run is only
+`success` once its **last** task succeeds — a copy finishing while post-load tasks
+still have to run stays `running`. Sync runs stamp the same timestamps on the run
+and on each table.
+
+The notebooks authenticate with a short-lived Lakebase **OAuth** credential minted
+from the job's own identity, so no password is embedded; the app owns the table and
+grants that identity `INSERT`/`UPDATE` when it provisions the job. Minting that
+credential needs the Lakebase **endpoint resource path**
+(`projects/<id>/branches/<branch>/endpoints/<endpoint>`), which the hostname does
+not contain — it is resolved by matching `LBX_PROJECTS_PG_HOST` against the
+workspace's Lakebase endpoints, so there is nothing to configure. Set
+`LBX_PROJECTS_PG_ENDPOINT` only to override that lookup, e.g. when the identity
+cannot list Lakebase projects. The coordinates are baked in when the notebooks are
+generated, so a job provisioned without them reports nothing however often it is
+run later — provisioning says so rather than failing silently.
+
+Each migration project gets its own snapshot job and its own notebook folder
+(`<workspace folder>/<project id>`). The job is titled
+`lakebase-express-snapshot · <project name>` and tagged `lbx_project_id` /
+`lbx_project`, so it is recognisable and filterable in the Jobs UI. The **tag** is
+what identifies it, not the title: two projects may share a name, and renaming a
+project retitles its job rather than creating a second one. Requests that carry no
+project id keep using the shared job and folder.
+
 The app is bound to exactly **one** Databricks workspace, not selectable in the
 UI: locally the CLI profile it was started with, and when deployed the workspace
 the App is published in. Restart with a different profile to switch.

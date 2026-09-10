@@ -22,6 +22,7 @@ from backend.api.databricks_routes import router as databricks_router
 from backend.api.migration_routes import router as migration_router
 from backend.api.projects_routes import router as projects_router
 from backend.api.query_parity_routes import router as query_parity_router
+from backend.api.runs_routes import router as runs_router
 from backend.api.schema_routes import router as schema_router
 from backend.api.settings_routes import router as settings_router
 from backend.api.sizing_routes import router as sizing_router
@@ -57,6 +58,7 @@ app.include_router(migration_router)
 app.include_router(validation_router)
 app.include_router(query_parity_router)
 app.include_router(projects_router)
+app.include_router(runs_router)
 app.include_router(databricks_router)
 
 

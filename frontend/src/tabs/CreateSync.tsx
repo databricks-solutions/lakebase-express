@@ -199,6 +199,7 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   function asyncSpec(): Record<string, unknown> {
     return {
       mode: "snapshot",
+      project_id: conn!.project_id,
       host: conn!.host, database: conn!.database, username: conn!.username,
       password_secret_key: pwdKey, secret_scope: secretScope, port: conn!.port,
       target_schema: state.targetSchema,
@@ -519,6 +520,9 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
               {asyncRes.url && <a href={asyncRes.url} target="_blank" rel="noreferrer">Open job ↗</a>}{" "}
               {asyncRes.run_url && <a href={asyncRes.run_url} target="_blank" rel="noreferrer">Open run ↗</a>}
             </div>
+          )}
+          {asyncRes?.run_state_warning && (
+            <div className="banner banner--warn">{asyncRes.run_state_warning}</div>
           )}
           {preview && (
             <div className="stack" style={{ marginTop: 14 }}>
