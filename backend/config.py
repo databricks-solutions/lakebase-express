@@ -68,6 +68,33 @@ def workspace_client() -> WorkspaceClient:
     return WorkspaceClient()
 
 
+@functools.lru_cache(maxsize=None)
+def lakebase_endpoint(host: str) -> str:
+    """The Lakebase endpoint resource path serving ``host``, or "" if unknown.
+
+    The path cannot be derived from the hostname (which carries a server-generated
+    id), so match on the host exactly — a near miss would mint a credential for the
+    wrong database. Never raises: listing Lakebase projects is a workspace read the
+    deployed app's service principal may not have.
+    """
+    wanted = _host_label(host).lower()
+    if not wanted:
+        return ""
+    try:
+        w = workspace_client()
+        for project in w.postgres.list_projects():
+            for branch in w.postgres.list_branches(project.name):
+                for endpoint in w.postgres.list_endpoints(branch.name):
+                    hosts = getattr(endpoint.status, "hosts", None)
+                    if (getattr(hosts, "host", "") or "").lower() == wanted:
+                        log.info("Resolved Lakebase endpoint for %s: %s", wanted, endpoint.name)
+                        return endpoint.name
+        log.warning("No Lakebase endpoint found for host %s", wanted)
+    except Exception as exc:
+        log.warning("Could not resolve the Lakebase endpoint for %s: %s", wanted, exc)
+    return ""
+
+
 @functools.lru_cache(maxsize=1)
 def current_workspace() -> dict:
     """Status for the UI: which workspace we're bound to (cached; it can't change).

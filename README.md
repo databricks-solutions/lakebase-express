@@ -193,6 +193,56 @@ in `backend/retry.py` — the source scan, plan executor, data loader and
 foundation-model calls. A resuming serverless database or a rate-limited endpoint
 is retried; a bad password or a syntax error still fails on the first attempt.
 
+Run state (sync and async data loads, plan builds, validation, repair, query
+parity) is held in memory and written through to a Lakebase table when the
+project store is Postgres
+— so runs survive a restart, are visible to other workers, and leave a history at
+`GET /api/runs`, filterable by `kind` and `project_id`. Each run's `run_id` is a
+`uuid` and carries the `lbx_projects` row it belongs to.
+`LBX_RUNS_BACKEND=memory|postgres` overrides.
+
+Async (Databricks job) migrations are recorded as two kinds, because provisioning
+a job and running one are different events: `async_job` is what a setup produced
+(`created` or `scheduled`, one row, terminal), and `async_run` is one execution
+(`running` → `success`/`failed`). Executions record themselves from inside the
+generated notebooks, since they run outside the app — so a job created to run
+later, a re-run triggered from the Jobs UI and a scheduled refresh each get their
+own row, under an id derived from the job run so every task of the chain updates
+one row. Each task records itself under `tasks` (keyed by the Databricks job task
+key) with its own `status`, `started_at` and `finished_at`, and the run is only
+`success` once its **last** task succeeds — a copy finishing while post-load tasks
+still have to run stays `running`. Sync runs stamp the same timestamps on the run
+and on each table.
+
+The notebooks authenticate with a short-lived Lakebase **OAuth** credential minted
+from the job's own identity, so no password is embedded; the app owns the table and
+grants that identity `INSERT`/`UPDATE` when it provisions the job.
+
+That identity needs a Lakebase Postgres role to authenticate against, and Lakebase
+creates one only for the project owner — so a job running as anything else (a
+deployed app's service principal, typically) has none, and the app cannot create it
+on their behalf: `databricks_create_role` requires a session authenticated as a
+Databricks identity, while the app connects with a password. Provisioning detects
+that case and returns the SQL to run, alongside the warning; a **Re-validate
+permission** button re-checks it afterwards, so confirming the fix does not mean
+provisioning the job again. Minting that
+credential needs the Lakebase **endpoint resource path**
+(`projects/<id>/branches/<branch>/endpoints/<endpoint>`), which the hostname does
+not contain — it is resolved by matching `LBX_PROJECTS_PG_HOST` against the
+workspace's Lakebase endpoints, so there is nothing to configure. Set
+`LBX_PROJECTS_PG_ENDPOINT` only to override that lookup, e.g. when the identity
+cannot list Lakebase projects. The coordinates are baked in when the notebooks are
+generated, so a job provisioned without them reports nothing however often it is
+run later — provisioning says so rather than failing silently.
+
+Each migration project gets its own snapshot job and its own notebook folder
+(`<workspace folder>/<project id>`). The job is titled
+`lakebase-express-snapshot · <project name>` and tagged `lbx_project_id` /
+`lbx_project`, so it is recognisable and filterable in the Jobs UI. The **tag** is
+what identifies it, not the title: two projects may share a name, and renaming a
+project retitles its job rather than creating a second one. Requests that carry no
+project id keep using the shared job and folder.
+
 The app is bound to exactly **one** Databricks workspace, not selectable in the
 UI: locally the CLI profile it was started with, and when deployed the workspace
 the App is published in. Restart with a different profile to switch.
@@ -232,6 +282,48 @@ databricks serving-endpoints query databricks-claude-opus-4-8 \
   --json '{"messages":[{"role":"user","content":"ping"}],"max_tokens":16}' \
   --profile <your-profile>
 ```
+
+### Run-state role (Lakebase)
+
+Async migrations record their progress from inside the generated notebooks, over a
+Lakebase **OAuth** credential — which authenticates against a Postgres role. Lakebase
+creates one only for the project owner, so the identity your jobs run as needs one
+created once per Lakebase branch: your own user locally, the app's service principal
+when deployed. The app grants the privileges itself at provisioning; only the role
+has to exist first.
+
+Find the identity (deployed, it is the app's service principal):
+
+```bash
+databricks apps get <app-name> --profile <your-profile> -o json \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['service_principal_client_id'])"
+```
+
+Create the role. This must run from a session authenticated as a Databricks
+identity — `databricks psql` gives you one, a native password login does **not**,
+which is why the app cannot do it for you:
+
+```bash
+databricks psql --project <lakebase-project> --profile <your-profile>
+```
+
+```sql
+CREATE EXTENSION IF NOT EXISTS databricks_auth;
+-- 'SERVICE_PRINCIPAL' for a deployed app, 'USER' for your own identity
+SELECT databricks_create_role('<identity>', 'SERVICE_PRINCIPAL');
+```
+
+Verify — the new role should appear with `LAKEBASE_OAUTH_V1`:
+
+```bash
+databricks postgres list-roles projects/<project>/branches/<branch> \
+  --profile <your-profile> -o json
+```
+
+Creating roles needs an identity allowed to (the Lakebase project owner, or a member
+of `databricks_superuser`). Skipping this breaks nothing: migrations still run, and
+provisioning shows the same SQL with a **Re-validate** button to confirm the fix
+without provisioning again.
 
 ### Choosing the model and the API
 
@@ -301,7 +393,8 @@ To deploy to another workspace, add a target to `target.yml` and run
 > secret scope; doing so needs **MANAGE** on that scope. You must still give the app
 > network access to the source DB endpoint (firewall rule for its egress IP, or
 > private link). Async-mode runtime scopes need scope create/write. Passwords are
-> never stored in clear text.
+> never stored in clear text. For run history, the app's service principal also needs
+> a Lakebase Postgres role — see [Run-state role](#run-state-role-lakebase).
 
 ## Adding a source connector
 

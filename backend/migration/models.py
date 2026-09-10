@@ -91,6 +91,7 @@ class PlanItem(BaseModel):
 
 
 class BuildPlanRequest(BaseModel):
+    project_id: str = ""                # links the run to its project
     tables: list[TableInfo] = []
     programmable_objects: list[ProgrammableObject] = []
     target_schema: str = "public"
@@ -194,6 +195,9 @@ class TableProgress(BaseModel):
     rows_copied: int = 0
     total_rows: int = 0
     error: str | None = None
+    # UTC ISO 8601.
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 class RunState(BaseModel):
@@ -201,3 +205,38 @@ class RunState(BaseModel):
     status: str = "running"                   # running|success|failed|partial
     tables: list[TableProgress] = []
     error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class TaskProgress(BaseModel):
+    """One Databricks job task of an async run, recorded by the task itself."""
+    status: str = "running"                  # running|success|failed
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
+class AsyncRunState(BaseModel):
+    """A load handed to a Databricks job (async mode).
+
+    Stored as ``async_job`` (provisioned) or ``async_run`` (one execution) — see
+    migration/async_runs. The notebooks advance their own run's status.
+    """
+    run_id: str                          # ours (uuid), not the Databricks run id
+    # async_job: created|scheduled, both terminal.
+    # async_run: submitted -> running -> success|failed, advanced by the notebooks.
+    status: str = "submitted"
+    job_id: int | None = None
+    job_run_id: int | None = None        # Databricks job run id
+    job_url: str | None = None
+    run_url: str | None = None
+    notebook_path: str = ""
+    tables_total: int = 0
+    scheduled: bool = False
+    quartz_cron: str | None = None
+    error: str | None = None
+    # Keyed by Databricks job task key, filled in by the notebooks as the chain runs.
+    tasks: dict[str, TaskProgress] = {}
+    started_at: str | None = None
+    finished_at: str | None = None

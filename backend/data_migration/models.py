@@ -31,8 +31,23 @@ class PostLoadStatement(BaseModel):
     kind: str = "constraint"
 
 
+class RunStoreTarget(BaseModel):
+    """Lakebase table the job writes its run state to.
+
+    No password: the job mints a short-lived OAuth credential from its own
+    workspace identity, so nothing secret is embedded in the notebook.
+    """
+    host: str
+    database: str
+    table: str = "lbx_runs"
+    port: int = 5432
+    # Endpoint resource path the OAuth credential is minted for.
+    endpoint: str
+
+
 class DataGenRequest(BaseModel):
     mode: LoadMode = LoadMode.SNAPSHOT
+    project_id: str = ""                 # links the async run to its project
 
     # Source (password resolved at runtime from the secret scope by the code).
     host: str
@@ -61,6 +76,11 @@ class DataGenRequest(BaseModel):
     # AFTER the snapshot finishes. Kept as (name, sql) so the user's plan edits
     # ride along verbatim.
     post_load_sql: list[PostLoadStatement] = []
+
+    # Where the job records its own run state (backend/run_store.py). Filled in
+    # server-side from the app's own config, never by the client. Empty means the
+    # notebook is generated without run-state reporting.
+    run_store: RunStoreTarget | None = None
 
 
 class Artifact(BaseModel):

@@ -28,6 +28,7 @@ from backend.connectors.lakebase import LakebaseConnection
 from backend.fm_params import chat_text, query_chat
 from backend.migration.executor import apply_plan
 from backend.migration.models import ItemStatus, ObjectKind, PlanItem
+from backend.run_registry import RunRegistry
 from backend.validation import fixer
 from backend.validation.models import (
     MatchStatus,
@@ -40,8 +41,7 @@ from backend.validation.models import (
 
 log = logging.getLogger("lakebase_express.validation.agent")
 
-_RUNS: dict[str, RepairState] = {}
-_LOCK = threading.Lock()
+_REGISTRY: RunRegistry[RepairState] = RunRegistry("validation_repair", RepairState)
 
 _MAX_ERR_CHARS = 1500
 
@@ -80,14 +80,11 @@ Think through "analysis" first, then produce "sql"."""
 
 
 def get_repair(run_id: str) -> RepairState | None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        # Return a copy so the caller never observes a half-mutated object.
-        return state.model_copy(deep=True) if state else None
+    return _REGISTRY.get(run_id)
 
 
 def _register(req: ValidationRepairRequest) -> str:
-    run_id = uuid.uuid4().hex[:12]
+    run_id = str(uuid.uuid4())
     state = RepairState(
         run_id=run_id,
         max_attempts=req.max_attempts,
@@ -101,8 +98,7 @@ def _register(req: ValidationRepairRequest) -> str:
             for t in req.targets
         ],
     )
-    with _LOCK:
-        _RUNS[run_id] = state
+    _REGISTRY.create(state, req.lakebase.project_id)
     return run_id
 
 
@@ -113,10 +109,7 @@ def start_repair(req: ValidationRepairRequest) -> str:
 
 
 def _set(run_id: str, mutate) -> None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        if state:
-            mutate(state)
+    _REGISTRY.update(run_id, mutate)
 
 
 # --- Foundation Model call --------------------------------------------------------

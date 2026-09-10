@@ -65,6 +65,9 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   const [secretMsg, setSecretMsg] = useState<string | null>(null);
   const [asyncBusy, setAsyncBusy] = useState(false);
   const [asyncRes, setAsyncRes] = useState<AsyncSetupResult | null>(null);
+  // Re-check of the job identity's run-store access, after the user creates its role.
+  const [rsCheck, setRsCheck] = useState<{ ok: boolean; warning?: string | null; fix?: string | null } | null>(null);
+  const [rsBusy, setRsBusy] = useState(false);
   const [preview, setPreview] = useState<Artifact[] | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
 
@@ -199,6 +202,7 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   function asyncSpec(): Record<string, unknown> {
     return {
       mode: "snapshot",
+      project_id: conn!.project_id,
       host: conn!.host, database: conn!.database, username: conn!.username,
       password_secret_key: pwdKey, secret_scope: secretScope, port: conn!.port,
       target_schema: state.targetSchema,
@@ -278,10 +282,27 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
         run_now: schedule === "once",
       });
       setAsyncRes(r);
+      setRsCheck(null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setAsyncBusy(false);
+    }
+  }
+
+  // The verdict shown is the latest one: a re-check supersedes what provisioning said.
+  const runStateWarning = rsCheck ? (rsCheck.ok ? null : rsCheck.warning) : asyncRes?.run_state_warning;
+  const runStateFix = rsCheck ? (rsCheck.ok ? null : rsCheck.fix) : asyncRes?.run_state_fix;
+
+  async function recheckRunState() {
+    if (!asyncRes?.job_id) return;
+    setRsBusy(true); setError(null);
+    try {
+      setRsCheck(await api.runStateAccess({ job_id: asyncRes.job_id }));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRsBusy(false);
     }
   }
 
@@ -519,6 +540,24 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
               {asyncRes.url && <a href={asyncRes.url} target="_blank" rel="noreferrer">Open job ↗</a>}{" "}
               {asyncRes.run_url && <a href={asyncRes.run_url} target="_blank" rel="noreferrer">Open run ↗</a>}
             </div>
+          )}
+          {asyncRes && rsCheck?.ok && (
+            <div className="banner banner--ok">
+              Run-state access confirmed — this job will record its progress in run history.
+            </div>
+          )}
+          {runStateWarning && (
+            <div className="banner banner--warn">{runStateWarning}</div>
+          )}
+          {runStateFix && (
+            <CodeBlock
+              code={runStateFix} language="sql" filename="grant-run-state-access.sql"
+              action={
+                <button className="btn btn--sm" disabled={rsBusy} onClick={recheckRunState}>
+                  {rsBusy ? "Re-validating…" : "Re-validate"}
+                </button>
+              }
+            />
           )}
           {preview && (
             <div className="stack" style={{ marginTop: 14 }}>

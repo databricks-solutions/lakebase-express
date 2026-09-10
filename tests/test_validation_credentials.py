@@ -148,8 +148,7 @@ def test_successful_run_remembers_both_passwords(monkeypatch):
         lakebase=LakebaseConnRequest(**{**_LB, "password": "pgpw"}),
     )
     run_id = "cred-run"
-    with runs._LOCK:
-        runs._RUNS[run_id] = ValidationRunState(run_id=run_id)
+    runs._REGISTRY.create(ValidationRunState(run_id=run_id))
     runs._execute(run_id, req)
 
     assert runs.get_run(run_id).status == "success"

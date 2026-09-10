@@ -6,8 +6,8 @@ front-proxy request timeout, which silently drops the connection mid-request. So
 the build runs on a daemon thread (same pattern as the data-load and validation
 phases) and the UI polls ``PlanRunState`` for progress and the finished plan.
 
-Translations run concurrently inside build_plan; state lives in process memory,
-fine for a single-user accelerator App.
+Translations run concurrently inside build_plan; state is persisted through
+backend/run_registry.py.
 """
 from __future__ import annotations
 
@@ -17,38 +17,31 @@ import uuid
 
 from backend.migration.models import BuildPlanRequest, PlanRunState
 from backend.migration.planner import build_plan
+from backend.run_registry import RunRegistry
 
 log = logging.getLogger("lakebase_express.plan_runs")
 
-_RUNS: dict[str, PlanRunState] = {}
-_LOCK = threading.Lock()
+_REGISTRY: RunRegistry[PlanRunState] = RunRegistry("plan_build", PlanRunState)
 
 
 def get_run(run_id: str) -> PlanRunState | None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        # Return a copy so the caller never observes a half-mutated object.
-        return state.model_copy(deep=True) if state else None
+    return _REGISTRY.get(run_id)
 
 
 def start_run(req: BuildPlanRequest) -> str:
-    run_id = uuid.uuid4().hex[:12]
+    run_id = str(uuid.uuid4())
     state = PlanRunState(
         run_id=run_id,
         status="running",
         objects_total=len(req.programmable_objects) if req.translate else 0,
     )
-    with _LOCK:
-        _RUNS[run_id] = state
+    _REGISTRY.create(state, req.project_id)
     threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
     return run_id
 
 
 def _set(run_id: str, mutate) -> None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        if state:
-            mutate(state)
+    _REGISTRY.update(run_id, mutate)
 
 
 def _execute(run_id: str, req: BuildPlanRequest) -> None:

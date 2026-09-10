@@ -285,6 +285,25 @@ def setup_async(req: AsyncSetupRequest) -> dict:
         raise HTTPException(status_code=502, detail=f"Async setup failed: {exc}") from exc
 
 
+class RunStateAccessRequest(BaseModel):
+    job_id: int
+
+
+@router.post("/async/run-state-access")
+def run_state_access(req: RunStateAccessRequest) -> dict:
+    """Re-check that the job's identity can record run state, after the user has
+    created its Lakebase role — so confirming it does not mean provisioning again."""
+    try:
+        failed = async_setup.check_run_store_access(req.job_id)
+    except Exception as exc:
+        log.exception("Run-state access check failed")
+        raise HTTPException(status_code=502, detail=f"Check failed: {exc}") from exc
+    if failed is None:
+        return {"ok": True}
+    warning, fix = failed
+    return {"ok": False, "warning": warning, "fix": fix}
+
+
 @router.get("/job/status/{run_id}")
 def job_status(run_id: int) -> dict:
     try:

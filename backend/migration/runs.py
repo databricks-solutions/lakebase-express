@@ -1,39 +1,41 @@
-"""In-memory registry of data-migration runs + background execution.
+"""Data-migration runs + background execution.
 
-A run streams each selected table on a daemon thread and updates a shared
-RunState the API polls. State lives in process memory — fine for a single-user
-accelerator App; swap for a Lakebase table or Redis to make it multi-worker.
+A run streams each selected table on a daemon thread and updates a RunState the
+API polls, persisted through backend/run_registry.py.
 """
 from __future__ import annotations
 
 import logging
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
 from backend.migration.data_loader import capture_and_drop_fks, load_table, restore_fks
 from backend.migration.models import DataLoadRequest, RunState, TableProgress
+from backend.run_registry import RunRegistry
 from backend.schema_migration.naming import map_object, map_schema
 
 log = logging.getLogger("lakebase_express.runs")
 
-_RUNS: dict[str, RunState] = {}
-_LOCK = threading.Lock()
+_REGISTRY: RunRegistry[RunState] = RunRegistry("sync_run", RunState)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def get_run(run_id: str) -> RunState | None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        # Return a copy so the caller never observes a half-mutated object.
-        return state.model_copy(deep=True) if state else None
+    return _REGISTRY.get(run_id)
 
 
 def start_run(req: DataLoadRequest) -> str:
-    run_id = uuid.uuid4().hex[:12]
+    run_id = str(uuid.uuid4())
     state = RunState(
         run_id=run_id,
         status="running",
+        started_at=_now(),
         tables=[
             TableProgress(
                 name=f"{t.schema_name}.{t.table_name}",
@@ -44,17 +46,13 @@ def start_run(req: DataLoadRequest) -> str:
             for t in req.tables
         ],
     )
-    with _LOCK:
-        _RUNS[run_id] = state
+    _REGISTRY.create(state, req.project_id)
     threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
     return run_id
 
 
 def _set(run_id: str, mutate) -> None:
-    with _LOCK:
-        state = _RUNS.get(run_id)
-        if state:
-            mutate(state)
+    _REGISTRY.update(run_id, mutate)
 
 
 def _execute(run_id: str, req: DataLoadRequest) -> None:
@@ -78,7 +76,10 @@ def _execute(run_id: str, req: DataLoadRequest) -> None:
 
         any_failed = False
         for i, spec in enumerate(req.tables):
-            _set(run_id, lambda s, i=i: setattr(s.tables[i], "status", "running"))
+            _set(run_id, lambda s, i=i: (
+                setattr(s.tables[i], "status", "running"),
+                setattr(s.tables[i], "started_at", _now()),
+            ))
 
             def progress(n: int, i=i) -> None:
                 _set(run_id, lambda s: setattr(s.tables[i], "rows_copied", n))
@@ -92,6 +93,7 @@ def _execute(run_id: str, req: DataLoadRequest) -> None:
                 _set(run_id, lambda s, i=i, total=total: (
                     setattr(s.tables[i], "rows_copied", total),
                     setattr(s.tables[i], "status", "success"),
+                    setattr(s.tables[i], "finished_at", _now()),
                 ))
             except Exception as exc:
                 any_failed = True
@@ -99,6 +101,7 @@ def _execute(run_id: str, req: DataLoadRequest) -> None:
                 _set(run_id, lambda s, i=i, exc=exc: (
                     setattr(s.tables[i], "status", "failed"),
                     setattr(s.tables[i], "error", str(exc)),
+                    setattr(s.tables[i], "finished_at", _now()),
                 ))
 
         restore_failures = restore_fks(target, dropped_fks)
@@ -110,7 +113,14 @@ def _execute(run_id: str, req: DataLoadRequest) -> None:
             _set(run_id, lambda s, msg=msg: setattr(s, "error", msg))
 
         final = "partial" if any_failed else "success"
-        _set(run_id, lambda s, final=final: setattr(s, "status", final))
+        _set(run_id, lambda s, final=final: (
+            setattr(s, "status", final),
+            setattr(s, "finished_at", _now()),
+        ))
     except Exception as exc:  # setup-level failure (e.g. bad connection)
         log.exception("Run %s failed during setup", run_id)
-        _set(run_id, lambda s, exc=exc: (setattr(s, "status", "failed"), setattr(s, "error", str(exc))))
+        _set(run_id, lambda s, exc=exc: (
+            setattr(s, "status", "failed"),
+            setattr(s, "error", str(exc)),
+            setattr(s, "finished_at", _now()),
+        ))
