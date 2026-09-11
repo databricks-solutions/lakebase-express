@@ -146,8 +146,29 @@ class StartRunResponse(BaseModel):
     run_id: str
 
 
+def _check_resume(req: DataLoadRequest) -> None:
+    """A resume must point at a run of this project whose loader is gone — two
+    loaders on one table would fight over the same TRUNCATE."""
+    prior = runs.get_run(req.resume_from)
+    if prior is None:
+        raise HTTPException(status_code=404, detail="Unknown run id to resume.")
+    # Runs recorded before project_id was stamped can't be checked either way.
+    if prior.project_id and req.project_id and prior.project_id != req.project_id:
+        raise HTTPException(
+            status_code=409, detail="That run belongs to another migration project."
+        )
+    if not runs.is_resumable(prior):
+        raise HTTPException(
+            status_code=409,
+            detail="That run is still active or has nothing left to load — "
+                   "start a new run instead.",
+        )
+
+
 @router.post("/data/start", response_model=StartRunResponse)
 def start_data(req: DataLoadRequest) -> StartRunResponse:
+    if req.resume_from:
+        _check_resume(req)
     # Resolve both sides before handing off to the background run: the source by
     # the shared precedence (typed → request/stored secret_ref → cached), the
     # target through with_lakebase_password.
@@ -173,6 +194,40 @@ def data_status(run_id: str) -> RunState:
     if not state:
         raise HTTPException(status_code=404, detail="Unknown run id.")
     return state
+
+
+class ResumableRun(BaseModel):
+    run_id: str
+    status: str
+    started_at: str | None = None
+    tables_total: int = 0
+    tables_left: int = 0
+    rows_copied: int = 0
+
+
+class ResumableResponse(BaseModel):
+    # None when there is nothing to resume — the usual case.
+    run: ResumableRun | None = None
+
+
+@router.get("/data/resumable", response_model=ResumableResponse)
+def resumable_data(project_id: str) -> ResumableResponse:
+    """The project's newest run whose loader is gone and which still has tables
+    left, so the UI can offer a resume instead of a full re-copy. Nothing is
+    resumable when run state isn't persisted and the app has restarted."""
+    state = runs.find_resumable(project_id)
+    if state is None:
+        return ResumableResponse()
+    return ResumableResponse(
+        run=ResumableRun(
+            run_id=state.run_id,
+            status=state.status,
+            started_at=state.started_at,
+            tables_total=len(state.tables),
+            tables_left=runs.tables_left(state),
+            rows_copied=sum(t.rows_copied for t in state.tables),
+        )
+    )
 
 
 # --- Data load (offload to Databricks Job) ---------------------------------------

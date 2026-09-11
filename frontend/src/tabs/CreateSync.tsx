@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type PlanItem, type RunState, type SecretScopeOption, type TableInfo, type WorkspaceStatus } from "../api";
+import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type PlanItem, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type WorkspaceStatus } from "../api";
 import CodeBlock from "../components/CodeBlock";
 import SecretScopeField from "../components/SecretScopeField";
 import type { MigrationState } from "../App";
@@ -31,6 +31,8 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   const [applyRes, setApplyRes] = useState<ApplyResponse | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<RunState | null>(null);
+  // A previous run of this project that can be resumed instead of re-copied.
+  const [resumable, setResumable] = useState<ResumableRun | null>(null);
   // Post-data phase (constraints, indexes, FKs, triggers) — applied after the load.
   const [postApplyRes, setPostApplyRes] = useState<ApplyResponse | null>(null);
   const [postBusy, setPostBusy] = useState(false);
@@ -109,6 +111,18 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 
+  // Offer a resume when an earlier run's loader is gone and tables are still left.
+  // Re-checked whenever a run settles, since finishing one clears the offer.
+  useEffect(() => {
+    const projectId = conn?.project_id;
+    if (!projectId) { setResumable(null); return; }
+    let live = true;
+    api.resumableData(projectId)
+      .then((r) => { if (live) setResumable(r.run); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [conn?.project_id, run?.status]);
+
   if (!report || !conn) {
     return (
       <div className="card">
@@ -164,7 +178,8 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
     }
   }
 
-  async function syncNow() {
+  // ``resumeFrom`` continues that run: the tables it loaded are skipped, not re-copied.
+  async function syncNow(resumeFrom?: string) {
     if (!state.lakebase) return;
     if (!conn) {
       setError("No source connection configured — set it on the Connections & Target step.");
@@ -187,6 +202,7 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
         lakebase: state.lakebase, target_schema: state.targetSchema,
         identifier_case: state.identifierCase,
         truncate_first: state.dataOptions.truncate_first, batch_size: state.dataOptions.batch_size,
+        resume_from: resumeFrom ?? null,
         tables: selectedTables.map((t) => ({
           schema_name: t.schema_name, table_name: t.table_name, target_table: t.table_name,
           total_rows: t.row_count, columns: t.columns,
@@ -406,15 +422,29 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
               {syncScope === "schema" ? " to have something to apply." : " to create schema/code (data will still load)."}
             </div>
           )}
+          {resumable && syncScope === "full" && (
+            <div className="banner banner--info">
+              An earlier run left {resumable.tables_left} of {resumable.tables_total} table{resumable.tables_total === 1 ? "" : "s"} unfinished
+              ({resumable.rows_copied.toLocaleString()} rows already copied). Resuming loads only those;
+              starting a new sync re-copies every selected table.
+            </div>
+          )}
           <div className="actions">
             {syncScope === "schema" ? (
               <button className="btn btn--primary" disabled={busy || running || noTarget || !state.plan?.length} onClick={applySchemaOnly}>
                 {busy ? "Applying…" : "Apply schema & code"}
               </button>
             ) : (
-              <button className="btn btn--primary" disabled={busy || running || noTarget || noTables} onClick={syncNow}>
-                {busy || running ? "Syncing…" : "Start sync now"}
-              </button>
+              <>
+                <button className="btn btn--primary" disabled={busy || running || noTarget || noTables} onClick={() => syncNow()}>
+                  {busy || running ? "Syncing…" : "Start sync now"}
+                </button>
+                {resumable && (
+                  <button className="btn" disabled={busy || running || noTarget || noTables} onClick={() => syncNow(resumable.run_id)}>
+                    Resume last run
+                  </button>
+                )}
+              </>
             )}
           </div>
           <OverallProgress
@@ -637,7 +667,7 @@ function OverallProgress({
     const totalRows = run.tables.reduce((n, t) => n + t.total_rows, 0);
     const copied = run.tables.reduce((n, t) => n + t.rows_copied, 0);
     const totalT = run.tables.length;
-    const doneT = run.tables.filter((t) => t.status === "success" || t.status === "failed").length;
+    const doneT = run.tables.filter((t) => t.status !== "pending" && t.status !== "running").length;
     dataFrac =
       run.status !== "running" ? 1 : totalRows > 0 ? Math.min(1, copied / totalRows) : totalT > 0 ? doneT / totalT : 0;
     tablesLabel = `${doneT.toLocaleString()} / ${totalT.toLocaleString()} tables`;
@@ -787,9 +817,11 @@ function ApplySummary({ res, label = "Schema & code", onGoValidation }: {
 
 function DataProgress({ run }: { run: RunState }) {
   const total = run.tables.length;
-  const done = run.tables.filter((t) => t.status === "success" || t.status === "failed").length;
+  const done = run.tables.filter((t) => t.status !== "pending" && t.status !== "running").length;
   const ok = run.tables.filter((t) => t.status === "success").length;
   const failed = run.tables.filter((t) => t.status === "failed").length;
+  // Loaded by the run this one resumed, so not copied again.
+  const skipped = run.tables.filter((t) => t.status === "skipped").length;
   const rowsCopied = run.tables.reduce((n, t) => n + t.rows_copied, 0);
   const pct = total > 0 ? (done / total) * 100 : 0;
   const statusCls = run.status === "success" ? "ok" : run.status === "failed" || run.status === "partial" ? "err" : "skip";
@@ -799,7 +831,7 @@ function DataProgress({ run }: { run: RunState }) {
       <div className="prog__row">
         <span className="prog__name">
           Data · {done.toLocaleString()} / {total.toLocaleString()} tables
-          {ok > 0 ? ` · ${ok.toLocaleString()} ok` : ""}{failed > 0 ? ` · ${failed.toLocaleString()} failed` : ""}
+          {ok > 0 ? ` · ${ok.toLocaleString()} ok` : ""}{skipped > 0 ? ` · ${skipped.toLocaleString()} already loaded` : ""}{failed > 0 ? ` · ${failed.toLocaleString()} failed` : ""}
         </span>
         <span className="prog__count">{rowsCopied.toLocaleString()} rows</span>
         <span className={`sbadge sbadge--${statusCls}`}>{run.status}</span>

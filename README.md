@@ -98,6 +98,14 @@ resume. Passwords are never stored; optional workspace-bound secret scope/key
 references are. Projects persist to a local dir (dev) or a UC volume
 (`LBX_PROJECTS_BACKEND=volume`) or Lakebase (`=postgres`).
 
+Every store falls back rather than fail — projects to the app's own filesystem,
+credentials and run state to process memory — and a Databricks App gets a fresh
+container on each restart, so a deployment that never received
+`LBX_PROJECTS_BACKEND=postgres` loses its projects and looks like a new install.
+The app now says which stores are in use: a line in the startup log
+(`databricks apps logs`), a **Storage** panel under Settings, and a warning on the
+migrations list when anything is held in the process or container only.
+
 Modules are **independent and always enabled** — no forced sequence. Connections
 are configured once and reused; other modules show a soft hint if something is
 missing.
@@ -200,6 +208,22 @@ project store is Postgres
 `GET /api/runs`, filterable by `kind` and `project_id`. Each run's `run_id` is a
 `uuid` and carries the `lbx_projects` row it belongs to.
 `LBX_RUNS_BACKEND=memory|postgres` overrides.
+
+Because that per-table state is durable, a **sync run can be resumed instead of
+restarted**. A run whose loader is gone — it failed, or the app restarted mid-load —
+is offered on Create Sync as *Resume last run*; the tables it already loaded are
+marked `skipped` (their row counts carried over) and only the rest are streamed.
+Each table is copied in one transaction, so "already loaded" is exact rather than a
+guess: a table either committed in full or left nothing behind. A run only counts as
+resumable once its loader is gone, which the run's own heartbeat decides — a run
+working through a slow table reports no progress for minutes, and resuming a live one
+would put two loaders on the same `TRUNCATE`.
+
+The foreign keys dropped for the load are persisted with the run, so an interrupted
+one no longer takes the only copy of their definitions with it; the resume restores
+what it left dropped. Resuming is table-level: a single table that failed restarts
+from row zero, and async (job) runs re-copy every table — both are tracked as
+follow-ups.
 
 Async (Databricks job) migrations are recorded as two kinds, because provisioning
 a job and running one are different events: `async_job` is what a setup produced
@@ -413,8 +437,11 @@ To deploy to another workspace, add a target to `target.yml` and run
 - Check constraints, defaults, and filtered-index predicates are translated
   mechanically; anything unrecognized passes through verbatim and fails visibly
   at apply time for review.
-- Run state is in-process memory — fine for a single-user App; use a table/Redis
-  for multi-worker deployments.
+- Run state persists to a Lakebase table only when the project store is Postgres;
+  otherwise it is process memory, and a restart loses the history (and with it the
+  ability to resume).
+- Resume is table-level: a table that failed part-way is re-copied from row zero,
+  and an async (job) run re-copies every table rather than only the ones left.
 - **Lakebase auth in lakebase-express is native Postgres roles only** — a role name
   and password over the Postgres wire protocol. Databricks identity auth
   (OAuth/OIDC for users, service principals, or groups) is **not** supported yet,
@@ -526,9 +553,11 @@ Not commitments — the gaps we'd close next, in rough priority order.
   inherits SSO/MFA and credential rotation.
 - **More source connectors** — Oracle, PostgreSQL, MySQL. The scanner is
   connector-agnostic; see [Adding a source connector](#adding-a-source-connector).
-- **Multi-user run state.** Run state is in-process memory, so the app is
-  single-user today; persisting it would allow concurrent users and multi-worker
-  deployments.
+- **Mid-table checkpoints.** A resumed run skips whole tables; a single very large
+  table still restarts from row zero. Chunked commits keyed on a sortable primary key
+  would let one table resume mid-copy, at the cost of its all-or-nothing load.
+- **Resume for async (job) runs.** The generated notebooks record per-task, not
+  per-table, progress, so a re-run copies every table again.
 
 ## How to get help
 

@@ -297,7 +297,7 @@ export interface RepairState {
 export interface TableProgress {
   name: string;
   target: string;
-  status: string; // pending|running|success|failed
+  status: string; // pending|running|success|failed|skipped
   rows_copied: number;
   total_rows: number;
   error?: string | null;
@@ -308,6 +308,19 @@ export interface RunState {
   status: string; // running|success|partial|failed
   tables: TableProgress[];
   error?: string | null;
+  // Set when this run resumed another: its loaded tables are skipped here.
+  resumed_from?: string | null;
+}
+
+// A run whose loader is gone (it failed, or the app restarted mid-load) and which
+// still has tables left, so it can be resumed instead of re-copied from scratch.
+export interface ResumableRun {
+  run_id: string;
+  status: string;
+  started_at?: string | null;
+  tables_total: number;
+  tables_left: number;
+  rows_copied: number;
 }
 
 // --- Data migration (PySpark snapshot export) ---
@@ -597,6 +610,21 @@ export interface DataOptions {
 
 /** The single workspace the backend is bound to (CLI profile locally, the App's
  *  own workspace when deployed). Read-only — there is no in-app login. */
+// Where the backend persists projects, credentials and run state. Anything not
+// durable is held in this app's process/container and dies with a restart.
+export interface StoreStatus {
+  store: string;    // projects | credentials | runs
+  backend: string;  // lakebase | uc-volume | local-files | memory | unavailable
+  durable: boolean;
+  detail: string;
+}
+
+export interface StorageStatus {
+  stores: StoreStatus[];
+  durable: boolean;
+  warning?: string | null;
+}
+
 export interface WorkspaceStatus {
   connected: boolean;
   host?: string;
@@ -625,6 +653,7 @@ export const api = {
 
   // --- Databricks workspace (bound at startup; read-only) ---
   dbStatus: () => get<WorkspaceStatus>("/api/databricks/status"),
+  storageStatus: () => get<StorageStatus>("/api/settings/storage"),
 
   // Populate the password-source dropdowns. Both fail-soft server-side (empty
   // list on missing auth/permission), so the UI falls back to manual entry.
@@ -667,6 +696,10 @@ export const api = {
   startData: (body: Record<string, unknown>) =>
     post<{ run_id: string }>("/api/migration/data/start", body),
   dataStatus: (runId: string) => get<RunState>(`/api/migration/data/status/${runId}`),
+  resumableData: (projectId: string) =>
+    get<{ run: ResumableRun | null }>(
+      `/api/migration/data/resumable?project_id=${encodeURIComponent(projectId)}`,
+    ),
   submitJob: (body: { spec: Record<string, unknown>; workspace_dir: string }) =>
     post<{ job_id: number; run_id: number; url: string | null; run_url: string | null; notebook_path: string }>("/api/migration/job/submit", body),
   scheduleJob: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string }) =>

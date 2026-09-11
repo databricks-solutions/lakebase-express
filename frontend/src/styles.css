@@ -674,6 +674,8 @@ a { color: var(--primary); }
 .bar__fill--success { background: var(--ok); }
 .bar__fill--failed { background: var(--err); }
 .bar__fill--running { background: var(--primary); }
+/* Loaded by an earlier run and skipped by a resume. */
+.bar__fill--skipped { background: var(--muted); }
 
 /* Overall sync-now progress bar (spans schema + data phases) */
 .syncbar { margin-top: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); }

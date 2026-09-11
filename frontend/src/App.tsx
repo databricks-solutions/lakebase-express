@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type AssessmentReport, type ConnectionRequest, type IdentifierCase, type LakebaseConn, type PhaseStatus, type PlanItem, type Project, type QueryParityReport, type SecretRef, type ValidationReport, type WorkspaceStatus } from "./api";
+import { api, type AssessmentReport, type ConnectionRequest, type IdentifierCase, type LakebaseConn, type PhaseStatus, type PlanItem, type Project, type QueryParityReport, type SecretRef, type StorageStatus, type ValidationReport, type WorkspaceStatus } from "./api";
 import { SOURCE_CONNECTORS, type Connector } from "./connectors";
 import Sidebar, { type NavId } from "./components/Sidebar";
 import AppBar, { GlobalSearch } from "./components/AppBar";
@@ -51,9 +51,14 @@ export default function App() {
   const [fmEndpoint, setFmEndpoint] = useState("");
   const [query, setQuery] = useState("");
   const [ws, setWs] = useState<WorkspaceStatus | null>(null);
+  const [storage, setStorage] = useState<StorageStatus | null>(null);
 
-  // The workspace is fixed by how the backend was started, so this is read once.
-  useEffect(() => { api.dbStatus().then(setWs).catch(() => {}); }, []);
+  // Both the workspace and the store backends are fixed by how the backend was
+  // started, so they are read once.
+  useEffect(() => {
+    api.dbStatus().then(setWs).catch(() => {});
+    api.storageStatus().then(setStorage).catch(() => {});
+  }, []);
 
   // Passwords live only in memory for the session.
   const secretsRef = useRef<Secrets>({ source: "", target: "", sourceRef: null, targetRef: null });
@@ -108,9 +113,9 @@ export default function App() {
           {creating ? (
             <NewMigration onCancel={() => setCreating(false)} onCreate={createProject} />
           ) : view === "migrations" ? (
-            <MigrationsHome query={query} onNew={() => setCreating(true)} onOpen={openProject} />
+            <MigrationsHome query={query} onNew={() => setCreating(true)} onOpen={openProject} storage={storage} />
           ) : (
-            <Settings fmEndpoint={fmEndpoint} setFmEndpoint={setFmEndpoint} workspace={ws} />
+            <Settings fmEndpoint={fmEndpoint} setFmEndpoint={setFmEndpoint} workspace={ws} storage={storage} />
           )}
         </div>
       </div>

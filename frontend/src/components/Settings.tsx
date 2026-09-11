@@ -1,13 +1,20 @@
 import { useEffect, useState } from "react";
-import { api, type FmEndpoint, type WorkspaceStatus } from "../api";
+import { api, type FmEndpoint, type StorageStatus, type WorkspaceStatus } from "../api";
 
 interface Props {
   fmEndpoint: string;
   setFmEndpoint: (v: string) => void;
   workspace: WorkspaceStatus | null;
+  storage: StorageStatus | null;
 }
 
-export default function Settings({ fmEndpoint, setFmEndpoint, workspace }: Props) {
+const STORE_LABEL: Record<string, string> = {
+  projects: "Migration projects",
+  credentials: "Connection credentials",
+  runs: "Run state & history",
+};
+
+export default function Settings({ fmEndpoint, setFmEndpoint, workspace, storage }: Props) {
   const [endpoints, setEndpoints] = useState<FmEndpoint[]>([]);
   const [defaultEp, setDefaultEp] = useState<string>("");
   const [fmApi, setFmApi] = useState<string>("serving");
@@ -69,6 +76,33 @@ export default function Settings({ fmEndpoint, setFmEndpoint, workspace }: Props
               </p>
               {workspace?.error && <div className="banner banner--err">{workspace.error}</div>}
             </>
+          )}
+        </div>
+
+        <div className="card" style={{ marginTop: 24 }}>
+          <h2>Storage</h2>
+          <p className="muted">
+            Where projects, connection credentials and run state are kept. Anything not
+            durable lives in this app's process or container, so a restart loses it —
+            including the run state a migration needs to be resumed.
+          </p>
+          {storage ? (
+            <>
+              <div className="proglist" style={{ marginTop: 12 }}>
+                {storage.stores.map((s) => (
+                  <div key={s.store} className="prog">
+                    <div className="prog__row">
+                      <span className="prog__name">{STORE_LABEL[s.store] ?? s.store}</span>
+                      <span className="prog__count">{s.detail}</span>
+                      <span className={`sbadge sbadge--${s.durable ? "ok" : "err"}`}>{s.backend}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {storage.warning && <div className="banner banner--warn">{storage.warning}</div>}
+            </>
+          ) : (
+            <p className="muted">Loading…</p>
           )}
         </div>
 
