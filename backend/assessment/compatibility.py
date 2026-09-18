@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Iterable
 
 from backend.assessment.models import (
     Finding,

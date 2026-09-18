@@ -1,0 +1,14 @@
+# Development and CI dependencies: the app's runtime pins, plus the test and lint
+# tools. The app image installs requirements.txt only — nothing here ships.
+#
+#   pip install -r requirements-dev.txt          # loose: resolves fresh versions
+#   pip install --require-hashes --no-deps \
+#       -r requirements-dev.lock                 # what CI installs (hash-pinned)
+#   pytest tests/
+#   ruff check .
+-r requirements.txt
+
+pytest>=8.0     # test runner
+httpx>=0.27     # backs FastAPI's TestClient
+pglast>=7.0     # tests/test_collations.py parses the generated DDL to check it
+ruff==0.16.7    # lint gate — pinned so CI and laptops agree rule for rule
