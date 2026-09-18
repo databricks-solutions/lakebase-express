@@ -1,0 +1,34 @@
+# Lint config for `ruff check .` — run by .github/workflows/ci.yml and locally
+# after `pip install -r requirements-dev.txt`.
+#
+# The rule set is deliberately narrow: every rule enabled here passes on the code
+# as it stands, so the gate only ever fails on something a PR actually introduced.
+# Widening it is a separate job — `ruff check --select E,F,W,I,UP,B` currently
+# reports ~700 findings, 662 of them E501 (line-too-long) — see the README's
+# "CI/CD" section.
+target-version = "py310"  # the floor the CI matrix and README's Prerequisites claim
+
+[lint]
+select = [
+  "E4",  # imports (unsorted __all__, shadowed builtins in imports)
+  "E7",  # statement-level pycodestyle errors (comparisons, bare except, ...)
+  "E9",  # syntax / IO errors — never ignore these
+  "F",   # pyflakes: undefined names, unused imports and variables
+  "W",   # whitespace and deprecated-syntax warnings
+]
+
+[lint.per-file-ignores]
+# These three modules all end in the same shape:
+#
+#     except Exception as exc:
+#         _set(run_id, lambda s: (..., setattr(s, "error", str(exc))))
+#
+# `_set` hands the lambda to RunRegistry.update, which calls it synchronously
+# under its lock (backend/run_registry.py), so `exc` is still bound when the
+# lambda runs. Ruff resolves the lambda body in a scope where the except-clause
+# binding is already deleted, so it reports F841 (assigned but never used) plus
+# F821 (undefined name) on code that is correct. Ignored per file rather than
+# silenced with noqa comments, to keep the runtime code untouched.
+"backend/migration/plan_runs.py" = ["F821", "F841"]
+"backend/query_parity/runner.py" = ["F821", "F841"]
+"backend/validation/runs.py" = ["F821", "F841"]

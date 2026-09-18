@@ -1,5 +1,4 @@
 """Credential store backends: in-memory default and encrypted Lakebase store."""
-import base64
 
 import pytest
 from cryptography.fernet import Fernet

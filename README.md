@@ -364,9 +364,14 @@ Deployed, set these through the bundle: `fm_endpoint` and `fm_api` in
 ## Run tests
 
 ```bash
-pip install pytest httpx   # httpx backs FastAPI's TestClient
+pip install -r requirements-dev.txt   # runtime pins + pytest, httpx, pglast, ruff
 pytest tests/
+ruff check .                          # the same lint gate CI runs
 ```
+
+`requirements-dev.txt` adds only test and lint tooling on top of `requirements.txt`
+— nothing there ships in the app image. `httpx` backs FastAPI's `TestClient`, and
+`pglast` parses the generated DDL in `tests/test_collations.py`.
 
 ## Deploy as a Databricks App
 
@@ -395,6 +400,75 @@ To deploy to another workspace, add a target to `target.yml` and run
 > private link). Async-mode runtime scopes need scope create/write. Passwords are
 > never stored in clear text. For run history, the app's service principal also needs
 > a Lakebase Postgres role — see [Run-state role](#run-state-role-lakebase).
+
+## CI/CD
+
+Three workflows in `.github/workflows`, all of them runnable knowledge about this
+repo rather than a template:
+
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| `ci.yml` | every pull request, every push to `main` | `ruff check`; `pytest` on Python 3.10, 3.11, 3.12 and 3.13; imports `backend.main:app` (what `app.yaml` starts); `npm ci` + lockfile check + `tsc -b` + `vite build`; checks `app.yaml`, `databricks.yml` and `target.yml.sample` still agree |
+| `release.yml` | a `v*` tag | re-runs the CI gates, builds the SPA, packages `lakebase-express-<version>.tar.gz` plus `SHA256SUMS`, and publishes a GitHub Release with generated notes |
+| `deploy.yml` | manual (`workflow_dispatch`) | deploys a released artifact — or the current ref — to a workspace with `databricks bundle validate/deploy/run` |
+
+The tests need no workspace: `tests/conftest.py` stubs the single live lookup, so CI
+runs with no Databricks credentials at all.
+
+### Cutting a release
+
+Every merge to `main` stays releasable; a tag decides when one is cut.
+
+```bash
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+```
+
+The release asset is the deployable tree: every tracked file, plus the compiled
+`frontend/dist` (gitignored, but what the app serves), plus a `VERSION` file
+recording the tag, commit and build time. Gitignored local config — `target.yml`,
+`*.env`, `.databrickscfg` — is packaged from `git archive`, so it can never ride
+along. A tag with a suffix (`v1.0.0-rc.1`) publishes as a pre-release.
+
+### Deploying from CI
+
+`deploy.yml` stays inert until a GitHub Environment named `databricks` holds:
+
+| Secret | Value |
+| --- | --- |
+| `DATABRICKS_HOST` | workspace URL |
+| `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` | service principal (OAuth M2M) that may manage the app |
+| `LBX_PROJECTS_PG_HOST` | Lakebase instance host for the project store |
+| `LBX_PROJECTS_PG_USER` | Lakebase role the project store connects as |
+
+Run it with a `version` (a release tag) to deploy those exact checksum-verified
+bytes, or leave `version` empty to build and deploy the current ref. It renders its
+own `target.yml` from those secrets, since the committed repo has none.
+
+Two things it deliberately does not do, both one-time and both still manual: grant
+the app's service principal access to the secret scope (that is `deploy.sh`'s step
+3, and it needs `MANAGE` on the scope), and create the app's Lakebase role for run
+history. Environment protection rules are where a reviewer gate belongs.
+
+`databricks bundle validate` resolves the current user against the workspace, so a
+pull request cannot run it — it has no credentials, and should not have any.
+`.github/scripts/check_bundle_config.py` covers what is checkable offline: the three
+YAML files parse, `app.yaml` declares a command, every `${var.*}` in
+`databricks.yml` is declared, and every variable without a default appears in
+`target.yml.sample`. The real `bundle validate` runs inside `deploy.yml`.
+
+### Lint scope
+
+`ruff.toml` enables `E4`, `E7`, `E9`, `F` and `W` — the widest set that is already
+clean here, so the gate only ever fails on something a change introduced. Three
+modules carry documented `F821`/`F841` ignores: they pass a lambda that reads the
+`except ... as exc` binding into `RunRegistry.update`, which calls it synchronously
+inside the `except` block, so the code is correct and ruff's scope analysis is not.
+
+Widening the gate is a separate piece of work: `ruff check --select E,F,W,I,UP,B`
+reports 689 findings, 661 of them `E501` (line-too-long), then 16 unsorted-import,
+8 pyupgrade and 4 bugbear. `ruff format` would rewrite 93 of 104 files, so
+formatting is not part of the gate either.
 
 ## Adding a source connector
 
