@@ -26,10 +26,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install ruff at the pinned version
-        # The pin lives in requirements-dev.txt so a laptop and CI flag the same
-        # things; installing ruff alone keeps this job at a few seconds.
-        run: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Install dependencies from the hash-pinned lock
+        run: pip install --require-hashes --no-deps -r requirements-dev.lock
       - name: ruff check
         # Rule set and the three documented per-file ignores live in ruff.toml.
         run: ruff check --output-format=github .
@@ -49,11 +49,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-      - name: Install runtime + dev dependencies
-        run: pip install -r requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock
+      - name: Install dependencies from the hash-pinned lock
+        # --require-hashes refuses any archive whose digest is not in the lock, so a
+        # compromised or swapped release on PyPI fails the build instead of running.
+        # --no-deps because the lock already is the fully resolved set.
+        run: pip install --require-hashes --no-deps -r requirements-dev.lock
       - name: pytest
         # No workspace needed: conftest.py stubs the one live lookup, so the suite
         # runs with no Databricks credentials on the runner.
@@ -96,8 +97,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install PyYAML at the app's pinned version
-        run: pip install "$(grep -E '^PyYAML==' requirements.txt)"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Install dependencies from the hash-pinned lock
+        run: pip install --require-hashes --no-deps -r requirements-dev.lock
       - name: Check app.yaml, databricks.yml and target.yml.sample agree
         # `databricks bundle validate` resolves the current user against the
         # workspace, so it needs credentials a PR must not have. This covers the

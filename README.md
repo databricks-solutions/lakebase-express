@@ -364,10 +364,13 @@ Deployed, set these through the bundle: `fm_endpoint` and `fm_api` in
 ## Run tests
 
 ```bash
-pip install -r requirements-dev.txt   # runtime pins + pytest, httpx, pglast, ruff
+pip install --require-hashes --no-deps -r requirements-dev.lock   # exactly what CI installs
 pytest tests/
-ruff check .                          # the same lint gate CI runs
+ruff check .                                                      # the same lint gate CI runs
 ```
+
+`pip install -r requirements-dev.txt` also works and resolves fresh versions; the
+lock is there when you want CI's exact set.
 
 `requirements-dev.txt` adds only test and lint tooling on top of `requirements.txt`
 — nothing there ships in the app image. `httpx` backs FastAPI's `TestClient`, and
@@ -456,6 +459,30 @@ pull request cannot run it — it has no credentials, and should not have any.
 YAML files parse, `app.yaml` declares a command, every `${var.*}` in
 `databricks.yml` is declared, and every variable without a default appears in
 `target.yml.sample`. The real `bundle validate` runs inside `deploy.yml`.
+
+### Dependency locks
+
+`requirements.lock` and `requirements-dev.lock` are fully resolved, hash-pinned
+versions of the two `requirements*.txt` files, generated with:
+
+```bash
+uv pip compile requirements.txt     --universal --python-version 3.10 --generate-hashes -o requirements.lock
+uv pip compile requirements-dev.txt --universal --python-version 3.10 --generate-hashes -o requirements-dev.lock
+```
+
+Regenerate both whenever a `requirements*.txt` pin changes. `--universal` keeps one
+lock valid across the CI matrix (Linux and macOS, Python 3.10-3.13) by carrying
+environment markers instead of resolving for one interpreter.
+
+CI installs with `--require-hashes --no-deps`, so a package whose archive digest
+does not match the lock fails the build rather than running — a swapped or
+re-uploaded release on PyPI cannot reach the runner. The app image itself still
+installs plain `requirements.txt`, which Databricks Apps expects.
+
+One constraint on the runtime pins: keep them to versions Databricks' internal PyPI
+mirror carries as well as PyPI, or the lock cannot be regenerated from a Databricks
+laptop. `fastapi` is pinned at `0.115.9` for exactly that reason — the mirror does
+not serve `0.115.6`-`0.115.8`.
 
 ### Lint scope
 

@@ -1,7 +1,9 @@
 # Development and CI dependencies: the app's runtime pins, plus the test and lint
 # tools. The app image installs requirements.txt only — nothing here ships.
 #
-#   pip install -r requirements-dev.txt
+#   pip install -r requirements-dev.txt          # loose: resolves fresh versions
+#   pip install --require-hashes --no-deps \
+#       -r requirements-dev.lock                 # what CI installs (hash-pinned)
 #   pytest tests/
 #   ruff check .
 -r requirements.txt
