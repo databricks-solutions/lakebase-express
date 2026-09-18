@@ -1,19 +1,17 @@
 name: CI
 
-# Gates every pull request and every push to main. release.yml calls this same
-# workflow, so a tag can never publish something that would have failed a PR.
+# Merge checks: gates every pull request and every push to main. Nothing here
+# publishes an artifact or touches a workspace.
 on:
   pull_request:
   push:
     branches: [main]
-  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  # Supersede an in-flight run for the same PR; never cancel a run on main or on a
-  # tag, since those gate a release.
+  # Supersede an in-flight run for the same PR; never cancel a run on main.
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 

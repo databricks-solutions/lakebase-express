@@ -406,59 +406,33 @@ To deploy to another workspace, add a target to `target.yml` and run
 
 ## CI/CD
 
-Three workflows in `.github/workflows`, all of them runnable knowledge about this
-repo rather than a template:
+`.github/workflows/ci.yml` runs the merge checks on every pull request and every
+push to `main`:
 
-| Workflow | Trigger | What it does |
-| --- | --- | --- |
-| `ci.yml` | every pull request, every push to `main` | `ruff check`; `pytest` on Python 3.10, 3.11, 3.12 and 3.13; imports `backend.main:app` (what `app.yaml` starts); `npm ci` + lockfile check + `tsc -b` + `vite build`; checks `app.yaml`, `databricks.yml` and `target.yml.sample` still agree |
-| `release.yml` | a `v*` tag | re-runs the CI gates, builds the SPA, packages `lakebase-express-<version>.tar.gz` plus `SHA256SUMS`, and publishes a GitHub Release with generated notes |
-| `deploy.yml` | manual (`workflow_dispatch`) | deploys a released artifact — or the current ref — to a workspace with `databricks bundle validate/deploy/run` |
-
-The tests need no workspace: `tests/conftest.py` stubs the single live lookup, so CI
-runs with no Databricks credentials at all.
-
-### Cutting a release
-
-Every merge to `main` stays releasable; a tag decides when one is cut.
-
-```bash
-git tag -a v0.2.0 -m "v0.2.0"
-git push origin v0.2.0
-```
-
-The release asset is the deployable tree: every tracked file, plus the compiled
-`frontend/dist` (gitignored, but what the app serves), plus a `VERSION` file
-recording the tag, commit and build time. Gitignored local config — `target.yml`,
-`*.env`, `.databrickscfg` — is packaged from `git archive`, so it can never ride
-along. A tag with a suffix (`v1.0.0-rc.1`) publishes as a pre-release.
-
-### Deploying from CI
-
-`deploy.yml` stays inert until a GitHub Environment named `databricks` holds:
-
-| Secret | Value |
+| Job | What it does |
 | --- | --- |
-| `DATABRICKS_HOST` | workspace URL |
-| `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` | service principal (OAuth M2M) that may manage the app |
-| `LBX_PROJECTS_PG_HOST` | Lakebase instance host for the project store |
-| `LBX_PROJECTS_PG_USER` | Lakebase role the project store connects as |
+| Lint | `ruff check` with the rule set in `ruff.toml` |
+| Tests | `pytest tests/` on Python 3.10, 3.11, 3.12 and 3.13, then imports `backend.main:app` — the entrypoint `app.yaml` starts |
+| Frontend | `npm ci`, `npm run lockfile:check`, then `npm run build` (`tsc -b` + `vite build`), and asserts `frontend/dist/index.html` exists |
+| Deploy config | `.github/scripts/check_bundle_config.py`: the three YAML files parse, `app.yaml` declares a command, every `${var.*}` in `databricks.yml` is declared, and every variable without a default appears in `target.yml.sample` |
 
-Run it with a `version` (a release tag) to deploy those exact checksum-verified
-bytes, or leave `version` empty to build and deploy the current ref. It renders its
-own `target.yml` from those secrets, since the committed repo has none.
+Nothing in CI needs a workspace or a secret — `tests/conftest.py` stubs the single
+live lookup, so the suite runs with no Databricks credentials on the runner. Every
+`GITHUB_TOKEN` permission is `contents: read`, every action is pinned to a full
+commit SHA, and every `pip install` goes through the hash-pinned lock below.
 
-Two things it deliberately does not do, both one-time and both still manual: grant
-the app's service principal access to the secret scope (that is `deploy.sh`'s step
-3, and it needs `MANAGE` on the scope), and create the app's Lakebase role for run
-history. Environment protection rules are where a reviewer gate belongs.
+`databricks bundle validate` is deliberately not part of this: it resolves the
+current user against the workspace, so it needs credentials a pull request must not
+have. `check_bundle_config.py` covers what is checkable offline instead.
 
-`databricks bundle validate` resolves the current user against the workspace, so a
-pull request cannot run it — it has no credentials, and should not have any.
-`.github/scripts/check_bundle_config.py` covers what is checkable offline: the three
-YAML files parse, `app.yaml` declares a command, every `${var.*}` in
-`databricks.yml` is declared, and every variable without a default appears in
-`target.yml.sample`. The real `bundle validate` runs inside `deploy.yml`.
+### Releases and deployment
+
+Both are still manual: build the SPA and run `./deploy.sh` (see
+[Deploy as a Databricks App](#deploy-as-a-databricks-app)). Automating a release
+means publishing artifacts from CI, which needs its own security approval, so the
+tag-triggered release workflow and the environment-gated deploy workflow are held
+back for a follow-up change rather than shipped here.
+
 
 ### Dependency locks
 
