@@ -1,0 +1,9 @@
+# SAMPLE — deploy.sh generates the real `app.yaml` (gitignored) from the resolved
+# bundle config in databricks.yml + target.yml. Don't edit app.yaml by hand.
+#
+# It has to exist in the deployed source and carry the env, not just the command:
+# the Apps runtime reads it on every container start, while the bundle's `config`
+# block is applied at deploy time only. Values are written as JSON (valid YAML),
+# with one env entry per var in databricks.yml's resources.apps.*.config.env.
+command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+env: [{"name": "LBX_PROJECTS_BACKEND", "value": "postgres"}, {"name": "LBX_PROJECTS_PG_HOST", "value": "ep-example.database.azuredatabricks.net"}]
