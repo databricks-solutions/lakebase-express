@@ -465,6 +465,11 @@ To deploy to another workspace, add a target to `target.yml` and run
 
 - Data-type coercion is light: `bit`→`boolean` is handled; other edge types rely
   on psycopg adapters and surface as a per-table error rather than dropping rows.
+- System-versioned (temporal) source tables copy as plain tables: their `ValidFrom`/
+  `ValidTo` values come across as data — those columns are `HIDDEN`, so the in-app
+  loader names them explicitly and the job's read projects them through an expression
+  (SQL Server keeps the flag even through a subquery) — but Postgres has no system
+  versioning, so history is not maintained on the target.
 - Check constraints, defaults, and filtered-index predicates are translated
   mechanically; anything unrecognized passes through verbatim and fails visibly
   at apply time for review.

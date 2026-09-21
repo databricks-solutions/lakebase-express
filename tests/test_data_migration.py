@@ -185,10 +185,88 @@ def test_source_read_casts_spark_unreadable_types():
     assert '"hierarchyid": "{c}.ToString() AS {a}"' in code
     assert '"geography": "{c}.STAsText() AS {a}"' in code
     assert '"geometry": "{c}.STAsText() AS {a}"' in code
-    # The read resolves its relation through the projection helper, so affected
-    # tables get a casting subquery while clean tables keep the raw dbtable.
+    # The read resolves its relation through the projection helper, which names
+    # every column and casts the unreadable ones.
     assert "dbtable = _source_relation(src_schema, src_table)" in code
     assert "FROM [{src_schema}].[{src_table}]) AS src" in code
+
+
+def _source_relation(code: str, meta: list[dict]):
+    """Exec the notebook's projection helper against a fake column probe."""
+
+    class _Reader:
+        def option(self, *a, **k):
+            return self
+
+        def load(self):
+            return SimpleNamespace(collect=lambda: meta)
+
+    start = code.index("UNREADABLE_TYPES = {")
+    ns: dict = {"_reader": _Reader}
+    exec(code[start:code.index("def read_source")], ns)
+    return ns["_source_relation"]("dbo", "Orders")
+
+
+def _col(name, data_type="int", position=1, hidden=False) -> dict:
+    return {"COLUMN_NAME": name, "DATA_TYPE": data_type, "ORDINAL_POSITION": position,
+            "is_hidden": hidden}
+
+
+def test_hidden_period_columns_are_projected_through_an_expression():
+    """The bug this fixes: a system-versioned (temporal) table's ValidFrom/ValidTo are
+    HIDDEN, Spark reads the relation with ``SELECT *``, and SQL Server keeps that flag
+    even through a subquery — so the COPY left those NOT NULL columns null ("null value
+    in column \"ValidFrom\" ... violates not-null constraint"). Naming them is not
+    enough; an expression makes them ordinary columns of the subquery."""
+    meta = [_col("OrderId", "bigint", 1), _col("Status", "nvarchar", 2),
+            _col("ValidFrom", "datetime2", 7, hidden=True),
+            _col("ValidTo", "datetime2", 8, hidden=True)]
+    assert _source_relation(generate(_req())[0].code, meta) == (
+        "(SELECT [OrderId], [Status], "
+        "ISNULL([ValidFrom], [ValidFrom]) AS [ValidFrom], "
+        "ISNULL([ValidTo], [ValidTo]) AS [ValidTo] "
+        "FROM [dbo].[Orders]) AS src"
+    )
+
+
+def test_visible_columns_stay_plain_references():
+    """The partition column among them: wrapping it would cost the partitioned read
+    its predicate pushdown."""
+    meta = [_col("OrderId", "bigint", 1), _col("Status", "nvarchar", 2)]
+    assert _source_relation(generate(_req())[0].code, meta) == (
+        "(SELECT [OrderId], [Status] FROM [dbo].[Orders]) AS src"
+    )
+
+
+def test_the_hidden_flag_is_read_from_sys_columns():
+    """INFORMATION_SCHEMA has no is_hidden, so the probe joins the catalog view that
+    does — while the type names the casts key on still come from INFORMATION_SCHEMA."""
+    code = generate(_req())[0].code
+    assert "sc.is_hidden" in code
+    assert "JOIN sys.columns sc ON sc.object_id = OBJECT_ID(" in code
+
+
+def test_unreadable_columns_are_cast_inside_that_list():
+    meta = [_col("OrderId", "bigint", 1), _col("Node", "hierarchyid", 2),
+            _col("ValidFrom", "datetime2", 3, hidden=True)]
+    relation = _source_relation(generate(_req())[0].code, meta)
+    assert "[Node].ToString() AS [Node]" in relation
+    assert "[OrderId], " in relation
+    assert "ISNULL([ValidFrom], [ValidFrom]) AS [ValidFrom]" in relation
+
+
+def test_the_column_list_follows_the_source_order():
+    """It is also the COPY column list, and the probe cannot sort server-side."""
+    meta = [_col("ValidTo", "datetime2", 8), _col("OrderId", "bigint", 1)]
+    assert _source_relation(generate(_req())[0].code, meta).startswith(
+        "(SELECT [OrderId], [ValidTo]"
+    )
+
+
+def test_no_column_metadata_falls_back_to_the_raw_table():
+    """A view, or no rights on INFORMATION_SCHEMA: an empty SELECT list would be a
+    syntax error, so read the table as it comes."""
+    assert _source_relation(generate(_req())[0].code, []) == "[dbo].[Orders]"
 
 
 def test_metadata_probe_has_no_order_by():
@@ -196,7 +274,7 @@ def test_metadata_probe_has_no_order_by():
     Server rejects ORDER BY inside one ("The ORDER BY clause is invalid in views,
     ... derived tables, subqueries") — the column probe must sort client-side."""
     code = generate(_req())[0].code
-    assert "ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS" in code
+    assert "FROM INFORMATION_SCHEMA.COLUMNS c " in code
     assert "ORDER BY ORDINAL_POSITION" not in code
     assert 'sorted(meta, key=lambda r: r["ORDINAL_POSITION"])' in code
 

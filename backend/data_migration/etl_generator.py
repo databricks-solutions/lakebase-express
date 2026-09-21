@@ -262,10 +262,14 @@ _SNAPSHOT = '''\
 # MAGIC   concurrent JDBC reads; each partition COPYs independently.
 # MAGIC * **Concurrent tables** — up to `MAX_PARALLEL_TABLES` tables load at once,
 # MAGIC   keeping a multi-node cluster busy instead of walking tables one by one.
-# MAGIC * **Driver-hostile types cast server-side** — columns Spark can't read
-# MAGIC   (`sql_variant`, `hierarchyid`, `geography`, `geometry` fail the whole
-# MAGIC   table with `UNRECOGNIZED_SQL_TYPE`) are converted to text by SQL Server
-# MAGIC   in the SELECT list, matching the `text` columns the plan creates for them.
+# MAGIC * **Hidden columns projected through an expression** — a temporal table's
+# MAGIC   period columns (`ValidFrom`/`ValidTo`) are HIDDEN, and the read would COPY
+# MAGIC   nulls into the NOT NULL columns the plan created: SQL Server keeps that flag
+# MAGIC   even through a subquery, so they are wrapped in `ISNULL(c, c)` to come across
+# MAGIC   as ordinary columns. Columns Spark can't read (`sql_variant`, `hierarchyid`,
+# MAGIC   `geography`, `geometry` fail the whole table with `UNRECOGNIZED_SQL_TYPE`)
+# MAGIC   are cast to text by SQL Server in that same list, matching the `text`
+# MAGIC   columns the plan creates for them.
 # MAGIC * **Constraints & indexes after the data** — the plan's post-data DDL
 # MAGIC   (primary/foreign keys, indexes, defaults, identity, checks, triggers)
 # MAGIC   lives in the companion `02_post_load_*` notebooks (one per object type:
@@ -392,32 +396,51 @@ UNREADABLE_TYPES = {
 
 
 def _source_relation(src_schema: str, src_table: str) -> str:
-    """The relation the read pulls from: the raw table, or — when it has columns
-    Spark can't read — a subquery casting those columns to text server-side.
-    Aliases keep the original column names (which the plan-created target table
-    preserves), so bounds probes, partitioned reads, and the COPY column list
+    """A subquery naming every column of the table, projecting the ones Spark cannot
+    read — and the ones SQL Server hides — through expressions.
+
+    Spark reads this relation with ``SELECT *``, and a system-versioned (temporal)
+    table's period columns are HIDDEN: a plain reference keeps that flag even through
+    a derived table, so the outer ``SELECT *`` drops the column and the COPY would
+    leave those NOT NULL target columns null. An expression makes it an ordinary
+    column of the subquery — ``ISNULL(c, c)`` keeps the exact type and value — which
+    is what brings ValidFrom/ValidTo across. (A trivial wrapper is folded back to the
+    reference and does not work.) Only hidden columns are wrapped, so the partition
+    column stays a plain reference and the partitioned read still pushes its
+    predicate down. Aliases keep the original column names (which the plan-created
+    target preserves), so bounds probes, partitioned reads and the COPY column list
     all keep working against the subquery."""
     s, t = src_schema.replace("'", "''"), src_table.replace("'", "''")
-    # No ORDER BY here: Spark wraps the "query" option in a derived table
-    # (SPARK_GEN_SUBQ), and SQL Server rejects ORDER BY inside one. Sort client-side.
+    # is_hidden lives in sys.columns; the type names the casts key on come from
+    # INFORMATION_SCHEMA. No ORDER BY here: Spark wraps the "query" option in a
+    # derived table (SPARK_GEN_SUBQ) and SQL Server rejects ORDER BY inside one.
     meta = (
         _reader()
         .option(
             "query",
-            "SELECT COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE TABLE_SCHEMA = '{s}' AND TABLE_NAME = '{t}'",
+            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.ORDINAL_POSITION, sc.is_hidden "
+            "FROM INFORMATION_SCHEMA.COLUMNS c "
+            f"JOIN sys.columns sc ON sc.object_id = OBJECT_ID('[{s}].[{t}]') "
+            "AND sc.name = c.COLUMN_NAME "
+            f"WHERE c.TABLE_SCHEMA = '{s}' AND c.TABLE_NAME = '{t}'",
         )
         .load()
         .collect()
     )
     meta = sorted(meta, key=lambda r: r["ORDINAL_POSITION"])
-    if not any(r["DATA_TYPE"].lower() in UNREADABLE_TYPES for r in meta):
+    # No metadata (a view, a permission gap): the raw table is all we can read.
+    if not meta:
         return f"[{src_schema}].[{src_table}]"
     parts = []
     for r in meta:
         col = f"[{r['COLUMN_NAME']}]"
         tmpl = UNREADABLE_TYPES.get(r["DATA_TYPE"].lower())
-        parts.append(tmpl.format(c=col, a=col) if tmpl else col)
+        if tmpl:
+            parts.append(tmpl.format(c=col, a=col))
+        elif r["is_hidden"]:
+            parts.append(f"ISNULL({col}, {col}) AS {col}")
+        else:
+            parts.append(col)
     return f"(SELECT {', '.join(parts)} FROM [{src_schema}].[{src_table}]) AS src"
 
 
