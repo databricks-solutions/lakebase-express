@@ -227,6 +227,16 @@ class TaskProgress(BaseModel):
     error: str | None = None
 
 
+class AsyncTableProgress(BaseModel):
+    """One table of an async run, checkpointed by the loader notebook as it settles —
+    the per-table state a resume reads to know what is already in the target."""
+    status: str = "running"                  # running|success|failed|skipped
+    rows_copied: int = 0
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
 class AsyncRunState(BaseModel):
     """A load handed to a Databricks job (async mode).
 
@@ -248,5 +258,12 @@ class AsyncRunState(BaseModel):
     error: str | None = None
     # Keyed by Databricks job task key, filled in by the notebooks as the chain runs.
     tasks: dict[str, TaskProgress] = {}
+    # Keyed by "schema.table", written by the loader notebook as each table settles.
+    tables: dict[str, AsyncTableProgress] = {}
+    # The run this one resumed, whose loaded tables are skipped here.
+    resumed_from: str | None = None
+    # (table, constraint, definition) of the FKs the load dropped, persisted so a
+    # resume restores what an interrupted run left dropped.
+    dropped_fks: list[tuple[str, str, str]] = []
     started_at: str | None = None
     finished_at: str | None = None

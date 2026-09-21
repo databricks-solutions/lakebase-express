@@ -323,6 +323,14 @@ export interface ResumableRun {
   rows_copied: number;
 }
 
+// The same, for an async (job) run: its loader checkpointed some tables and then
+// the job stopped, so resuming copies only the rest.
+export interface ResumableAsyncRun extends ResumableRun {
+  job_id?: number | null;
+  job_run_id?: number | null;
+  run_url?: string | null;
+}
+
 // --- Data migration (PySpark snapshot export) ---
 export interface TableRef {
   schema_name: string;
@@ -707,8 +715,12 @@ export const api = {
   runStateAccess: (body: { job_id: number }) =>
     post<{ ok: boolean; warning?: string | null; fix?: string | null }>(
       "/api/migration/async/run-state-access", body),
-  asyncSetup: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string; run_now: boolean }) =>
+  asyncSetup: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string; run_now: boolean; resume_from?: string | null }) =>
     post<AsyncSetupResult>("/api/migration/async/setup", body),
+  resumableAsync: (projectId: string) =>
+    get<{ run: ResumableAsyncRun | null }>(
+      `/api/migration/async/resumable?project_id=${encodeURIComponent(projectId)}`,
+    ),
   ensureSecrets: (body: {
     scope: string;
     secrets: Record<string, string>;

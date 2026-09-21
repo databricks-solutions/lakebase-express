@@ -281,9 +281,10 @@ def test_notebooks_report_run_state_over_oauth():
 
 
 def test_no_password_is_embedded_for_run_state():
-    """The point of OAuth here: the reporter carries no secret at all."""
+    """The point of OAuth here: the run-state cell carries no secret at all."""
     code = generate(_spec(_run_store_target()))[0].code
-    reporter = code.split("def _report_run_state")[1].split("# COMMAND")[0]
+    start = code.index("RUN_STORE_HOST = ")
+    reporter = code[start:code.index("# COMMAND", start)]
     assert "dbutils.secrets.get" not in reporter
     assert "password=token" in reporter  # the minted credential, nothing else
 
@@ -307,7 +308,7 @@ def test_the_notebook_derives_the_same_run_id_as_the_app():
     body = "def _run_state_id():" + (
         code.split("def _run_state_id():")[1].split("def _report_run_state")[0]
     )
-    widgets = SimpleNamespace(get=lambda k: {"job_id": "100", "job_run_id": "555"}[k])
+    widgets = SimpleNamespace(get=lambda k: {"job_id": "100", "job_run_id": "555"}.get(k, ""))
     ns: dict = {"dbutils": SimpleNamespace(widgets=widgets)}
     exec(body, ns)
     assert ns["_run_state_id"]() == run_state_id(100, 555)
@@ -418,7 +419,7 @@ def _reporter(monkeypatch, code, phase_calls=None):
 
     widgets = SimpleNamespace(
         text=lambda *a, **k: None,
-        get=lambda k: {"job_id": "100", "job_run_id": "555"}[k],
+        get=lambda k: {"job_id": "100", "job_run_id": "555"}.get(k, ""),
     )
     ns: dict = {"dbutils": SimpleNamespace(widgets=widgets)}
     exec(block, ns)
@@ -498,7 +499,7 @@ def test_the_emitted_upsert_is_valid_postgres(monkeypatch):
                 generate_database_credential=lambda endpoint: SimpleNamespace(token="t")),
             current_user=SimpleNamespace(me=lambda: SimpleNamespace(user_name="me@x.com")))))
     ns: dict = {"dbutils": SimpleNamespace(widgets=SimpleNamespace(
-        text=lambda *a, **k: None, get=lambda k: {"job_id": "1", "job_run_id": "2"}[k]))}
+        text=lambda *a, **k: None, get=lambda k: {"job_id": "1", "job_run_id": "2"}.get(k, "")))}
     exec(block, ns)
     ns["_report_run_state"]("running")
 

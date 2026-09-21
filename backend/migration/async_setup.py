@@ -121,6 +121,7 @@ def setup_async(
     quartz_cron: str | None = None,
     timezone_id: str = "UTC",
     run_now: bool = True,
+    resume_from: str | None = None,
 ) -> dict:
     """Provision the PySpark snapshot job — run now, create only, or on a schedule.
 
@@ -130,9 +131,13 @@ def setup_async(
     user can pick/tune the compute (serverless or a classic job cluster) in the
     Jobs UI before running it. Either way, apply the schema & code plan first so
     the target Lakebase tables exist before the snapshot runs.
+
+    ``resume_from`` continues that run instead of copying every table again: the
+    loader skips the tables it already loaded. Resuming is a run, so it takes the
+    run-now path — a schedule or an unstarted job has no run to continue.
     """
     req = with_run_store(req)
-    if quartz_cron:
+    if quartz_cron and not resume_from:
         result = create_scheduled_job(req, workspace_dir, quartz_cron, timezone_id)
         result["note"] = (
             "Scheduled snapshot job created — it refreshes the Lakebase tables on the chosen "
@@ -140,7 +145,7 @@ def setup_async(
         )
         return _recorded(result, req, quartz_cron)
 
-    if not run_now:
+    if not run_now and not resume_from:
         result = create_scheduled_job(req, workspace_dir, None, timezone_id)
         result["run_id"] = None
         result["run_url"] = None
@@ -151,18 +156,23 @@ def setup_async(
         )
         return _recorded(result, req, None)
 
-    result = create_job_and_run(req, workspace_dir)
+    result = create_job_and_run(req, workspace_dir, resume_from)
     result["scheduled"] = False
     result["note"] = (
+        "Resuming the previous run — only the tables it did not finish are copied, then the "
+        "chained post-load tasks run as usual."
+        if resume_from else
         "Snapshot job created and a run submitted — the copy task runs first, then one "
         "chained task per object type (constraints → indexes → foreign keys → triggers) "
         "creates them. Re-run it anytime from the Jobs UI ('Run now'). Apply the schema & "
         "code plan first so the target tables exist."
     )
-    return _recorded(result, req, None)
+    return _recorded(result, req, None, resume_from)
 
 
-def _recorded(result: dict, req: DataGenRequest, quartz_cron: str | None) -> dict:
+def _recorded(
+    result: dict, req: DataGenRequest, quartz_cron: str | None, resume_from: str | None = None
+) -> dict:
     """Record the provisioned job in the run store and return ``result`` with our
     own run id added. Recording must never fail the provisioning that succeeded."""
     failed = check_run_store_access(result.get("job_id"))
@@ -174,6 +184,7 @@ def _recorded(result: dict, req: DataGenRequest, quartz_cron: str | None) -> dic
             tables_total=len(req.tables),
             quartz_cron=quartz_cron,
             project_id=req.project_id,
+            resume_from=resume_from,
         )
         result["lbx_run_id"] = state.run_id
     except Exception as exc:

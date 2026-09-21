@@ -501,7 +501,7 @@ def test_post_load_notebook_sanitizes_stale_trigger_sql():
 def test_snapshot_notebook_guards_fks_and_triggers():
     arts = generate(_req())
     code = arts[0].code
-    assert "def drop_target_fks()" in code
+    assert "def drop_target_fks(tables)" in code
     assert "def restore_target_fks(dropped)" in code
     assert "pg_get_constraintdef" in code
     # Triggers are disabled around each table's COPY.

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type PlanItem, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type WorkspaceStatus } from "../api";
+import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type WorkspaceStatus } from "../api";
 import CodeBlock from "../components/CodeBlock";
 import SecretScopeField from "../components/SecretScopeField";
 import type { MigrationState } from "../App";
@@ -72,6 +72,8 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   const [rsBusy, setRsBusy] = useState(false);
   const [preview, setPreview] = useState<Artifact[] | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
+  // A previous job run of this project whose tables can be finished off.
+  const [asyncResumable, setAsyncResumable] = useState<ResumableAsyncRun | null>(null);
 
   useEffect(() => {
     if (!runId) return;
@@ -122,6 +124,18 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
       .catch(() => {});
     return () => { live = false; };
   }, [conn?.project_id, run?.status]);
+
+  // The same offer for async mode, where the loader notebook wrote the checkpoints.
+  // Re-checked after a provision: the run it offered is superseded by the new one.
+  useEffect(() => {
+    const projectId = conn?.project_id;
+    if (!projectId || mode !== "async") { setAsyncResumable(null); return; }
+    let live = true;
+    api.resumableAsync(projectId)
+      .then((r) => { if (live) setAsyncResumable(r.run); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [conn?.project_id, mode, asyncRes?.run_id]);
 
   if (!report || !conn) {
     return (
@@ -242,7 +256,8 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
     };
   }
 
-  async function setupAsync() {
+  // ``resumeFrom`` continues that job run: the notebook skips the tables it loaded.
+  async function setupAsync(resumeFrom?: string) {
     if (!state.lakebase) return;
     setAsyncBusy(true); setError(null); setAsyncRes(null); setApplyRes(null); setPostApplyRes(null); setSecretMsg(null);
     try {
@@ -295,7 +310,9 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
         workspace_dir: workspaceDir,
         quartz_cron: null,
         timezone: "UTC",
-        run_now: schedule === "once",
+        // A resume is a run: there is nothing to continue in a job left unstarted.
+        run_now: resumeFrom ? true : schedule === "once",
+        resume_from: resumeFrom ?? null,
       });
       setAsyncRes(r);
       setRsCheck(null);
@@ -546,15 +563,29 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
               No migration plan yet — <button className="link" onClick={onGoSchema}>generate it in Schema &amp; Code</button> to create the target tables (the snapshot loads into them).
             </div>
           )}
+          {asyncResumable && (
+            <div className="banner banner--info">
+              An earlier job run left {asyncResumable.tables_left} of {asyncResumable.tables_total} table
+              {asyncResumable.tables_total === 1 ? "" : "s"} unfinished
+              ({asyncResumable.rows_copied.toLocaleString()} rows already copied). Resuming copies only
+              those; running the snapshot again re-copies every selected table.{" "}
+              {asyncResumable.run_url && <a href={asyncResumable.run_url} target="_blank" rel="noreferrer">Open that run ↗</a>}
+            </div>
+          )}
           <div className="actions">
             <button className="btn" disabled={previewBusy || noTables} onClick={previewNotebooks}>
               {previewBusy ? "Generating…" : "Preview generated notebook"}
             </button>
-            <button className="btn btn--primary" disabled={asyncBusy || noTables || noTarget} onClick={setupAsync}>
+            <button className="btn btn--primary" disabled={asyncBusy || noTables || noTarget} onClick={() => setupAsync()}>
               {asyncBusy ? "Setting up…"
                 : schedule === "create" ? "Apply plan & create job"
                 : "Apply plan & run snapshot"}
             </button>
+            {asyncResumable && (
+              <button className="btn" disabled={asyncBusy || noTables || noTarget} onClick={() => setupAsync(asyncResumable.run_id)}>
+                Resume last run
+              </button>
+            )}
           </div>
           {error && <div className="banner banner--err">{error}</div>}
           {secretMsg && <div className="banner banner--ok">{secretMsg}</div>}

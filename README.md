@@ -223,9 +223,24 @@ would put two loaders on the same `TRUNCATE`.
 
 The foreign keys dropped for the load are persisted with the run, so an interrupted
 one no longer takes the only copy of their definitions with it; the resume restores
-what it left dropped. Resuming is table-level: a single table that failed restarts
-from row zero, and async (job) runs re-copy every table — both are tracked as
-follow-ups.
+what it left dropped.
+
+**Async (job) runs resume the same way.** The generated loader notebook checkpoints
+each table into its own run-state row as that table settles, and reads that
+checkpoint back before it copies anything: the tables already loaded are kept, only
+the rest are copied, and the foreign keys the interrupted attempt left dropped are
+restored with this run's.
+
+Which run it continues depends on how it was started. **Repair run** (or a task retry)
+re-runs inside the same run, so the notebook reads *its own* row and carries on from
+where the failed attempt stopped — no parameter needed. Continuing a *different* run
+takes the `resume_from` job parameter, which is what *Resume last run* passes in async
+mode; it defaults to empty, so a scheduled refresh — or a plain `Run now` on a fresh
+run, whose row holds no checkpoint yet — is still a full snapshot. A run is offered in
+the app only once its Databricks run is over (the Jobs API is asked) and only when
+resuming would skip work, so it never competes with a live job for the same
+`TRUNCATE`. Resuming stays table-level in both modes: a single table that failed
+restarts from row zero.
 
 Async (Databricks job) migrations are recorded as two kinds, because provisioning
 a job and running one are different events: `async_job` is what a setup produced
@@ -456,8 +471,9 @@ To deploy to another workspace, add a target to `target.yml` and run
 - Run state persists to a Lakebase table only when the project store is Postgres;
   otherwise it is process memory, and a restart loses the history (and with it the
   ability to resume).
-- Resume is table-level: a table that failed part-way is re-copied from row zero,
-  and an async (job) run re-copies every table rather than only the ones left.
+- Resume is table-level: a table that failed part-way is re-copied from row zero.
+  An async run can only be resumed if it recorded its checkpoints, which needs the
+  Lakebase run store and a job identity allowed to write to it.
 - **Lakebase auth in lakebase-express is native Postgres roles only** — a role name
   and password over the Postgres wire protocol. Databricks identity auth
   (OAuth/OIDC for users, service principals, or groups) is **not** supported yet,
@@ -572,8 +588,6 @@ Not commitments — the gaps we'd close next, in rough priority order.
 - **Mid-table checkpoints.** A resumed run skips whole tables; a single very large
   table still restarts from row zero. Chunked commits keyed on a sortable primary key
   would let one table resume mid-copy, at the cost of its all-or-nothing load.
-- **Resume for async (job) runs.** The generated notebooks record per-task, not
-  per-table, progress, so a re-run copies every table again.
 
 ## How to get help
 
