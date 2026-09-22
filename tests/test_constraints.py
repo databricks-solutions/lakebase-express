@@ -191,6 +191,56 @@ def test_bit_comparison_keeps_parentheses_balanced():
         assert got.count("(") == got.count(")")
 
 
+def test_isjson_check_becomes_the_is_json_predicate():
+    # A JSON CHECK failed to apply: "function isjson(text) does not exist". ISJSON
+    # returns 0/1 in T-SQL, so the Postgres equivalent replaces the comparison too —
+    # IS JSON is already a predicate and a rename could not have done it.
+    assert map_expression("([PreferencesJson] IS NULL OR isjson([PreferencesJson])=(1))") == (
+        '("PreferencesJson" IS NULL OR "PreferencesJson" IS JSON)'
+    )
+
+
+def test_isjson_comparison_forms_and_their_negations():
+    for src, want in [
+        ("(isjson([J])=(1))", '("J" IS JSON)'),
+        ("(isjson([J])<>(0))", '("J" IS JSON)'),
+        ("(isjson([J])=(0))", '("J" IS NOT JSON)'),
+        ("(isjson([J])<>(1))", '("J" IS NOT JSON)'),
+        ("(ISJSON([J]) = 1)", '("J" IS JSON)'),
+        # Two in one predicate, and the argument keeps its own translation.
+        ("(isjson([A])=(1) OR isjson([B])=(0))", '("A" IS JSON OR "B" IS NOT JSON)'),
+        ("(isjson(CONVERT(nvarchar(max),[J]))=(1))", '(CAST("J" AS text) IS JSON)'),
+    ]:
+        got = map_expression(src)
+        assert got == want, f"{src} -> {got}"
+        assert got.count("(") == got.count(")")
+
+
+def test_isjson_kind_argument_rides_along():
+    # SQL Server 2022 constrains the kind of JSON; Postgres spells it after the
+    # predicate. Dropping it would widen what the constraint accepts.
+    assert map_expression("(isjson([J],ARRAY)=(1))") == '("J" IS JSON ARRAY)'
+    assert map_expression("(isjson([J], object)=1)") == '("J" IS JSON OBJECT)'
+
+
+def test_an_isjson_form_without_an_equivalent_is_left_verbatim():
+    # This module's fail-visibly policy: an unknown kind, or a call used as
+    # something other than a 0/1 comparison, must reach Postgres unchanged and fail
+    # at apply time rather than be guessed at.
+    for src in ("(isjson([J],(5))=(1))", "(isjson([J]))", "(isjson([J])=[Other])"):
+        assert "isjson(" in map_expression(src), src
+
+
+def test_isjson_check_ddl_is_valid_postgres():
+    import pglast
+
+    chk = CheckConstraintInfo(name="CK_Customers_PrefsJson",
+                              definition="([PreferencesJson] IS NULL OR isjson([PreferencesJson])=(1))")
+    ddl = check_constraint_ddl(chk, "Customers", "public", IdentifierCase.PRESERVE)
+    assert 'CHECK (("PreferencesJson" IS NULL OR "PreferencesJson" IS JSON))' in ddl
+    pglast.parse_sql(ddl)
+
+
 def test_bit_rewrite_only_touches_bit_columns():
     cols = [ColumnInfo(name="Active", data_type="bit"),
             ColumnInfo(name="Qty", data_type="int"),
