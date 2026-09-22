@@ -1,4 +1,4 @@
-"""Workspace settings endpoints (Foundation Model discovery)."""
+"""Workspace settings endpoints (Foundation Model discovery, storage durability)."""
 from __future__ import annotations
 
 import logging
@@ -7,10 +7,37 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from backend.config import FM_API, FM_API_GATEWAY, FM_ENDPOINT, workspace_client
+from backend.storage_status import storage_status, warning as storage_warning
 
 log = logging.getLogger("lakebase_express.settings")
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+class StoreStatus(BaseModel):
+    store: str            # projects | credentials | runs
+    backend: str          # lakebase | uc-volume | local-files | memory | unavailable
+    durable: bool         # survives an app restart
+    detail: str = ""
+
+
+class StorageStatus(BaseModel):
+    stores: list[StoreStatus]
+    # False when anything is held in this process or its container only.
+    durable: bool
+    warning: str | None = None
+
+
+@router.get("/storage", response_model=StorageStatus)
+def storage() -> StorageStatus:
+    """What the app persists to, and what a restart would lose. Projects falling back
+    to the container filesystem is indistinguishable from an empty app until then."""
+    stores = storage_status()
+    return StorageStatus(
+        stores=[StoreStatus(**vars(s)) for s in stores],
+        durable=all(s.durable for s in stores),
+        warning=storage_warning(stores),
+    )
 
 
 class FmEndpoint(BaseModel):

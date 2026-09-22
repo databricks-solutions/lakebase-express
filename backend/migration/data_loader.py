@@ -40,6 +40,9 @@ ProgressFn = Callable[[int], None]
 # (table regclass text, constraint name, full definition) of a dropped FK.
 DroppedFk = tuple[str, str, str]
 
+# ADD CONSTRAINT on a name that is already there.
+_DUPLICATE_OBJECT = "42710"
+
 
 def _transient(exc: BaseException) -> str | None:
     """Either end of the copy can blip."""
@@ -98,7 +101,11 @@ def _capture_and_drop_fks_once(
 
 def restore_fks(target: LakebaseConnection, dropped: list[DroppedFk]) -> list[str]:
     """Recreate previously dropped FKs; returns an error string per FK that
-    failed (e.g. the load left orphan rows), leaving the rest restored."""
+    failed (e.g. the load left orphan rows), leaving the rest restored.
+
+    An FK that is already back counts as restored — a resumed run inherits the
+    definitions the interrupted one dropped, which may include some it did restore
+    before it died."""
     if not dropped:
         return []
     failures: list[str] = []
@@ -123,6 +130,8 @@ def restore_fks(target: LakebaseConnection, dropped: list[DroppedFk]) -> list[st
                 )
             except Exception as exc:
                 _safe_rollback(pg)
+                if getattr(exc, "sqlstate", "") == _DUPLICATE_OBJECT:
+                    continue
                 log.warning("FK restore failed for %s on %s: %s", name, tbl, exc)
                 failures.append(f"{tbl} {name}: {exc}")
         return failures

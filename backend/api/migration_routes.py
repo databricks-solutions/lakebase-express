@@ -14,7 +14,7 @@ from backend.connectors.credentials import (
 )
 from backend.connectors.lakebase import LakebaseConnection
 from backend.data_migration.models import DataGenRequest
-from backend.migration import async_setup, job_offload, plan_runs, runs, secret_setup
+from backend.migration import async_runs, async_setup, job_offload, plan_runs, runs, secret_setup
 from backend.migration.executor import apply_plan
 from backend.migration.models import (
     ApplyRequest,
@@ -146,8 +146,29 @@ class StartRunResponse(BaseModel):
     run_id: str
 
 
+def _check_resume(req: DataLoadRequest) -> None:
+    """A resume must point at a run of this project whose loader is gone — two
+    loaders on one table would fight over the same TRUNCATE."""
+    prior = runs.get_run(req.resume_from)
+    if prior is None:
+        raise HTTPException(status_code=404, detail="Unknown run id to resume.")
+    # Runs recorded before project_id was stamped can't be checked either way.
+    if prior.project_id and req.project_id and prior.project_id != req.project_id:
+        raise HTTPException(
+            status_code=409, detail="That run belongs to another migration project."
+        )
+    if not runs.is_resumable(prior):
+        raise HTTPException(
+            status_code=409,
+            detail="That run is still active or has nothing left to load — "
+                   "start a new run instead.",
+        )
+
+
 @router.post("/data/start", response_model=StartRunResponse)
 def start_data(req: DataLoadRequest) -> StartRunResponse:
+    if req.resume_from:
+        _check_resume(req)
     # Resolve both sides before handing off to the background run: the source by
     # the shared precedence (typed → request/stored secret_ref → cached), the
     # target through with_lakebase_password.
@@ -173,6 +194,40 @@ def data_status(run_id: str) -> RunState:
     if not state:
         raise HTTPException(status_code=404, detail="Unknown run id.")
     return state
+
+
+class ResumableRun(BaseModel):
+    run_id: str
+    status: str
+    started_at: str | None = None
+    tables_total: int = 0
+    tables_left: int = 0
+    rows_copied: int = 0
+
+
+class ResumableResponse(BaseModel):
+    # None when there is nothing to resume — the usual case.
+    run: ResumableRun | None = None
+
+
+@router.get("/data/resumable", response_model=ResumableResponse)
+def resumable_data(project_id: str) -> ResumableResponse:
+    """The project's newest run whose loader is gone and which still has tables
+    left, so the UI can offer a resume instead of a full re-copy. Nothing is
+    resumable when run state isn't persisted and the app has restarted."""
+    state = runs.find_resumable(project_id)
+    if state is None:
+        return ResumableResponse()
+    return ResumableResponse(
+        run=ResumableRun(
+            run_id=state.run_id,
+            status=state.status,
+            started_at=state.started_at,
+            tables_total=len(state.tables),
+            tables_left=runs.tables_left(state),
+            rows_copied=sum(t.rows_copied for t in state.tables),
+        )
+    )
 
 
 # --- Data load (offload to Databricks Job) ---------------------------------------
@@ -269,6 +324,34 @@ class AsyncSetupRequest(BaseModel):
     # False = create the job but don't start it, so the user can pick/tune the
     # compute in the Jobs UI first. Ignored when quartz_cron is set.
     run_now: bool = True
+    # Resume that async run: the loader skips the tables it already copied. A resume
+    # is always a run now, so it cannot be combined with a schedule.
+    resume_from: str | None = None
+
+
+def _check_async_resume(req: AsyncSetupRequest) -> None:
+    """A resume must name a run of this project whose job is no longer going — two
+    jobs loading one table would fight over the same TRUNCATE."""
+    if req.quartz_cron or not req.run_now:
+        raise HTTPException(
+            status_code=400,
+            detail="A resume runs the snapshot now, so it cannot be scheduled or created "
+                   "without running.",
+        )
+    prior = async_runs.get_run(req.resume_from)
+    if prior is None:
+        raise HTTPException(status_code=404, detail="Unknown async run id to resume.")
+    if not async_runs.belongs_to(req.resume_from, req.spec.project_id):
+        raise HTTPException(
+            status_code=409, detail="That run belongs to another migration project."
+        )
+    active = job_offload.run_active(prior.job_run_id) if prior.job_run_id else None
+    if not async_runs.is_resumable(prior, active):
+        raise HTTPException(
+            status_code=409,
+            detail="That run is still going, or has nothing a resume would skip — "
+                   "run the snapshot instead.",
+        )
 
 
 @router.post("/async/setup")
@@ -276,13 +359,50 @@ def setup_async(req: AsyncSetupRequest) -> dict:
     """Provision async mode: submit (one-off), create without running, or schedule
     (recurring) a PySpark snapshot job that copies the source into the plan-created
     Lakebase tables. Returns a UI-friendly summary."""
+    if req.resume_from:
+        _check_async_resume(req)
     try:
         return async_setup.setup_async(
-            req.spec, req.workspace_dir, req.quartz_cron, req.timezone, req.run_now
+            req.spec, req.workspace_dir, req.quartz_cron, req.timezone, req.run_now,
+            req.resume_from,
         )
     except Exception as exc:
         log.exception("Async setup failed")
         raise HTTPException(status_code=502, detail=f"Async setup failed: {exc}") from exc
+
+
+class ResumableAsyncRun(ResumableRun):
+    """A resumable async run, plus what the UI needs to link to the job it ran as."""
+    job_id: int | None = None
+    job_run_id: int | None = None
+    run_url: str | None = None
+
+
+class ResumableAsyncResponse(BaseModel):
+    run: ResumableAsyncRun | None = None
+
+
+@router.get("/async/resumable", response_model=ResumableAsyncResponse)
+def resumable_async(project_id: str) -> ResumableAsyncResponse:
+    """The project's newest async (job) run that a resume would help: its loader
+    checkpointed some tables and then the job stopped. Nothing is resumable when run
+    state isn't recorded — a job that cannot write its checkpoints leaves none."""
+    state = async_runs.find_resumable(project_id, job_active=job_offload.run_active)
+    if state is None:
+        return ResumableAsyncResponse()
+    return ResumableAsyncResponse(
+        run=ResumableAsyncRun(
+            run_id=state.run_id,
+            status=state.status,
+            started_at=state.started_at,
+            tables_total=state.tables_total,
+            tables_left=async_runs.tables_left(state),
+            rows_copied=sum(t.rows_copied for t in state.tables.values()),
+            job_id=state.job_id,
+            job_run_id=state.job_run_id,
+            run_url=state.run_url,
+        )
+    )
 
 
 class RunStateAccessRequest(BaseModel):

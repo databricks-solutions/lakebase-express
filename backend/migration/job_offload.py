@@ -29,6 +29,10 @@ JOB_NAME = "lakebase-express-snapshot"
 PROJECT_ID_TAG = "lbx_project_id"
 PROJECT_NAME_TAG = "lbx_project"
 
+# Job parameter naming the run to continue: only its unfinished tables are copied.
+# Empty — its default, and what a scheduled run gets — is a full snapshot.
+RESUME_PARAM = "resume_from"
+
 # Bounded: the tag scan only runs when we would otherwise create a duplicate.
 _TAG_SCAN_LIMIT = 500
 
@@ -176,27 +180,39 @@ def _ensure_job(w, paths: list[str], schedule: jobs.CronSchedule | None, name: s
                     notebook_path=path,
                     # Dynamic values, resolved per run: every task derives the same
                     # run-state id from them (see etl_generator._RUN_STATE).
-                    base_parameters={"job_id": "{{job.id}}", "job_run_id": "{{job.run_id}}"},
+                    base_parameters={
+                        "job_id": "{{job.id}}", "job_run_id": "{{job.run_id}}",
+                        RESUME_PARAM: "{{job.parameters." + RESUME_PARAM + "}}",
+                    },
                 ),
                 depends_on=[jobs.TaskDependency(task_key=prev_key)] if prev_key else None,
             )
         )
         prev_key = key
+    # Declared on the job so a run (ours, or 'Run now' in the Jobs UI) can set it.
+    parameters = [jobs.JobParameterDefinition(name=RESUME_PARAM, default="")]
     existing = _find_job(w, name, project_id)
     if existing:
         w.jobs.reset(
             job_id=existing.job_id,
-            new_settings=jobs.JobSettings(name=name, tasks=tasks, schedule=schedule, tags=tags),
+            new_settings=jobs.JobSettings(
+                name=name, tasks=tasks, schedule=schedule, tags=tags, parameters=parameters
+            ),
         )
         return existing.job_id, False
-    return w.jobs.create(name=name, tasks=tasks, schedule=schedule, tags=tags).job_id, True
+    return w.jobs.create(
+        name=name, tasks=tasks, schedule=schedule, tags=tags, parameters=parameters
+    ).job_id, True
 
 
-def create_job_and_run(req: DataGenRequest, workspace_dir: str) -> dict:
+def create_job_and_run(
+    req: DataGenRequest, workspace_dir: str, resume_from: str | None = None
+) -> dict:
     """Provision the (unscheduled) persistent snapshot job and trigger a run now.
 
     A persistent job rather than a one-time submit, so the snapshot can be re-run
-    later from the Jobs UI with 'Run now'.
+    later from the Jobs UI with 'Run now'. ``resume_from`` continues that run
+    instead: the notebook skips the tables it already loaded.
     """
     w = workspace_client()
     paths = upload_notebooks(w, req, workspace_dir)
@@ -205,13 +221,17 @@ def create_job_and_run(req: DataGenRequest, workspace_dir: str) -> dict:
         w, paths, None, job_name(req.project_id, label),
         job_tags(req.project_id, label), req.project_id,
     )
-    run = w.jobs.run_now(job_id=job_id)
+    run = w.jobs.run_now(
+        job_id=job_id,
+        job_parameters={RESUME_PARAM: resume_from} if resume_from else None,
+    )
     run_id = getattr(run, "run_id", None) or run.response.run_id
     host = (w.config.host or "").rstrip("/")
     return {
         "job_id": job_id,
         "job_created": created,
         "run_id": run_id,
+        "resumed_from": resume_from,
         "notebook_path": paths[0],
         "notebook_paths": paths,
         "url": f"{host}/jobs/{job_id}" if host else None,
@@ -282,6 +302,20 @@ def _identity_type(name: str) -> str:
     """Only for a job with no structured run_as: user names are emails, a service
     principal's is its application id."""
     return "USER" if "@" in name else "SERVICE_PRINCIPAL"
+
+
+def run_active(job_run_id: int) -> bool | None:
+    """Whether a Databricks job run is still going, or None when it can't be told —
+    which is what decides if a run still marked running may be resumed."""
+    try:
+        life = job_status(job_run_id).get("life_cycle_state") or ""
+    except Exception as exc:
+        log.warning("Could not read the state of job run %s: %s", job_run_id, exc)
+        return None
+    # An empty state says nothing, and "not going" is the dangerous reading of that.
+    if not life:
+        return None
+    return any(s in life for s in ("QUEUED", "PENDING", "RUNNING", "TERMINATING", "BLOCKED"))
 
 
 def job_status(run_id: int) -> dict:

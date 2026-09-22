@@ -186,12 +186,14 @@ class DataLoadRequest(BaseModel):
     batch_size: int = 5000
     # Scopes the remembered/resolved source password to one migration project.
     project_id: str = ""
+    # Resume that run instead of restarting: the tables it loaded are skipped.
+    resume_from: str | None = None
 
 
 class TableProgress(BaseModel):
     name: str
     target: str
-    status: ItemStatus | str = "pending"     # pending|running|success|failed
+    status: ItemStatus | str = "pending"     # pending|running|success|failed|skipped
     rows_copied: int = 0
     total_rows: int = 0
     error: str | None = None
@@ -202,16 +204,34 @@ class TableProgress(BaseModel):
 
 class RunState(BaseModel):
     run_id: str
+    project_id: str = ""                      # the lbx_projects row this run belongs to
     status: str = "running"                   # running|success|failed|partial
     tables: list[TableProgress] = []
     error: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    # The run this one resumed, whose loaded tables are skipped here.
+    resumed_from: str | None = None
+    # Touched while the loader is alive, so an abandoned run reads apart from a slow one.
+    heartbeat_at: str | None = None
+    # (table, constraint, definition) of the FKs dropped for the load, persisted so a
+    # resume can restore what an interrupted run left dropped.
+    dropped_fks: list[tuple[str, str, str]] = []
 
 
 class TaskProgress(BaseModel):
     """One Databricks job task of an async run, recorded by the task itself."""
     status: str = "running"                  # running|success|failed
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
+class AsyncTableProgress(BaseModel):
+    """One table of an async run, checkpointed by the loader notebook as it settles —
+    the per-table state a resume reads to know what is already in the target."""
+    status: str = "running"                  # running|success|failed|skipped
+    rows_copied: int = 0
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
@@ -238,5 +258,12 @@ class AsyncRunState(BaseModel):
     error: str | None = None
     # Keyed by Databricks job task key, filled in by the notebooks as the chain runs.
     tasks: dict[str, TaskProgress] = {}
+    # Keyed by "schema.table", written by the loader notebook as each table settles.
+    tables: dict[str, AsyncTableProgress] = {}
+    # The run this one resumed, whose loaded tables are skipped here.
+    resumed_from: str | None = None
+    # (table, constraint, definition) of the FKs the load dropped, persisted so a
+    # resume restores what an interrupted run left dropped.
+    dropped_fks: list[tuple[str, str, str]] = []
     started_at: str | None = None
     finished_at: str | None = None

@@ -66,8 +66,16 @@ RUN_STATE_TASKS = __RS_TASKS__
 
 dbutils.widgets.text("job_id", "")
 dbutils.widgets.text("job_run_id", "")
+# Run to continue: the tables it already loaded are skipped. Empty — the default,
+# and what a scheduled run gets — copies every table.
+dbutils.widgets.text("resume_from", "")
 
 _task_started_at = None
+_run_store_pg = None
+
+
+def _resume_from():
+    return dbutils.widgets.get("resume_from").strip()
 
 
 def _run_state_id():
@@ -79,76 +87,158 @@ def _run_state_id():
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"__RS_ID_PREFIX__{key}"))
 
 
-def _report_run_state(status, error=None):
-    """Record this task's state. Best effort — bookkeeping must never fail a
-    migration, so problems are printed and swallowed."""
-    global _task_started_at
-    try:
-        import json
-        from datetime import datetime, timezone
+def _run_store():
+    """Connection to the run-state table, cached across writes — a per-table
+    checkpoint would otherwise mint a credential and reconnect for every table. The
+    credential is minted on each connect, so one expiring mid-load never matters."""
+    global _run_store_pg
+    if _run_store_pg is not None and not _run_store_pg.closed:
+        return _run_store_pg
+    import psycopg
+    from databricks.sdk import WorkspaceClient
 
-        import psycopg
-        from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient()
+    token = w.postgres.generate_database_credential(endpoint=RUN_STORE_ENDPOINT).token
+    _run_store_pg = psycopg.connect(
+        host=RUN_STORE_HOST, port=RUN_STORE_PORT, dbname=RUN_STORE_DATABASE,
+        user=w.current_user.me().user_name, password=token, sslmode="require",
+    )
+    return _run_store_pg
 
-        now = datetime.now(timezone.utc).isoformat()
-        if status == "running":
-            _task_started_at = now
-        # Only the last task finishing finishes the run.
-        last = RUN_STATE_PHASE == RUN_STATE_TASKS[-1]
-        overall = status if (status == "failed" or last) else "running"
-        data = {
-            "run_id": _run_state_id(),
-            "status": overall,
-            "error": error,
-            "phase": RUN_STATE_PHASE,
-            "job_id": int(dbutils.widgets.get("job_id") or 0) or None,
-            "job_run_id": int(dbutils.widgets.get("job_run_id") or 0) or None,
-            "tasks": {RUN_STATE_PHASE: {
-                "status": status,
-                "started_at": _task_started_at or now,
-                "finished_at": None if status == "running" else now,
-                "error": error,
-            }},
-        }
-        # Only the first task stamps the run's start; the merge keeps it.
-        if status == "running" and RUN_STATE_PHASE == RUN_STATE_TASKS[0]:
-            data["started_at"] = now
-        if overall != "running":
-            data["finished_at"] = now
 
-        table = f'"{RUN_STORE_TABLE}"'
-        sql = (
-            f"INSERT INTO {table} "
-            "(run_id, kind, project_id, status, data, updated_at) "
-            "VALUES (%s::uuid, %s, %s::uuid, %s, %s::jsonb, now()) "
-            "ON CONFLICT (run_id) DO UPDATE SET status = EXCLUDED.status, "
-            # Merge into "tasks", or each task would erase the others.
-            f"data = {table}.data || (EXCLUDED.data - 'tasks') "
-            f"|| jsonb_build_object('tasks', "
-            f"COALESCE({table}.data -> 'tasks', '{{}}'::jsonb) || (EXCLUDED.data -> 'tasks')), "
-            "updated_at = now()"
-        )
-        w = WorkspaceClient()
-        # Minted per write, so the 1-hour token lifetime never matters here.
-        token = w.postgres.generate_database_credential(endpoint=RUN_STORE_ENDPOINT).token
-        identity = w.current_user.me().user_name
-        with psycopg.connect(
-            host=RUN_STORE_HOST, port=RUN_STORE_PORT, dbname=RUN_STORE_DATABASE,
-            user=identity, password=token, sslmode="require",
-        ) as pg:
+def _run_store_exec(sql, params, what, fetch=False):
+    """Run one statement against the run-state table; the fetched row, True, or
+    False if it could not be written. Best effort — bookkeeping must never fail a
+    migration, so problems are printed and swallowed. Retried once: an idle
+    Lakebase endpoint suspends, taking the cached connection with it."""
+    global _run_store_pg
+    for attempt in (1, 2):
+        try:
+            pg = _run_store()
             with pg.cursor() as cur:
-                cur.execute(sql, (data["run_id"], "async_run", RUN_STORE_PROJECT or None,
-                                  overall, json.dumps(data)))
+                cur.execute(sql, params)
+                row = cur.fetchone() if fetch else None
             pg.commit()
+            return row if fetch else True
+        except Exception as exc:
+            try:
+                if _run_store_pg is not None:
+                    _run_store_pg.close()
+            except Exception:
+                pass
+            _run_store_pg = None
+            if attempt == 2:
+                print(f"{what}: {exc}")
+    return False
+
+
+def _report_run_state(status, error=None):
+    """Record this task's state."""
+    global _task_started_at
+    import json
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    if status == "running":
+        _task_started_at = now
+    # Only the last task finishing finishes the run.
+    last = RUN_STATE_PHASE == RUN_STATE_TASKS[-1]
+    overall = status if (status == "failed" or last) else "running"
+    data = {
+        "run_id": _run_state_id(),
+        "status": overall,
+        "error": error,
+        "phase": RUN_STATE_PHASE,
+        "job_id": int(dbutils.widgets.get("job_id") or 0) or None,
+        "job_run_id": int(dbutils.widgets.get("job_run_id") or 0) or None,
+        "tasks": {RUN_STATE_PHASE: {
+            "status": status,
+            "started_at": _task_started_at or now,
+            "finished_at": None if status == "running" else now,
+            "error": error,
+        }},
+    }
+    # Only the first task stamps the run's start; the merge keeps it.
+    if status == "running" and RUN_STATE_PHASE == RUN_STATE_TASKS[0]:
+        data["started_at"] = now
+    if overall != "running":
+        data["finished_at"] = now
+    # So the app never offers a run that a later one already continued.
+    if _resume_from():
+        data["resumed_from"] = _resume_from()
+
+    table = f'"{RUN_STORE_TABLE}"'
+    sql = (
+        f"INSERT INTO {table} "
+        "(run_id, kind, project_id, status, data, updated_at) "
+        "VALUES (%s::uuid, %s, %s::uuid, %s, %s::jsonb, now()) "
+        "ON CONFLICT (run_id) DO UPDATE SET status = EXCLUDED.status, "
+        # Merge into "tasks", or each task would erase the others.
+        f"data = {table}.data || (EXCLUDED.data - 'tasks') "
+        f"|| jsonb_build_object('tasks', "
+        f"COALESCE({table}.data -> 'tasks', '{{}}'::jsonb) || (EXCLUDED.data -> 'tasks')), "
+        "updated_at = now()"
+    )
+    params = (data["run_id"], "async_run", RUN_STORE_PROJECT or None, overall, json.dumps(data))
+    if _run_store_exec(sql, params, f"Run state NOT recorded ({RUN_STATE_PHASE} {status})"):
         print(f"Run state recorded: {RUN_STATE_PHASE} {status} (run {overall})")
-    except Exception as exc:
-        print(f"Run state NOT recorded ({RUN_STATE_PHASE} {status}): {exc}")'''
+
+
+def _checkpoint(**keys):
+    """Persist what a resume needs: ``tables`` (which are already in the target) and
+    ``dropped_fks`` (what this run dropped for the load). Whole values, written by
+    the one task that owns them, so they replace rather than merge."""
+    import json
+
+    data = dict(keys, run_id=_run_state_id())
+    table = f'"{RUN_STORE_TABLE}"'
+    sql = (
+        f"INSERT INTO {table} "
+        "(run_id, kind, project_id, status, data, updated_at) "
+        "VALUES (%s::uuid, %s, %s::uuid, %s, %s::jsonb, now()) "
+        f"ON CONFLICT (run_id) DO UPDATE SET data = {table}.data || EXCLUDED.data, "
+        "updated_at = now()"
+    )
+    params = (data["run_id"], "async_run", RUN_STORE_PROJECT or None, "running", json.dumps(data))
+    _run_store_exec(sql, params, f"Checkpoint NOT recorded ({', '.join(keys)})")
+
+
+def _resume_checkpoint():
+    """(tables already loaded, foreign keys left dropped) for the run being continued.
+
+    ``resume_from`` names an earlier run; with none set this reads THIS run's own row,
+    so a repaired task — or one Databricks retried — carries on from where the failed
+    attempt stopped. A first attempt has no checkpoint in its row, which is why a plain
+    or scheduled snapshot still copies every table. Unreadable is not fatal: every
+    table is truncated before its copy, so the fallback is a full snapshot rather than
+    a wrong one."""
+    rid = _resume_from() or _run_state_id()
+    row = _run_store_exec(
+        f'SELECT data FROM "{RUN_STORE_TABLE}" WHERE run_id = %s::uuid', (rid,),
+        f"Could not read the checkpoint of run {rid}, so every table is copied",
+        fetch=True,
+    )
+    data = (row[0] if row else None) or {}
+    loaded = {
+        name: t for name, t in (data.get("tables") or {}).items()
+        if t.get("status") in ("success", "skipped")
+    }
+    return loaded, [tuple(fk) for fk in (data.get("dropped_fks") or [])]'''
 
 
 # No run store configured — the calls stay valid and do nothing.
 _RUN_STATE_STUB = '''\
 def _report_run_state(status, error=None):
-    pass'''
+    pass
+
+
+def _checkpoint(**keys):
+    pass
+
+
+def _resume_checkpoint():
+    """Nothing was recorded, so there is nothing to resume from."""
+    return {}, []'''
 
 
 _SNAPSHOT = '''\
@@ -172,10 +262,14 @@ _SNAPSHOT = '''\
 # MAGIC   concurrent JDBC reads; each partition COPYs independently.
 # MAGIC * **Concurrent tables** — up to `MAX_PARALLEL_TABLES` tables load at once,
 # MAGIC   keeping a multi-node cluster busy instead of walking tables one by one.
-# MAGIC * **Driver-hostile types cast server-side** — columns Spark can't read
-# MAGIC   (`sql_variant`, `hierarchyid`, `geography`, `geometry` fail the whole
-# MAGIC   table with `UNRECOGNIZED_SQL_TYPE`) are converted to text by SQL Server
-# MAGIC   in the SELECT list, matching the `text` columns the plan creates for them.
+# MAGIC * **Hidden columns projected through an expression** — a temporal table's
+# MAGIC   period columns (`ValidFrom`/`ValidTo`) are HIDDEN, and the read would COPY
+# MAGIC   nulls into the NOT NULL columns the plan created: SQL Server keeps that flag
+# MAGIC   even through a subquery, so they are wrapped in `ISNULL(c, c)` to come across
+# MAGIC   as ordinary columns. Columns Spark can't read (`sql_variant`, `hierarchyid`,
+# MAGIC   `geography`, `geometry` fail the whole table with `UNRECOGNIZED_SQL_TYPE`)
+# MAGIC   are cast to text by SQL Server in that same list, matching the `text`
+# MAGIC   columns the plan creates for them.
 # MAGIC * **Constraints & indexes after the data** — the plan's post-data DDL
 # MAGIC   (primary/foreign keys, indexes, defaults, identity, checks, triggers)
 # MAGIC   lives in the companion `02_post_load_*` notebooks (one per object type:
@@ -186,9 +280,12 @@ _SNAPSHOT = '''\
 # MAGIC   recreated right after the copy.
 # MAGIC
 # MAGIC Each table is truncated right before its COPY starts, so re-running the job
-# MAGIC (or just the failed tables) is always safe. If your serverless network
-# MAGIC policy blocks outbound connections from Python workers, run the job on
-# MAGIC classic job compute instead — that's the job's Compute panel.
+# MAGIC (or just the failed tables) is always safe. A run records which tables it
+# MAGIC loaded, so repairing a failed task (or setting the job's `resume_from`
+# MAGIC parameter to an earlier run's id, which is what *Resume last run* does in the
+# MAGIC app) copies only the tables that run did not finish. If your serverless network policy blocks outbound
+# MAGIC connections from Python workers, run the job on classic job compute
+# MAGIC instead — that's the job's Compute panel.
 
 # COMMAND ----------
 
@@ -299,32 +396,51 @@ UNREADABLE_TYPES = {
 
 
 def _source_relation(src_schema: str, src_table: str) -> str:
-    """The relation the read pulls from: the raw table, or — when it has columns
-    Spark can't read — a subquery casting those columns to text server-side.
-    Aliases keep the original column names (which the plan-created target table
-    preserves), so bounds probes, partitioned reads, and the COPY column list
+    """A subquery naming every column of the table, projecting the ones Spark cannot
+    read — and the ones SQL Server hides — through expressions.
+
+    Spark reads this relation with ``SELECT *``, and a system-versioned (temporal)
+    table's period columns are HIDDEN: a plain reference keeps that flag even through
+    a derived table, so the outer ``SELECT *`` drops the column and the COPY would
+    leave those NOT NULL target columns null. An expression makes it an ordinary
+    column of the subquery — ``ISNULL(c, c)`` keeps the exact type and value — which
+    is what brings ValidFrom/ValidTo across. (A trivial wrapper is folded back to the
+    reference and does not work.) Only hidden columns are wrapped, so the partition
+    column stays a plain reference and the partitioned read still pushes its
+    predicate down. Aliases keep the original column names (which the plan-created
+    target preserves), so bounds probes, partitioned reads and the COPY column list
     all keep working against the subquery."""
     s, t = src_schema.replace("'", "''"), src_table.replace("'", "''")
-    # No ORDER BY here: Spark wraps the "query" option in a derived table
-    # (SPARK_GEN_SUBQ), and SQL Server rejects ORDER BY inside one. Sort client-side.
+    # is_hidden lives in sys.columns; the type names the casts key on come from
+    # INFORMATION_SCHEMA. No ORDER BY here: Spark wraps the "query" option in a
+    # derived table (SPARK_GEN_SUBQ) and SQL Server rejects ORDER BY inside one.
     meta = (
         _reader()
         .option(
             "query",
-            "SELECT COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE TABLE_SCHEMA = '{s}' AND TABLE_NAME = '{t}'",
+            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.ORDINAL_POSITION, sc.is_hidden "
+            "FROM INFORMATION_SCHEMA.COLUMNS c "
+            f"JOIN sys.columns sc ON sc.object_id = OBJECT_ID('[{s}].[{t}]') "
+            "AND sc.name = c.COLUMN_NAME "
+            f"WHERE c.TABLE_SCHEMA = '{s}' AND c.TABLE_NAME = '{t}'",
         )
         .load()
         .collect()
     )
     meta = sorted(meta, key=lambda r: r["ORDINAL_POSITION"])
-    if not any(r["DATA_TYPE"].lower() in UNREADABLE_TYPES for r in meta):
+    # No metadata (a view, a permission gap): the raw table is all we can read.
+    if not meta:
         return f"[{src_schema}].[{src_table}]"
     parts = []
     for r in meta:
         col = f"[{r['COLUMN_NAME']}]"
         tmpl = UNREADABLE_TYPES.get(r["DATA_TYPE"].lower())
-        parts.append(tmpl.format(c=col, a=col) if tmpl else col)
+        if tmpl:
+            parts.append(tmpl.format(c=col, a=col))
+        elif r["is_hidden"]:
+            parts.append(f"ISNULL({col}, {col}) AS {col}")
+        else:
+            parts.append(col)
     return f"(SELECT {', '.join(parts)} FROM [{src_schema}].[{src_table}]) AS src"
 
 
@@ -367,7 +483,14 @@ def _copy_stream(fq_target: str, col_list: str):
     return write
 
 
-def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col) -> int:
+def _utcnow() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col) -> tuple:
+    """Copy one table; (rows, started_at, finished_at) — the timings ride along into
+    the run's per-table checkpoint."""
+    started_at = _utcnow()
     label = f"{src_schema}.{src_table} -> {dst_schema}.{dst_table}"
     fq_target = f'"{dst_schema}"."{dst_table}"'
     print(f"-> {label} ...")
@@ -404,18 +527,25 @@ def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col) -> in
                 cur.execute(f"ALTER TABLE {fq_target} ENABLE TRIGGER USER")
     rows = sum(r["rows"] for r in counts)
     print(f"   ok {label}: {rows:,} rows")
-    return rows
+    return rows, started_at, _utcnow()
 
 
-def drop_target_fks() -> list:
-    """Capture + drop every FK that involves a target table (either side).
+def _merge_fks(inherited, captured) -> list:
+    """One entry per (table, constraint); a freshly captured definition wins."""
+    merged = {(t, n): (t, n, d) for t, n, d in inherited}
+    merged.update({(t, n): (t, n, d) for t, n, d in captured})
+    return list(merged.values())
+
+
+def drop_target_fks(tables) -> list:
+    """Capture + drop every FK that involves one of ``tables`` (either side).
 
     A re-run would otherwise fail the TRUNCATEs, and the COPY would pay per-row
     FK validation. Definitions are returned so restore_target_fks() (plus the
     idempotent post-load foreign-keys task) can put them back after the load."""
     with psycopg.connect(**PG_KWARGS) as pg, pg.cursor() as cur:
         oids = []
-        for _s, _t, dst_schema, dst_table, _p in TABLES:
+        for _s, _t, dst_schema, dst_table, _p in tables:
             cur.execute("SELECT to_regclass(%s)::oid", (f'"{dst_schema}"."{dst_table}"',))
             oid = cur.fetchone()[0]
             if oid is not None:
@@ -456,28 +586,52 @@ def restore_target_fks(dropped) -> dict:
 
 _report_run_state("running")
 
-print(f"Snapshotting {len(TABLES)} table(s), up to {MAX_PARALLEL_TABLES} in parallel ...")
-dropped_fks = drop_target_fks()
+# Resuming: the tables already loaded — by the run named in resume_from, or by an
+# earlier attempt of this one (a repair) — are kept as they are, and only the rest
+# are copied. Each table is truncated and copied in full, so "already loaded" is
+# exact rather than a guess.
+loaded, inherited_fks = _resume_checkpoint()
+todo = [spec for spec in TABLES if f"{spec[0]}.{spec[1]}" not in loaded]
+progress = {name: dict(table, status="skipped") for name, table in loaded.items()}
+if loaded:
+    print(f"Resuming: {len(loaded)} table(s) already loaded, {len(todo)} to copy.")
+    _checkpoint(tables=progress)
+
+print(f"Snapshotting {len(todo)} table(s), up to {MAX_PARALLEL_TABLES} in parallel ...")
+dropped_fks = _merge_fks(inherited_fks, drop_target_fks(todo))
 if dropped_fks:
     print(f"Dropped {len(dropped_fks)} foreign key(s) for the load — restored afterwards.")
+# Persisted before the load, or a run that dies mid-copy takes the only copy of
+# these definitions with it and the target keeps no foreign keys at all.
+_checkpoint(dropped_fks=dropped_fks)
 
 failures: dict[str, Exception] = {}
 total_rows = 0
 with ThreadPoolExecutor(max_workers=MAX_PARALLEL_TABLES) as pool:
-    futures = {pool.submit(snapshot_table, *spec): spec for spec in TABLES}
+    futures = {pool.submit(snapshot_table, *spec): spec for spec in todo}
     for fut, (src_schema, src_table, _s, _t, _p) in futures.items():
+        name = f"{src_schema}.{src_table}"
         try:
-            total_rows += fut.result()
+            rows, started_at, finished_at = fut.result()
+            total_rows += rows
+            progress[name] = {"status": "success", "rows_copied": rows,
+                              "started_at": started_at, "finished_at": finished_at}
         except Exception as exc:
-            failures[f"{src_schema}.{src_table}"] = exc
-            print(f"   FAILED {src_schema}.{src_table}: {exc}")
+            failures[name] = exc
+            progress[name] = {"status": "failed", "error": str(exc), "finished_at": _utcnow()}
+            print(f"   FAILED {name}: {exc}")
+        # This is the checkpoint a resume reads, so write it as each table settles.
+        _checkpoint(tables=progress)
 
 # Restore the FKs the load dropped. The plan's own constraint/index/FK/trigger
 # items are applied by the chained post-load tasks — idempotently, so the
 # overlap with the restore is fine.
 restore_failures = restore_target_fks(dropped_fks)
+# Restored, or reported below — either way a resume of this run must not try again.
+_checkpoint(dropped_fks=[])
 
-print(f"Done: {len(TABLES) - len(failures)}/{len(TABLES)} tables, {total_rows:,} rows copied.")
+print(f"Done: {len(todo) - len(failures)}/{len(todo)} table(s), {total_rows:,} rows copied"
+      + (f", {len(loaded)} already loaded." if loaded else "."))
 if failures or restore_failures:
     _report_run_state(
         "failed",
@@ -487,7 +641,8 @@ if failures or restore_failures:
     raise RuntimeError(
         f"{len(failures)} table(s) and {len(restore_failures)} FK restore(s) failed: "
         f"{', '.join(sorted(failures) + sorted(restore_failures))} — each table is truncated "
-        "before load, so fixing the cause and re-running is safe."
+        "before load, so fixing the cause and re-running is safe. Pass this run's id as "
+        "resume_from (or use 'Resume last run' in the app) to copy only what is left."
     )
 # The copy is done; the run itself is only done if no post-load task follows.
 _report_run_state("success")
