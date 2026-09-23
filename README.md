@@ -364,9 +364,17 @@ Deployed, set these through the bundle: `fm_endpoint` and `fm_api` in
 ## Run tests
 
 ```bash
-pip install pytest httpx   # httpx backs FastAPI's TestClient
+pip install --require-hashes --no-deps -r requirements-dev.lock   # exactly what CI installs
 pytest tests/
+ruff check .                                                      # the same lint gate CI runs
 ```
+
+`pip install -r requirements-dev.txt` also works and resolves fresh versions; the
+lock is there when you want CI's exact set.
+
+`requirements-dev.txt` adds only test and lint tooling on top of `requirements.txt`
+— nothing there ships in the app image. `httpx` backs FastAPI's `TestClient`, and
+`pglast` parses the generated DDL in `tests/test_collations.py`.
 
 ## Deploy as a Databricks App
 
@@ -395,6 +403,73 @@ To deploy to another workspace, add a target to `target.yml` and run
 > private link). Async-mode runtime scopes need scope create/write. Passwords are
 > never stored in clear text. For run history, the app's service principal also needs
 > a Lakebase Postgres role — see [Run-state role](#run-state-role-lakebase).
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs the merge checks on every pull request and every
+push to `main`:
+
+| Job | What it does |
+| --- | --- |
+| Lint | `ruff check` with the rule set in `ruff.toml` |
+| Tests | `pytest tests/` on Python 3.10, 3.11, 3.12 and 3.13, then imports `backend.main:app` — the entrypoint `app.yaml` starts |
+| Frontend | `npm ci`, `npm run lockfile:check`, then `npm run build` (`tsc -b` + `vite build`), and asserts `frontend/dist/index.html` exists |
+| Deploy config | `.github/scripts/check_bundle_config.py`: the three YAML files parse, `app.yaml` declares a command, every `${var.*}` in `databricks.yml` is declared, and every variable without a default appears in `target.yml.sample` |
+
+Nothing in CI needs a workspace or a secret — `tests/conftest.py` stubs the single
+live lookup, so the suite runs with no Databricks credentials on the runner. Every
+`GITHUB_TOKEN` permission is `contents: read`, every action is pinned to a full
+commit SHA, and every `pip install` goes through the hash-pinned lock below.
+
+`databricks bundle validate` is deliberately not part of this: it resolves the
+current user against the workspace, so it needs credentials a pull request must not
+have. `check_bundle_config.py` covers what is checkable offline instead.
+
+### Releases and deployment
+
+Both are still manual: build the SPA and run `./deploy.sh` (see
+[Deploy as a Databricks App](#deploy-as-a-databricks-app)). Automating a release
+means publishing artifacts from CI, which needs its own security approval, so the
+tag-triggered release workflow and the environment-gated deploy workflow are held
+back for a follow-up change rather than shipped here.
+
+
+### Dependency locks
+
+`requirements.lock` and `requirements-dev.lock` are fully resolved, hash-pinned
+versions of the two `requirements*.txt` files, generated with:
+
+```bash
+uv pip compile requirements.txt     --universal --python-version 3.10 --generate-hashes -o requirements.lock
+uv pip compile requirements-dev.txt --universal --python-version 3.10 --generate-hashes -o requirements-dev.lock
+```
+
+Regenerate both whenever a `requirements*.txt` pin changes. `--universal` keeps one
+lock valid across the CI matrix (Linux and macOS, Python 3.10-3.13) by carrying
+environment markers instead of resolving for one interpreter.
+
+CI installs with `--require-hashes --no-deps`, so a package whose archive digest
+does not match the lock fails the build rather than running — a swapped or
+re-uploaded release on PyPI cannot reach the runner. The app image itself still
+installs plain `requirements.txt`, which Databricks Apps expects.
+
+One constraint on the runtime pins: keep them to versions Databricks' internal PyPI
+mirror carries as well as PyPI, or the lock cannot be regenerated from a Databricks
+laptop. `fastapi` is pinned at `0.115.9` for exactly that reason — the mirror does
+not serve `0.115.6`-`0.115.8`.
+
+### Lint scope
+
+`ruff.toml` enables `E4`, `E7`, `E9`, `F` and `W` — the widest set that is already
+clean here, so the gate only ever fails on something a change introduced. Three
+modules carry documented `F821`/`F841` ignores: they pass a lambda that reads the
+`except ... as exc` binding into `RunRegistry.update`, which calls it synchronously
+inside the `except` block, so the code is correct and ruff's scope analysis is not.
+
+Widening the gate is a separate piece of work: `ruff check --select E,F,W,I,UP,B`
+reports roughly 700 findings, nearly all of them `E501` (line-too-long), plus a
+few dozen unsorted-import, pyupgrade and bugbear hits. `ruff format` would rewrite
+most of the codebase, so formatting is not part of the gate either.
 
 ## Adding a source connector
 
