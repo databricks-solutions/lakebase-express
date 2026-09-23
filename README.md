@@ -372,7 +372,7 @@ ruff check .                                                      # the same lin
 `pip install -r requirements-dev.txt` also works and resolves fresh versions; the
 lock is there when you want CI's exact set.
 
-`requirements-dev.txt` adds only test and lint tooling on top of `requirements.txt`
+`requirements-dev.txt` adds only test and lint tooling on top of `requirements.in`
 — nothing there ships in the app image. `httpx` backs FastAPI's `TestClient`, and
 `pglast` parses the generated DDL in `tests/test_collations.py`.
 
@@ -414,7 +414,7 @@ push to `main`:
 | Lint | `ruff check` with the rule set in `ruff.toml` |
 | Tests | `pytest tests/` on Python 3.10, 3.11, 3.12 and 3.13, then imports `backend.main:app` — the entrypoint `app.yaml` starts |
 | Frontend | `npm ci`, `npm run lockfile:check`, then `npm run build` (`tsc -b` + `vite build`), and asserts `frontend/dist/index.html` exists |
-| Deploy config | `.github/scripts/check_bundle_config.py`: the three YAML files parse, `app.yaml` declares a command, every `${var.*}` in `databricks.yml` is declared, and every variable without a default appears in `target.yml.sample` |
+| Deploy config | `.github/scripts/check_bundle_config.py`: the three YAML files parse, `app.yaml` declares a command, every `${var.*}` in `databricks.yml` is declared, every variable without a default appears in `target.yml.sample`, and every package in `requirements.txt` is hash-pinned, matches `requirements-dev.lock` exactly, and agrees with the pins in `requirements.in` |
 
 Nothing in CI needs a workspace or a secret — `tests/conftest.py` stubs the single
 live lookup, so the suite runs with no Databricks credentials on the runner. Every
@@ -436,22 +436,31 @@ back for a follow-up change rather than shipped here.
 
 ### Dependency locks
 
-`requirements.lock` and `requirements-dev.lock` are fully resolved, hash-pinned
-versions of the two `requirements*.txt` files, generated with:
+The app's direct dependencies live in `requirements.in` — edit pins there. Two
+fully resolved, hash-pinned locks are generated from it:
+
+- `requirements.txt` — what the app installs on Databricks Apps, and what
+  `run_local.sh` installs locally.
+- `requirements-dev.lock` — the same packages plus the test and lint tools from
+  `requirements-dev.txt`. This is what CI installs.
 
 ```bash
-uv pip compile requirements.txt     --universal --python-version 3.10 --generate-hashes -o requirements.lock
+uv pip compile requirements.in      --universal --python-version 3.10 --generate-hashes -o requirements.txt
 uv pip compile requirements-dev.txt --universal --python-version 3.10 --generate-hashes -o requirements-dev.lock
 ```
 
-Regenerate both whenever a `requirements*.txt` pin changes. `--universal` keeps one
-lock valid across the CI matrix (Linux and macOS, Python 3.10-3.13) by carrying
-environment markers instead of resolving for one interpreter.
+Regenerate both whenever a pin in `requirements.in` or `requirements-dev.txt`
+changes; the Deploy config job fails if the two locks drift apart or fall behind
+`requirements.in`. `--universal` keeps one lock valid across the CI matrix (Linux
+and macOS, Python 3.10-3.13) by carrying environment markers instead of resolving
+for one interpreter.
 
-CI installs with `--require-hashes --no-deps`, so a package whose archive digest
-does not match the lock fails the build rather than running — a swapped or
-re-uploaded release on PyPI cannot reach the runner. The app image itself still
-installs plain `requirements.txt`, which Databricks Apps expects.
+Every entry in `requirements.txt` carries `--hash`, which puts pip in hash-checking
+mode with no extra flags: the plain `pip install -r requirements.txt` that
+Databricks Apps runs refuses any archive whose digest does not match, and so does
+CI's `--require-hashes --no-deps` install. A swapped or re-uploaded release on PyPI
+reaches neither the app nor the runner, and CI tests exactly the packages the app
+runs.
 
 One constraint on the runtime pins: keep them to versions Databricks' internal PyPI
 mirror carries as well as PyPI, or the lock cannot be regenerated from a Databricks

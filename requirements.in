@@ -1,0 +1,32 @@
+# Direct runtime dependencies. Edit pins here, never in requirements.txt: that file
+# is generated from this one with every transitive package pinned and hashed, and
+# it is what the app installs (see the README's "Dependency locks").
+
+# --- Web service ---
+fastapi==0.115.9
+uvicorn[standard]==0.34.0
+pydantic==2.12.5
+python-multipart==0.0.20
+
+# --- Databricks ---
+# >=0.81.0 for w.postgres (Lakebase projects/endpoints, OAuth credentials).
+databricks-sdk==0.137.0
+
+# --- Azure SQL source connector ---
+# Pure-Python (bundles FreeTDS): no system ODBC driver, works on Py 3.10-3.14 and
+# in the app container. The assessment scan reads only small catalog result sets,
+# so the app runtime needs no Spark. The generated data-migration notebooks use
+# Spark, but they run on Databricks compute — not in this process.
+pymssql==2.3.13
+
+# --- Target (used by later phases: schema + data migration) ---
+psycopg[binary]==3.2.13
+
+# --- Credential encryption (Fernet) for the Lakebase-backed password store ---
+cryptography==46.0.3
+
+# --- Sizing config ---
+PyYAML==6.0.3
+
+# --- Prompt templates (AI migration analysis) ---
+Jinja2==3.1.6
