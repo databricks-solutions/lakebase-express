@@ -467,9 +467,9 @@ modules carry documented `F821`/`F841` ignores: they pass a lambda that reads th
 inside the `except` block, so the code is correct and ruff's scope analysis is not.
 
 Widening the gate is a separate piece of work: `ruff check --select E,F,W,I,UP,B`
-reports 689 findings, 661 of them `E501` (line-too-long), then 16 unsorted-import,
-8 pyupgrade and 4 bugbear. `ruff format` would rewrite 93 of 104 files, so
-formatting is not part of the gate either.
+reports roughly 700 findings, nearly all of them `E501` (line-too-long), plus a
+few dozen unsorted-import, pyupgrade and bugbear hits. `ruff format` would rewrite
+most of the codebase, so formatting is not part of the gate either.
 
 ## Adding a source connector
 

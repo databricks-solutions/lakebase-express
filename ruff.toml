@@ -4,8 +4,8 @@
 # The rule set is deliberately narrow: every rule enabled here passes on the code
 # as it stands, so the gate only ever fails on something a PR actually introduced.
 # Widening it is a separate job — `ruff check --select E,F,W,I,UP,B` currently
-# reports ~700 findings, 662 of them E501 (line-too-long) — see the README's
-# "CI/CD" section.
+# reports roughly 700 findings, nearly all of them E501 (line-too-long) — see the
+# README's "CI/CD" section.
 target-version = "py310"  # the floor the CI matrix and README's Prerequisites claim
 
 [lint]
