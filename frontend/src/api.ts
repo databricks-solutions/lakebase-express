@@ -297,7 +297,7 @@ export interface RepairState {
 export interface TableProgress {
   name: string;
   target: string;
-  status: string; // pending|running|success|failed
+  status: string; // pending|running|success|failed|skipped
   rows_copied: number;
   total_rows: number;
   error?: string | null;
@@ -308,6 +308,27 @@ export interface RunState {
   status: string; // running|success|partial|failed
   tables: TableProgress[];
   error?: string | null;
+  // Set when this run resumed another: its loaded tables are skipped here.
+  resumed_from?: string | null;
+}
+
+// A run whose loader is gone (it failed, or the app restarted mid-load) and which
+// still has tables left, so it can be resumed instead of re-copied from scratch.
+export interface ResumableRun {
+  run_id: string;
+  status: string;
+  started_at?: string | null;
+  tables_total: number;
+  tables_left: number;
+  rows_copied: number;
+}
+
+// The same, for an async (job) run: its loader checkpointed some tables and then
+// the job stopped, so resuming copies only the rest.
+export interface ResumableAsyncRun extends ResumableRun {
+  job_id?: number | null;
+  job_run_id?: number | null;
+  run_url?: string | null;
 }
 
 // --- Data migration (PySpark snapshot export) ---
@@ -360,6 +381,9 @@ export interface ValidationItem {
   kind: ObjectKind;
   source_name: string;
   target_name: string;
+  /** What the object actually is in the target — not always its source kind, since a
+   * procedure returning a result set must be a function. "" when nothing was found. */
+  target_kind: string;
   status: MatchStatus;
   severity: Severity;
   detail: string;
@@ -509,6 +533,272 @@ export interface FmEndpointList {
   api?: string;
 }
 
+// --- App-migration context bundle ---
+// Mirrors backend/context_bundle/models.py 1:1. The bundle is a *delta*: only
+// what changed in the database's contract with application code is present, so
+// anything absent round-trips unchanged.
+
+export interface BundleProvenance {
+  generated_at: string;
+  project_id: string;
+  project_name: string;
+  bundle_version: string;
+  tool: string;
+  tool_version: string;
+  phase_statuses: Record<string, string>;
+  completeness: string[];
+}
+
+export interface BundleSection {
+  name: string;
+  count: number;
+  // Entries the delta filter left out, so a filtered section reads apart from an empty one.
+  omitted: number;
+  provenance: string; // deterministic | ai | user-edited | mixed
+  summary: string;
+}
+
+export interface BundleTarget {
+  target_schema: string;
+  identifier_case: string;
+  quoting_rule: string;
+  notes: string[];
+}
+
+export interface BundleNameChange {
+  kind: string;
+  source: string;
+  target: string;
+  note: string;
+}
+
+export interface BundleColumn {
+  table: string;
+  source_table: string;
+  column: string;
+  source_type: string;
+  target_type: string;
+  // Keys into ContextBundle.change_glossary.
+  changes: string[];
+  collation?: string | null;
+  deterministic: boolean;
+  rejects_pattern_match: boolean;
+}
+
+export interface BundleCallable {
+  object_type: string;
+  target_kind: string;
+  returns_set: boolean;
+  source_returns_result_set: boolean;
+  kind_conflict: boolean;
+  source: string;
+  target: string;
+  call_change: string;
+  translated: boolean;
+  provenance: string;
+  companion_function: string;
+  note: string;
+}
+
+export interface BundleExpression {
+  item_id: string;
+  kind: string;
+  target_object: string;
+  source_expr: string;
+  target_expr: string;
+  passed_through: boolean;
+  risk: string;
+}
+
+export interface BundleRewriteRule {
+  tsql: string;
+  postgres: string;
+  severity: string;
+  seen_in_source: boolean;
+  affected_objects: string[];
+}
+
+export interface BundleGap {
+  id: string;
+  title: string;
+  severity: string;
+  origin: string;
+  detail: string;
+  recommendation: string;
+  affected: string[];
+}
+
+export interface BundleOperational {
+  transient_sqlstates: string[];
+  retry_note: string;
+  identity_note: string;
+  deliberate_trades: string[];
+  notes: string[];
+}
+
+export interface BundleSourceSummary {
+  table_count: number;
+  total_rows: number;
+  programmable_object_count: number;
+  tables_selected_for_data: number;
+  readiness_score: number;
+  severity_counts: Record<string, number>;
+  score_formula: string;
+}
+
+export interface AiObjectNote {
+  source: string;
+  object_type: string;
+  /** Digest of the translated SQL this note describes; stale notes are dropped. */
+  sql_digest: string;
+  call_site: string;
+  behaviour: string;
+  watch_out: string;
+}
+
+// The one model-written part of the export, labelled with the endpoint that wrote
+// it. Fail-soft: success=false carries the reason instead of throwing.
+export interface AiNotes {
+  endpoint: string;
+  /** ISO-8601 UTC when the model wrote them; "" for notes stored before this existed. */
+  generated_at: string;
+  /** Notes dropped because they described SQL that has since changed. */
+  stale_dropped: number;
+  notes: AiObjectNote[];
+  success: boolean;
+  error?: string | null;
+}
+
+export interface AiNotesRunState {
+  run_id: string;
+  status: string; // running|success|failed
+  endpoint: string;
+  objects_total: number;
+  notes?: AiNotes | null;
+  error?: string | null;
+}
+
+export interface ContextBundle {
+  start_here: string;
+  provenance: BundleProvenance;
+  sections: BundleSection[];
+  source_summary: BundleSourceSummary;
+  target: BundleTarget;
+  change_glossary: Record<string, string>;
+  names: BundleNameChange[];
+  columns: BundleColumn[];
+  callables: BundleCallable[];
+  expressions: BundleExpression[];
+  rewrite_rules: BundleRewriteRule[];
+  gaps: BundleGap[];
+  operational: BundleOperational;
+  ai_notes?: AiNotes | null;
+}
+
+// --- Migration report (mirrors backend/report/models.py) ---
+
+export interface ReportProvenance {
+  generated_at: string;
+  project_id: string;
+  project_name: string;
+  report_version: string;
+  tool: string;
+  tool_version: string;
+  phase_statuses: Record<string, string>;
+  /** What the report cannot vouch for; silence would read as success. */
+  completeness: string[];
+}
+
+export interface ReportCoordinates {
+  source_type: string;
+  source_host: string;
+  source_database: string;
+  target_host: string;
+  target_database: string;
+  target_schema: string;
+  identifier_case: string;
+}
+
+// null on a score means its phase never ran, which is not the same as zero.
+export interface ReportHeadline {
+  readiness_score: number | null;
+  tables: number;
+  total_rows: number;
+  programmable_objects: number;
+  tables_selected: number;
+  plan_items: number;
+  rows_copied: number | null;
+  match_score: number | null;
+  parity_score: number | null;
+}
+
+export interface ReportAssessment {
+  database: string;
+  readiness_score: number;
+  severity_counts: Record<string, number>;
+  table_count: number;
+  total_rows: number;
+  programmable_object_count: number;
+  findings_total: number;
+  ai?: AIAssessment | null;
+}
+
+export interface ReportPlan {
+  total: number;
+  by_kind: Record<string, number>;
+  pre_data: number;
+  post_data: number;
+  collations: string[];
+  code_objects_total: number;
+  translated: number;
+  user_edited: number;
+  not_translated: number;
+}
+
+export interface ReportResult {
+  runs_total: number;
+  rows_copied: number;
+  tables_loaded: number;
+  /** False when run history lives in process memory, i.e. a restart emptied it. */
+  history_persistent: boolean;
+}
+
+export interface ReportValidation {
+  match_score: number;
+  matched: number;
+  missing: number;
+  mismatched: number;
+  extra: number;
+  row_delta: number;
+  outstanding_total: number;
+}
+
+export interface ReportParity {
+  parity_score: number;
+  total: number;
+  matched: number;
+  mismatched: number;
+  errored: number;
+  speedup: number | null;
+}
+
+// How much of the cycle an export covers. "assessment" is the source scan alone.
+export type ReportScope = "full" | "assessment";
+
+/** A section is null when its phase never ran, or when the scope leaves it out. Only
+ *  the fields the modules show are typed here; the HTML export carries the rest. */
+export interface MigrationReport {
+  scope: ReportScope;
+  provenance: ReportProvenance;
+  coordinates: ReportCoordinates;
+  headline: ReportHeadline;
+  assessment?: ReportAssessment | null;
+  plan?: ReportPlan | null;
+  result?: ReportResult | null;
+  validation?: ReportValidation | null;
+  parity?: ReportParity | null;
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
@@ -526,6 +816,12 @@ async function get<T>(path: string): Promise<T> {
   const res = await fetch(path);
   if (!res.ok) throw new Error(res.statusText);
   return res.json() as Promise<T>;
+}
+
+async function getText(path: string): Promise<string> {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(res.statusText);
+  return res.text();
 }
 
 async function send<T>(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<T> {
@@ -597,6 +893,21 @@ export interface DataOptions {
 
 /** The single workspace the backend is bound to (CLI profile locally, the App's
  *  own workspace when deployed). Read-only — there is no in-app login. */
+// Where the backend persists projects, credentials and run state. Anything not
+// durable is held in this app's process/container and dies with a restart.
+export interface StoreStatus {
+  store: string;    // projects | credentials | runs
+  backend: string;  // lakebase | uc-volume | local-files | memory | unavailable
+  durable: boolean;
+  detail: string;
+}
+
+export interface StorageStatus {
+  stores: StoreStatus[];
+  durable: boolean;
+  warning?: string | null;
+}
+
 export interface WorkspaceStatus {
   connected: boolean;
   host?: string;
@@ -625,6 +936,7 @@ export const api = {
 
   // --- Databricks workspace (bound at startup; read-only) ---
   dbStatus: () => get<WorkspaceStatus>("/api/databricks/status"),
+  storageStatus: () => get<StorageStatus>("/api/settings/storage"),
 
   // Populate the password-source dropdowns. Both fail-soft server-side (empty
   // list on missing auth/permission), so the UI falls back to manual entry.
@@ -667,6 +979,10 @@ export const api = {
   startData: (body: Record<string, unknown>) =>
     post<{ run_id: string }>("/api/migration/data/start", body),
   dataStatus: (runId: string) => get<RunState>(`/api/migration/data/status/${runId}`),
+  resumableData: (projectId: string) =>
+    get<{ run: ResumableRun | null }>(
+      `/api/migration/data/resumable?project_id=${encodeURIComponent(projectId)}`,
+    ),
   submitJob: (body: { spec: Record<string, unknown>; workspace_dir: string }) =>
     post<{ job_id: number; run_id: number; url: string | null; run_url: string | null; notebook_path: string }>("/api/migration/job/submit", body),
   scheduleJob: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string }) =>
@@ -674,8 +990,12 @@ export const api = {
   runStateAccess: (body: { job_id: number }) =>
     post<{ ok: boolean; warning?: string | null; fix?: string | null }>(
       "/api/migration/async/run-state-access", body),
-  asyncSetup: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string; run_now: boolean }) =>
+  asyncSetup: (body: { spec: Record<string, unknown>; workspace_dir: string; quartz_cron: string | null; timezone: string; run_now: boolean; resume_from?: string | null }) =>
     post<AsyncSetupResult>("/api/migration/async/setup", body),
+  resumableAsync: (projectId: string) =>
+    get<{ run: ResumableAsyncRun | null }>(
+      `/api/migration/async/resumable?project_id=${encodeURIComponent(projectId)}`,
+    ),
   ensureSecrets: (body: {
     scope: string;
     secrets: Record<string, string>;
@@ -736,4 +1056,33 @@ export const api = {
   getProject: (id: string) => get<Project>(`/api/projects/${id}`),
   updateProject: (id: string, project: Project) => send<Project>("PUT", `/api/projects/${id}`, project),
   deleteProject: (id: string) => send<{ ok: boolean }>("DELETE", `/api/projects/${id}`),
+
+  // --- App-migration context ---
+  // Both are built server-side from the *saved* project, so flush any pending
+  // autosave first. The skill is the artifact people hand over; the JSON is the
+  // machine-readable source behind it (and holds the lists the skill groups).
+  // Both carry the newest successful model-notes run, if there is one.
+  contextSkill: (id: string) => getText(`/api/projects/${id}/context-skill`),
+  contextBundle: (id: string) => get<ContextBundle>(`/api/projects/${id}/context-bundle`),
+  // The model reads every translated object, which takes minutes — past the Apps
+  // request timeout — so it runs in the background and the UI polls.
+  startContextNotes: (id: string, endpoint?: string) =>
+    post<{ run_id: string }>(
+      `/api/projects/${id}/context-notes${endpoint ? `?endpoint=${encodeURIComponent(endpoint)}` : ""}`,
+      {},
+    ),
+  contextNotesStatus: (id: string, runId: string) =>
+    get<AiNotesRunState>(`/api/projects/${id}/context-notes/status/${runId}`),
+
+  // --- Migration report ---
+  // Also built from the *saved* project. The HTML is the deliverable (one
+  // self-contained file the browser prints to PDF); the JSON is the same report for
+  // machine consumers, and what the modules read to summarise it. `scope=assessment`
+  // narrows both to the source scan, for exporting from the Assessment module.
+  migrationReportUrl: (id: string, scope: ReportScope = "full") =>
+    `/api/projects/${id}/report?scope=${scope}`,
+  migrationReportHtml: (id: string, scope: ReportScope = "full") =>
+    getText(`/api/projects/${id}/report?scope=${scope}`),
+  migrationReport: (id: string, scope: ReportScope = "full") =>
+    get<MigrationReport>(`/api/projects/${id}/report-data?scope=${scope}`),
 };

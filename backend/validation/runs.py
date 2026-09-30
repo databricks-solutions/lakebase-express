@@ -12,6 +12,8 @@ import uuid
 from backend.connectors.credentials import LAKEBASE_NAMESPACE, remember_effective
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
+from backend.migration.models import PlanItem
+from backend.projects.store import get_store
 from backend.run_registry import RunRegistry
 from backend.validation.comparator import merge_object_rescan, run_validation
 from backend.validation.models import ValidationRunRequest, ValidationRunState
@@ -36,6 +38,31 @@ def _set(run_id: str, mutate) -> None:
     _REGISTRY.update(run_id, mutate)
 
 
+def _stored_plan(project_id: str | None) -> list[PlanItem]:
+    """The project's plan items, or [] when there is no project or no plan.
+
+    Read here rather than sent by the caller: the plan is already persisted, and putting
+    it on the request would make every client ship a copy of what the server can look up.
+    Fail-soft — a plan that will not parse must not stop a validation run.
+    """
+    if not project_id:
+        return []
+    try:
+        project = get_store().get(project_id)
+    except Exception:
+        log.warning("Could not load project %s for validation context", project_id)
+        return []
+    if not project:
+        return []
+    items: list[PlanItem] = []
+    for raw in project.plan or []:
+        try:
+            items.append(PlanItem.model_validate(raw))
+        except Exception:
+            continue
+    return items
+
+
 def _execute(run_id: str, req: ValidationRunRequest) -> None:
     try:
         source = build_connector(
@@ -55,6 +82,14 @@ def _execute(run_id: str, req: ValidationRunRequest) -> None:
             ))
 
         validation_kwargs = {"scope": req.scope, "use_estimates": req.use_estimates}
+        # The plan tells validation two things nothing else can: which procedures the
+        # translation turned into set-returning functions (a text scan of T-SQL misses a
+        # CTE-fronted result set), and which target objects the migration created as
+        # helpers. Absent for a run not scoped to a project — everything still works,
+        # just with the weaker signals.
+        stored_plan = _stored_plan(req.source.project_id)
+        if stored_plan:
+            validation_kwargs["plan"] = stored_plan
         # Preserve the historical default call shape for wrappers around the
         # validation runner; the extra policy is needed only when explicitly set.
         if req.identifier_case.value == "preserve":

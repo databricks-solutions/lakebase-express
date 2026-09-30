@@ -13,15 +13,12 @@ It is intentionally fail-soft: any error returns an ``AIAssessment`` with
 """
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import re
 from collections import Counter
-from pathlib import Path
 
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
-from jinja2 import Environment, FileSystemLoader
 
 from backend.assessment.models import (
     AIAssessment,
@@ -30,6 +27,7 @@ from backend.assessment.models import (
 )
 from backend.config import FM_ENDPOINT
 from backend.fm_params import chat_text, query_chat
+from backend.prompts import render
 
 log = logging.getLogger("lakebase_express.ai_analysis")
 
@@ -87,23 +85,9 @@ _RESPONSE_FORMAT = {
     },
 }
 
-# Prompts live as Jinja templates in ./prompts so they're easy to read and tune
-# without touching Python.
-_PROMPT_DIR = Path(__file__).parent / "prompts"
-
-
-@functools.lru_cache(maxsize=1)
-def _jinja_env() -> Environment:
-    return Environment(
-        loader=FileSystemLoader(str(_PROMPT_DIR)),
-        autoescape=False,  # prompts are plain text, not HTML
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
-
 
 def _system_prompt() -> str:
-    return _jinja_env().get_template("migration_analysis.system.jinja").render().strip()
+    return render(__file__, "migration_analysis.system.jinja")
 
 
 def _context(report: AssessmentReport) -> str:

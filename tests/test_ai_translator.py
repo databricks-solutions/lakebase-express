@@ -85,6 +85,24 @@ def test_translate_object_is_fail_soft(monkeypatch):
     assert not tr.success and "endpoint down" in tr.notes
 
 
+# --- The system prompt template ---------------------------------------------------------
+
+
+def test_system_prompt_renders_from_its_template():
+    """The template must be found and carry the rules — a missing `prompts/` directory
+    in a deployed build would otherwise surface as a silently weaker translation."""
+    prompt = ai_translator._system_prompt()
+    assert prompt.startswith("You are a senior database migration engineer.")
+    assert "{#" not in prompt and "{{" not in prompt  # no unrendered Jinja
+    for rule in ("CREATE OR REPLACE PROCEDURE", "RETURNS TABLE", "COLLATE", "UNLOGGED"):
+        assert rule in prompt
+
+
+def test_system_prompt_forbids_temp_tables():
+    prompt = ai_translator._system_prompt()
+    assert "must NOT become CREATE TEMP" in prompt
+
+
 # --- Prompt guidance --------------------------------------------------------------------
 
 

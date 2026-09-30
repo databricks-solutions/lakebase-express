@@ -29,9 +29,20 @@ regex scan would miss. Consider, where the evidence supports it:
 - Indexes & constraints: clustered indexes (no PG equivalent), filtered indexes
   (partial), INCLUDE/covering columns, descending keys; CHECK constraints using
   T-SQL functions; FK ON DELETE/UPDATE cascade actions.
-- Programmable logic: stored procedures, scalar/table functions, INSTEAD OF and
-  multi-statement triggers, transaction/isolation & error-handling semantics,
-  and T-SQL-only constructs.
+- Programmable logic: stored procedures (flag procedures returning datasets to become
+  FUNCTION ... RETURNS TABLE to avoid refcursor transaction requirements), scalar/table
+  functions, INSTEAD OF and multi-statement triggers, transaction/isolation &
+  error-handling semantics, and T-SQL-only constructs.
+- Scratch collections (#temp, ##temp, DECLARE @t TABLE): never recommend
+  CREATE TEMP TABLE. Lakebase pools connections in transaction mode and does not
+  support session-held temporary tables, temp tables carry no planner statistics
+  (autovacuum cannot reach them), and each creation writes catalog rows. The
+  primary target is collapsing multi-pass logic into a single query (CTE/JOIN). 
+  Fallbacks are a PL/pgSQL record/array (strictly for small datasets), or — when the 
+  collection is indexed, shared across sessions, or large — an UNLOGGED table keyed 
+  by a run id. Raise the UNLOGGED pattern as a risk, specifically warning about 
+  orphaned data accumulation and the strict need to use RETURN QUERY prior to 
+  cleanup deletions to prevent empty dataset bugs.
 - Cross-object dependencies and NULL/empty-string handling differences.
 
 Respond with ONLY a JSON object (no prose, no code fences):

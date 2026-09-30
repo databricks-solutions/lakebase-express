@@ -37,6 +37,7 @@ class _FakeJobs:
         self.created_with: dict | None = None
         self.reset_with: dict | None = None
         self.run_now_job_ids: list[int] = []
+        self.run_now_params: list[dict | None] = []
 
     def list(self, name=None):
         self.listed_names.append(name)
@@ -49,16 +50,17 @@ class _FakeJobs:
                 settings=SimpleNamespace(tags=self.existing_tags),
             )
 
-    def create(self, name=None, tasks=None, schedule=None, tags=None):
+    def create(self, name=None, tasks=None, schedule=None, tags=None, parameters=None):
         self.created_with = {"name": name, "tasks": tasks, "schedule": schedule,
-                             "tags": tags}
+                             "tags": tags, "parameters": parameters}
         return SimpleNamespace(job_id=100)
 
     def reset(self, job_id=None, new_settings=None):
         self.reset_with = {"job_id": job_id, "new_settings": new_settings}
 
-    def run_now(self, job_id=None):
+    def run_now(self, job_id=None, job_parameters=None):
         self.run_now_job_ids.append(job_id)
+        self.run_now_params.append(job_parameters)
         return SimpleNamespace(run_id=555)
 
 
@@ -461,7 +463,9 @@ def test_tasks_pass_the_job_run_id_so_every_task_shares_a_run_id(monkeypatch):
     async_setup.setup_async(_req_with_post(), "/Workspace/Shared/x")
     params = [t.notebook_task.base_parameters for t in client.jobs.created_with["tasks"]]
     assert params and all(
-        p == {"job_id": "{{job.id}}", "job_run_id": "{{job.run_id}}"} for p in params
+        p == {"job_id": "{{job.id}}", "job_run_id": "{{job.run_id}}",
+              "resume_from": "{{job.parameters.resume_from}}"}
+        for p in params
     )
 
 

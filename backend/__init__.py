@@ -3,3 +3,5 @@
 All migration logic lives here and is intentionally free of any web-framework
 imports so it can be reused from notebooks, jobs, or unit tests.
 """
+
+__version__ = "0.1.0"

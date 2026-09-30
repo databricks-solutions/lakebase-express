@@ -54,6 +54,13 @@ class _CountingStore(RunStore):
             and (project_id is None or self.projects.get((k, r)) == project_id)
         ]
 
+    def delete_for_project(self, project_id):
+        doomed = [key for key, pid in self.projects.items() if pid == project_id]
+        for key in doomed:
+            self._rows.pop(key, None)
+            self.projects.pop(key, None)
+        return len(doomed)
+
 
 class _BrokenStore(RunStore):
     """Every operation fails — the app must carry on regardless."""
@@ -65,6 +72,9 @@ class _BrokenStore(RunStore):
         raise RuntimeError("lakebase is down")
 
     def list(self, kind=None, limit=50, project_id=None):
+        raise RuntimeError("lakebase is down")
+
+    def delete_for_project(self, project_id):
         raise RuntimeError("lakebase is down")
 
 
@@ -674,3 +684,47 @@ def test_grant_writer_quotes_an_identity_safely(pg_store):
     store.roles.add('od"d@example.com')
     store.grant_writer('od"d@example.com')
     assert 'TO "od""d@example.com"' in " | ".join(s for s in sql if s.startswith("GRANT"))
+
+
+# --- Deleting a project's runs -------------------------------------------------------
+
+
+def test_memory_store_deletes_only_the_named_project():
+    store = MemoryRunStore()
+    store.save("data_migration", RUN_ID, "success", {"a": 1}, project_id=PROJECT_ID)
+    store.save("plan", RUN_ID_2, "success", {"b": 2}, project_id=PROJECT_ID)
+    store.save("data_migration", RUN_ID_3, "success", {"c": 3}, project_id=PROJECT_ID_2)
+
+    assert store.delete_for_project(PROJECT_ID) == 2
+    assert store.list(project_id=PROJECT_ID) == []
+    assert [r.run_id for r in store.list(project_id=PROJECT_ID_2)] == [RUN_ID_3]
+    # Gone from load() too, not just hidden from the listing.
+    assert store.load("data_migration", RUN_ID) is None
+
+
+def test_deleting_runs_for_an_unknown_project_is_a_no_op():
+    store = MemoryRunStore()
+    store.save("plan", RUN_ID, "success", {}, project_id=PROJECT_ID)
+
+    assert store.delete_for_project(PROJECT_ID_2) == 0
+    assert len(store.list()) == 1
+
+
+def test_a_run_with_no_project_is_never_swept_up():
+    store = MemoryRunStore()
+    store.save("plan", RUN_ID, "success", {}, project_id=None)
+
+    assert store.delete_for_project(PROJECT_ID) == 0
+    assert len(store.list()) == 1
+
+
+def test_every_run_store_implements_deletion():
+    """It is abstract on purpose: a backend that silently kept run rows would orphan
+    them on every project delete, which is the bug this closes."""
+    import inspect
+
+    from backend import run_store as mod
+
+    for name, cls in vars(mod).items():
+        if inspect.isclass(cls) and issubclass(cls, RunStore) and cls is not RunStore:
+            assert "delete_for_project" in cls.__dict__, name

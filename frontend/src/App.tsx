@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type AssessmentReport, type ConnectionRequest, type IdentifierCase, type LakebaseConn, type PhaseStatus, type PlanItem, type Project, type QueryParityReport, type SecretRef, type ValidationReport, type WorkspaceStatus } from "./api";
+import { api, type AssessmentReport, type ConnectionRequest, type IdentifierCase, type LakebaseConn, type PhaseStatus, type PlanItem, type Project, type QueryParityReport, type SecretRef, type StorageStatus, type ValidationReport, type WorkspaceStatus } from "./api";
 import { SOURCE_CONNECTORS, type Connector } from "./connectors";
 import Sidebar, { type NavId } from "./components/Sidebar";
 import AppBar, { GlobalSearch } from "./components/AppBar";
@@ -14,6 +14,8 @@ import SchemaCode from "./tabs/SchemaCode";
 import DataMigration from "./tabs/DataMigration";
 import CreateSync from "./tabs/CreateSync";
 import ValidationModule from "./tabs/ValidationModule";
+import AppMigrationSkill from "./tabs/AppMigrationSkill";
+import MigrationReport from "./tabs/MigrationReport";
 import QueryParityModule from "./tabs/QueryParityModule";
 
 // What the phase components consume. Derived from the persisted Project plus the
@@ -51,9 +53,14 @@ export default function App() {
   const [fmEndpoint, setFmEndpoint] = useState("");
   const [query, setQuery] = useState("");
   const [ws, setWs] = useState<WorkspaceStatus | null>(null);
+  const [storage, setStorage] = useState<StorageStatus | null>(null);
 
-  // The workspace is fixed by how the backend was started, so this is read once.
-  useEffect(() => { api.dbStatus().then(setWs).catch(() => {}); }, []);
+  // Both the workspace and the store backends are fixed by how the backend was
+  // started, so they are read once.
+  useEffect(() => {
+    api.dbStatus().then(setWs).catch(() => {});
+    api.storageStatus().then(setStorage).catch(() => {});
+  }, []);
 
   // Passwords live only in memory for the session.
   const secretsRef = useRef<Secrets>({ source: "", target: "", sourceRef: null, targetRef: null });
@@ -108,9 +115,9 @@ export default function App() {
           {creating ? (
             <NewMigration onCancel={() => setCreating(false)} onCreate={createProject} />
           ) : view === "migrations" ? (
-            <MigrationsHome query={query} onNew={() => setCreating(true)} onOpen={openProject} />
+            <MigrationsHome query={query} onNew={() => setCreating(true)} onOpen={openProject} storage={storage} />
           ) : (
-            <Settings fmEndpoint={fmEndpoint} setFmEndpoint={setFmEndpoint} workspace={ws} />
+            <Settings fmEndpoint={fmEndpoint} setFmEndpoint={setFmEndpoint} workspace={ws} storage={storage} />
           )}
         </div>
       </div>
@@ -264,6 +271,11 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
     sync: false,
     validation: !!state.validation,
     parity: !!state.queryParity,
+    // Never ticks, like overview and sync: this module produces a download, not a
+    // stored artifact, so there is nothing to derive "done" from. It used to key off
+    // an assessment existing, which claimed done on a module the user never opened.
+    skill: false,
+    report: false,
   };
   const meta = MODULES.find((m) => m.id === module)!;
   const goConnection = () => setModule("connection");
@@ -309,12 +321,14 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
               workspaceHost={workspace?.host}
             />
           )}
-          {module === "assessment" && <AssessmentModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} />}
+          {module === "assessment" && <AssessmentModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} projectId={project.id} onSave={saveNow} />}
           {module === "schema" && <SchemaCode state={state} setState={setState} fmEndpoint={fmEndpoint} />}
           {module === "data" && <DataMigration state={state} setState={setState} onGoConnection={goConnection} onContinue={() => setModule("sync")} />}
           {module === "sync" && <CreateSync state={state} onGoConnection={goConnection} onGoSchema={() => setModule("schema")} onGoData={() => setModule("data")} onGoValidation={() => setModule("validation")} workspace={workspace} onManageWorkspace={onManageWorkspace} />}
           {module === "validation" && <ValidationModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} />}
           {module === "parity" && <QueryParityModule state={state} setState={setState} goConnection={goConnection} goAssessment={() => setModule("assessment")} fmEndpoint={fmEndpoint} />}
+          {module === "skill" && <AppMigrationSkill projectId={project.id} onSave={saveNow} fmEndpoint={fmEndpoint} />}
+          {module === "report" && <MigrationReport projectId={project.id} onSave={saveNow} />}
 
           {module !== "overview" && (
             <div className="stepnav">

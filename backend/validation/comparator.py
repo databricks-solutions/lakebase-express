@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
+from backend.assessment import callable_shape
 from backend.assessment.models import ProgrammableObject, Severity, TableInfo
 from backend.assessment.scanner import scan_objects, scan_tables
 from backend.connectors.lakebase import LakebaseConnection
@@ -98,7 +99,12 @@ WHERE  table_schema = ANY(%(schemas)s)
 #     the deptype filter alone doesn't catch them.
 _PG_ROUTINES_SQL = """
 SELECT    n.nspname AS schema, p.proname AS name,
-          CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END AS kind
+          CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END AS kind,
+          -- position(), not LIKE: this query carries parameters, so psycopg scans the
+          -- whole string — comments included — and a percent sign followed by anything
+          -- but s, b or t is a hard error. pg_get_function_arguments renders every
+          -- argument including INOUT/OUT, which is where a cursor parameter appears.
+          position('refcursor' in pg_get_function_arguments(p.oid)) > 0 AS has_refcursor
 FROM      pg_proc p
 JOIN      pg_namespace n ON n.oid = p.pronamespace
 LEFT JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e'
@@ -203,6 +209,10 @@ class TargetInventory:
     views: set[tuple[str, str]] = field(default_factory=set)
     procedures: set[tuple[str, str]] = field(default_factory=set)
     functions: set[tuple[str, str]] = field(default_factory=set)
+    # Routines with a refcursor parameter. A procedure that returns its rows through
+    # an INOUT refcursor the caller FETCHes is a working shape for a source procedure
+    # that returned a result set, so it must not be reported as the wrong kind.
+    refcursor_routines: set[tuple[str, str]] = field(default_factory=set)
     triggers: set[tuple[str, str]] = field(default_factory=set)
     # (schema, table) -> {column name: information_schema data_type}
     columns: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
@@ -240,6 +250,8 @@ def fetch_target_inventory(conn: LakebaseConnection, schemas: list[str]) -> Targ
     for r in conn.query(_PG_ROUTINES_SQL, params):
         bucket = inv.procedures if r["kind"] == "procedure" else inv.functions
         bucket.add((r["schema"], r["name"]))
+        if r.get("has_refcursor"):
+            inv.refcursor_routines.add((r["schema"], r["name"]))
     for r in conn.query(_PG_COLUMNS_SQL, params):
         key = (r["schema"], r["table"])
         inv.columns.setdefault(key, {})[r["name"]] = r["data_type"]
@@ -422,6 +434,138 @@ def _add_column_sql(schema: str, table: str, col, collation_schema: str = "") ->
         f"ALTER TABLE {_pg_ident(schema)}.{_pg_ident(table)} "
         f'ADD COLUMN "{col.name}" {map_type(col)}{collate}{null};'
     )
+
+
+# Kinds a source object can legitimately hold in the target, and how each is called.
+_EXPECTED_TO_KIND = {
+    callable_shape.FUNCTION: ObjectKind.FUNCTION,
+    callable_shape.PROCEDURE: ObjectKind.PROCEDURE,
+    callable_shape.VIEW: ObjectKind.VIEW,
+    callable_shape.TRIGGER: ObjectKind.TRIGGER,
+}
+
+_RESHAPED_DETAIL = (
+    'Created as a function rather than a procedure, because "{src}" returns a result set '
+    "and a Postgres procedure cannot. Callers use SELECT * FROM {tgt}(...) — CALL fails "
+    "with SQLSTATE 42809."
+)
+
+# Only the translation indicated a result set — the source scan did not see one. Said
+# differently on purpose: asserting the source returns rows would be a guess.
+_RESHAPED_BY_PLAN_DETAIL = (
+    "Created as a function rather than a procedure: the translation returns a set, so "
+    "callers use SELECT * FROM {tgt}(...) and CALL fails with SQLSTATE 42809. The source "
+    'scan did not itself find a result set in "{src}" — worth confirming the function '
+    "returns what the original did."
+)
+
+_REFCURSOR_DETAIL = (
+    '"{src}" returns a result set, and this procedure hands it back through a refcursor '
+    "parameter. Callers must CALL it inside an open transaction and FETCH the cursor by "
+    "name; the rows are not in the CALL result."
+)
+
+_WRONG_KIND_DETAIL = (
+    '"{src}" returns a result set to its caller, but "{tgt}" exists in the target as a '
+    "PROCEDURE with no refcursor parameter. A Postgres procedure cannot return a result "
+    "set: SELECT * FROM {tgt}(...) fails with SQLSTATE 42809 and CALL {tgt}(...) returns "
+    "nothing. No application-side change recovers the rows."
+)
+
+
+def _routine_item(
+    o: ProgrammableObject,
+    source_kind: ObjectKind,
+    mapped: tuple[str, str],
+    fqn_src: str,
+    fqn_tgt: str,
+    inventory: TargetInventory,
+    claimed: dict[ObjectKind, set[tuple[str, str]]],
+    target_sql: str = "",
+) -> ValidationItem:
+    """One code object, compared against the kind it is *supposed* to have.
+
+    The expected kind comes from the source (assessment/callable_shape), not from the
+    migration plan, so this verifies the migration instead of echoing it: a procedure
+    whose caller reads rows has to be a function, and validation says so whether or
+    not the translation managed it.
+
+    Claiming the bucket the object was actually found in is what stops a correctly
+    reshaped procedure being reported as a missing procedure *and* an extra function.
+    """
+    expected = _EXPECTED_TO_KIND[
+        callable_shape.expected_kind(o.object_type, o.definition, target_sql)
+    ]
+    reshaped = expected is not source_kind
+    # Which signal called it, so the explanation does not overstate what is known.
+    source_saw_rows = callable_shape.returns_result_set(o.definition)
+    item_id = f"{source_kind.value}:{fqn_src}"
+
+    def found(kind: ObjectKind, detail: str = "", recommendation: str = "") -> ValidationItem:
+        claimed[kind].add(mapped)
+        return ValidationItem(
+            id=item_id, kind=source_kind, source_name=fqn_src, target_name=fqn_tgt,
+            target_kind=kind.value, status=MatchStatus.MATCHED, severity=Severity.INFO,
+            detail=detail, recommendation=recommendation,
+        )
+
+    if mapped in inventory.__dict__[f"{expected.value}s"]:
+        detail = ""
+        if reshaped:
+            template = _RESHAPED_DETAIL if source_saw_rows else _RESHAPED_BY_PLAN_DETAIL
+            detail = template.format(src=fqn_src, tgt=fqn_tgt)
+        return found(expected, detail)
+
+    # Expected a function; a procedure is there instead. That is fine only if it hands
+    # the rows back through a cursor.
+    if reshaped and mapped in inventory.procedures:
+        if mapped in inventory.refcursor_routines:
+            return found(ObjectKind.PROCEDURE, _REFCURSOR_DETAIL.format(src=fqn_src, tgt=fqn_tgt))
+        claimed[ObjectKind.PROCEDURE].add(mapped)
+        return ValidationItem(
+            id=item_id, kind=source_kind, source_name=fqn_src, target_name=fqn_tgt,
+            target_kind=ObjectKind.PROCEDURE.value,
+            status=MatchStatus.MISMATCH, severity=Severity.HIGH,
+            detail=_WRONG_KIND_DETAIL.format(src=fqn_src, tgt=fqn_tgt),
+            recommendation=(
+                "Re-create it as CREATE FUNCTION ... RETURNS TABLE(...) with the final SELECT "
+                "as a RETURN QUERY — the AI fix can convert the T-SQL definition. The stale "
+                "procedure has to be dropped in the same step; CREATE OR REPLACE cannot change "
+                "a routine's kind."
+            ),
+            source_definition=o.definition,
+        )
+
+    return ValidationItem(
+        id=item_id, kind=source_kind, source_name=fqn_src, target_name=fqn_tgt,
+        target_kind="", status=MatchStatus.MISSING, severity=Severity.HIGH,
+        detail=f'{expected.value.capitalize()} "{fqn_tgt}" does not exist in the target database.'
+               + (f" (The source is a {source_kind.value}; it must be a {expected.value} here "
+                  "because it returns a result set.)" if reshaped else ""),
+        recommendation="Translate and create it — use the AI fix to convert the T-SQL "
+                       "definition to Postgres, review, and apply.",
+        source_definition=o.definition,
+    )
+
+
+def _helper_owner(
+    schema: str, name: str, claimed: dict[ObjectKind, set[tuple[str, str]]]
+) -> str:
+    """The migrated object this target-only object is named after, or "".
+
+    The translator names what it adds after the object that owns it — `<proc>_Scratch`
+    for a working table replacing a temp collection, `<proc>_Header`/`_Lines` for a
+    procedure's separate result sets, `<trigger>_fn` for a trigger's body. So a
+    target-only name that extends a migrated name with a suffix is a dependency, not
+    leftover cruft, and must not be offered up for deletion. Deliberately requires the
+    separator, so an unrelated `OrdersArchive` is not read as a helper of `Orders`.
+    """
+    owned = {n for bucket in claimed.values() for s, n in bucket if s == schema}
+    lowered = name.lower()
+    matches = [n for n in owned if lowered.startswith(f"{n.lower()}_") and lowered != n.lower()]
+    # Longest wins: with both `usp_Get` and `usp_GetOrder` migrated, `usp_GetOrder_Lines`
+    # belongs to the latter.
+    return f"{schema}.{max(matches, key=len)}" if matches else ""
 
 
 def _drop_sql(kind: ObjectKind, schema: str, name: str) -> str:
@@ -712,6 +856,7 @@ def compare(
     target_database: str = "",
     include_tables: bool = True,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    plan: list[PlanItem] | None = None,
 ) -> ValidationReport:
     """Line up the source inventory with the target inventory and diff them.
 
@@ -900,6 +1045,18 @@ def compare(
             fix_sql=fix,
         ))
 
+    # What the migration actually wrote, taken from the plan rather than inferred.
+    # ``translated`` corroborates a procedure that returns rows (a text scan of T-SQL
+    # misses a CTE-fronted result set); ``created_by`` names the owner of every helper
+    # object a translation added, which no naming convention can be relied on to say.
+    translated: dict[str, str] = {}
+    created_by: dict[tuple[str, str], str] = {}
+    for pitem in plan or []:
+        source_name = pitem.id.split(":", 1)[1] if ":" in pitem.id else pitem.id
+        translated[source_name] = pitem.sql
+        for made in callable_shape.created_objects(pitem.sql, target_schema):
+            created_by.setdefault(made, pitem.name)
+
     # --- Programmable objects ---
     kind_bucket = {
         ObjectKind.VIEW: inventory.views,
@@ -916,7 +1073,9 @@ def compare(
             map_schema(o.schema_name, target_schema, identifier_case),
             map_object(o.object_name, identifier_case),
         )
-        claimed[kind].add(mapped)
+        # Not claimed here: _routine_item claims the bucket the object was actually
+        # found in, which is what lets a stale routine of the other kind surface as a
+        # collision instead of being silently absorbed.
         # A SQL Server trigger is one object; Postgres splits it into a trigger
         # plus a companion trigger function the migration creates as
         # ``<trigger>_fn`` (schema_migration/ai_translator). Claim that function
@@ -942,24 +1101,72 @@ def compare(
                            "SQL Server, where the logic lives inside the trigger itself.",
                 ))
         fqn_src, fqn_tgt = f"{o.schema_name}.{o.object_name}", f"{mapped[0]}.{mapped[1]}"
-        ok = mapped in kind_bucket[kind]
-        items.append(ValidationItem(
-            id=f"{kind.value}:{fqn_src}",
-            kind=kind,
-            source_name=fqn_src,
-            target_name=fqn_tgt,
-            status=MatchStatus.MATCHED if ok else MatchStatus.MISSING,
-            severity=Severity.INFO if ok else Severity.HIGH,
-            detail="" if ok else f'{kind.value.capitalize()} "{fqn_tgt}" does not exist in the '
-                                 "target database.",
-            recommendation="" if ok else "Translate and create it — use the AI fix to convert "
-                                         "the T-SQL definition to Postgres, review, and apply.",
-            source_definition="" if ok else o.definition,
-        ))
+        items.append(_routine_item(o, kind, mapped, fqn_src, fqn_tgt, inventory,
+                                   claimed, translated.get(fqn_src, "")))
 
     # --- Extra objects in the target (within the migration's schemas) ---
+    # A routine name that a migrated object of the *other* kind already claims is not
+    # a stray: both exist, Postgres overload resolution picks between them, and a
+    # caller can reach the stale one. That is a broken call site, not housekeeping.
+    other_routine = {
+        ObjectKind.FUNCTION: claimed[ObjectKind.PROCEDURE],
+        ObjectKind.PROCEDURE: claimed[ObjectKind.FUNCTION],
+    }
+
     def extras(kind: ObjectKind, present: set[tuple[str, str]], owned: set[tuple[str, str]]):
         for schema, name in sorted(present - owned):
+            collides = (schema, name) in other_routine.get(kind, set())
+            if collides:
+                stale = "procedure" if kind is ObjectKind.FUNCTION else "function"
+                items.append(ValidationItem(
+                    id=f"extra-{kind.value}:{schema}.{name}",
+                    kind=kind,
+                    target_name=f"{schema}.{name}",
+                    status=MatchStatus.EXTRA,
+                    severity=Severity.HIGH,
+                    detail=f'Both a procedure and a function named "{schema}.{name}" exist in '
+                           f"Lakebase. The migration created the {kind.value} here, while the "
+                           f"source object was migrated as the {stale} — so the two coexist and "
+                           "PostgreSQL decides by argument types which one a caller reaches. A "
+                           "call that binds to the wrong one fails with SQLSTATE 42809 "
+                           f'("is a procedure" / "is not a procedure"). `CREATE OR REPLACE` '
+                           "cannot convert one kind into the other, which is how both survived.",
+                    recommendation=f"Drop whichever is stale — keep the {kind.value} if the "
+                                   "source returns a result set, since a Postgres procedure "
+                                   "cannot — then re-run this validation and re-export the "
+                                   "context bundle so call sites match what exists.",
+                    fix_sql=_drop_sql(
+                        ObjectKind.PROCEDURE if stale == "procedure" else ObjectKind.FUNCTION,
+                        schema, name,
+                    ),
+                ))
+                continue
+            # A helper the migration itself created for one of its objects — a working
+            # table replacing a #temp collection, a per-result-set function, a trigger
+            # function. Named after its owner, which is the only signal available here:
+            # the comparator sees the target catalog, not the SQL that built it. Telling
+            # the user to drop one of these would break the object that depends on it.
+            # Exact when the plan is available — the migration's own SQL says what it
+            # created — and the name heuristic only as a fallback, because helper naming
+            # is not stable between translations (`usp_X_Scratch` one run, `XScratch` the
+            # next), so matching on it alone misses real helpers.
+            owner = created_by.get((schema, name)) or _helper_owner(schema, name, claimed)
+            if owner:
+                items.append(ValidationItem(
+                    id=f"extra-{kind.value}:{schema}.{name}",
+                    kind=kind,
+                    target_name=f"{schema}.{name}",
+                    status=MatchStatus.EXTRA,
+                    severity=Severity.INFO,
+                    detail=f'{kind.value.capitalize()} "{schema}.{name}" has no source object, '
+                           f'but its name marks it as a helper the migration created for "{owner}" '
+                           "— a working table replacing a temp table, a per-result-set function, "
+                           "or similar. PostgreSQL needs objects SQL Server did not.",
+                    recommendation=f'Leave it in place unless you have checked that "{owner}" does '
+                                   "not use it; dropping a helper breaks the object that owns it. "
+                                   "Application code calls the owner, not this.",
+                ))
+                continue
             hint = (" It may also be a helper the migration created (e.g. a trigger function)."
                     if kind is ObjectKind.FUNCTION else "")
             items.append(ValidationItem(
@@ -1062,6 +1269,7 @@ def run_validation(
     scope: str = "full",
     use_estimates: bool = True,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    plan: list[PlanItem] | None = None,
 ) -> ValidationReport:
     """Full source-vs-target validation. ``source`` is any connector exposing
     ``query()``/``database`` (see connectors/factory.py).
@@ -1155,4 +1363,5 @@ def run_validation(
         target_database=target.database,
         include_tables=not objects_only,
         identifier_case=identifier_case,
+        plan=plan,
     )

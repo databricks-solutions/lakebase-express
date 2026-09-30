@@ -12,7 +12,9 @@ import psycopg
 from psycopg.rows import dict_row
 
 # Retryable: connection dropped, server briefly unable to serve, sessions collided.
-_TRANSIENT_SQLSTATES = frozenset({
+# Public: the context bundle exports these so a migrated app retries on SQLSTATE
+# instead of SQL Server error numbers.
+TRANSIENT_SQLSTATES = frozenset({
     "08000", "08001", "08003", "08004", "08006", "08007", "08P01",  # connection_exception
     "53300", "53400",           # too_many_connections, configuration_limit_exceeded
     "55P03",                    # lock_not_available
@@ -26,7 +28,7 @@ def transient_reason(exc: BaseException) -> str | None:
     if not isinstance(exc, psycopg.Error):
         return None
     sqlstate = getattr(exc, "sqlstate", None)
-    if sqlstate in _TRANSIENT_SQLSTATES:
+    if sqlstate in TRANSIENT_SQLSTATES:
         return f"SQLSTATE {sqlstate}"
     # No SQLSTATE means the server never answered (unreachable, TLS timeout, socket
     # closed). Rejections that must not be retried do carry one — 28P01, 3D000.

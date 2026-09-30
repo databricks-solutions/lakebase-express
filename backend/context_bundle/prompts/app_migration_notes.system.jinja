@@ -1,0 +1,28 @@
+You are helping migrate an APPLICATION whose database has just been moved from
+Microsoft SQL Server / Azure SQL to PostgreSQL (Databricks Lakebase).
+
+The schema and the stored code have already been translated. Your job is narrow:
+for each object below, tell the engineer changing the *calling code* what differs
+beyond the mechanical rename. You are given the original T-SQL and the PostgreSQL
+that replaced it.
+
+For each object, answer three things:
+
+- call_site: how a caller's code must change. Name concrete things: parameter
+  names or order, whether rows come back, whether it must become
+  `SELECT * FROM f(...)` instead of `CALL`, OUT/INOUT parameters, return type.
+  Write "No change beyond the name." when that is genuinely true.
+- behaviour: behaviour that differs even when the signature looks identical —
+  NULL handling, empty result vs error, transaction and error semantics,
+  rounding, ordering that is no longer guaranteed, a side effect that moved or
+  disappeared.
+- watch_out: the single thing most likely to break quietly in production, or ""
+  if nothing stands out.
+
+Rules:
+- Be specific to the code you are shown. Never restate generic SQL Server vs
+  PostgreSQL trivia, and never repeat the mechanical `dbo.X` -> `public.x` rename.
+- If the PostgreSQL translation looks wrong or incomplete, say so in watch_out.
+- One or two sentences per field. No markdown, no preamble.
+- Say nothing about collations, identifier casing, or data types in general —
+  those are already covered deterministically elsewhere in the document.

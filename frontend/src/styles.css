@@ -293,6 +293,9 @@ a { color: var(--primary); }
 /* ---------- Content ---------- */
 .content { padding: 22px 28px; }
 .grid { display: grid; grid-template-columns: minmax(380px, 1fr) 1.3fr; gap: 22px; align-items: start; }
+/* Grid items default to min-width:auto, so a wide <pre> stretches its column past
+   the track instead of scrolling inside it. */
+.grid > * { min-width: 0; }
 @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
 
 /* Source → Target with a migration arrow in the middle column. */
@@ -469,6 +472,7 @@ a { color: var(--primary); }
 .ai-card { border-color: #cfe0f1; box-shadow: 0 1px 2px rgba(34,114,180,0.06); }
 .ai-card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .ai-card__head h3 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.ai-card__meta { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .ai-spark { color: var(--primary); font-size: 16px; }
 /* On a blue primary button the blue spark washes out — use a warm gold that
    pops against the Databricks blue (light-background usages keep the blue). */
@@ -514,6 +518,8 @@ a { color: var(--primary); }
 .ai-recs { margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.7; color: var(--ink-2); }
 .ai-recs li { margin-bottom: 4px; }
 .ai-note { font-size: 12px; color: var(--muted-2); margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--border); }
+/* The note plus the panel's own action, which sits at its right edge. */
+.ai-note--row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 /* No-issues success state */
 .success-state { display: flex; align-items: center; gap: 14px; padding: 16px; border: 1px solid var(--ok); background: var(--ok-weak); border-radius: 8px; }
@@ -555,6 +561,13 @@ a { color: var(--primary); }
 .planitem__name { font-weight: 600; font-size: 14px; flex: 1; }
 .planitem__body { padding: 4px 14px 14px; }
 .tag--kind { background: var(--primary-weak); color: var(--primary); text-transform: none; }
+/* A code object whose kind changed in the target — a procedure returning a result
+   set has to become a function. Outlined so it reads as a change at a glance,
+   against the plain kind tags on every other row. */
+.tag--reshaped {
+  background: var(--primary-weak); color: var(--primary); text-transform: none;
+  border: 1px solid rgba(34, 114, 180, 0.35); cursor: help; white-space: nowrap;
+}
 .sqlbox { width: 100%; min-height: 120px; font-family: ui-monospace, monospace; font-size: 12.5px; padding: 11px; border: 1px solid var(--border); border-radius: 8px; background: #fbfbfc; resize: vertical; }
 .sqlbox:focus { outline: none; border-color: var(--primary); }
 .orig { margin-top: 10px; }
@@ -674,6 +687,8 @@ a { color: var(--primary); }
 .bar__fill--success { background: var(--ok); }
 .bar__fill--failed { background: var(--err); }
 .bar__fill--running { background: var(--primary); }
+/* Loaded by an earlier run and skipped by a resume. */
+.bar__fill--skipped { background: var(--muted); }
 
 /* Overall sync-now progress bar (spans schema + data phases) */
 .syncbar { margin-top: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); }
@@ -799,6 +814,25 @@ a { color: var(--primary); }
 .code__lang { font-size: 12px; color: var(--muted); font-family: monospace; }
 .code__actions { display: flex; gap: 6px; }
 .code__body { margin: 0; padding: 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5; background: #1b1f24; color: #e3e6ea; max-height: 480px; }
+/* Prose (Markdown) has no meaningful line breaks to preserve — wrap it. */
+.code__body--wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A single file path plus its copy button — lighter than a full code panel. */
+.pathrow { display: flex; align-items: center; gap: 10px; margin: 12px 0 10px; flex-wrap: wrap; }
+/* "Model · <endpoint>", wherever a Foundation Model did the work. */
+.modelbadge { display: inline-flex; align-items: center; gap: 8px; }
+.modelbadge__label { font-size: 12px; color: var(--muted-2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+
+.prompt {
+  margin: 10px 0 0; padding: 12px 14px; font-size: 13px; line-height: 1.55;
+  background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius);
+  white-space: pre-wrap; color: var(--ink-2);
+}
+.pathrow code {
+  flex: 1 1 auto; min-width: 0; padding: 8px 11px; font-size: 12.5px;
+  background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
 .translation { margin-top: 18px; }
 .translation h3 { display: flex; align-items: center; gap: 10px; }
 
@@ -818,8 +852,8 @@ a { color: var(--primary); }
 .parity-gen__field input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-weak); }
 .parity-gen__go { padding: 9px 18px; font-size: 14px; }
 /* Model chip pushed to the trailing edge, labelled so it reads as a setting. */
-.parity-gen__model { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; align-self: flex-end; }
-.parity-gen__model-label { font-size: 12px; color: var(--muted-2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+/* Placement only — the badge itself is styled by .modelbadge. */
+.parity-gen__model { margin-left: auto; align-self: flex-end; }
 .planrow__headwrap { display: flex; align-items: center; }
 .planrow__headwrap .planrow__head { flex: 1; min-width: 0; }
 .planrow__remove { flex: 0 0 auto; padding: 0 14px; font-size: 12.5px; }

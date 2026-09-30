@@ -14,6 +14,10 @@ immediately with a pointer to the right action and never cost an FM call.
 
 Runs on a daemon thread with an in-memory registry the API polls (same pattern
 as backend/validation/runs.py).
+
+The system prompt is a Jinja template in ``./prompts`` (see backend/prompts.py). It
+is a sibling of the one-shot fixer's: same remediation rules, but this SQL is applied
+with no human review, so the two must be edited as a pair.
 """
 from __future__ import annotations
 
@@ -29,6 +33,7 @@ from backend.fm_params import chat_text, query_chat
 from backend.migration.executor import apply_plan
 from backend.migration.models import ItemStatus, ObjectKind, PlanItem
 from backend.run_registry import RunRegistry
+from backend.prompts import render
 from backend.validation import fixer
 from backend.validation.models import (
     MatchStatus,
@@ -45,35 +50,9 @@ _REGISTRY: RunRegistry[RepairState] = RunRegistry("validation_repair", RepairSta
 
 _MAX_ERR_CHARS = 1500
 
-_SYSTEM_PROMPT = """You are an autonomous database migration remediation agent. A \
-post-migration validation compared a source Azure SQL / SQL Server database with its \
-migrated Databricks Lakebase (PostgreSQL 15+) target and found inconsistencies. You \
-resolve one inconsistency at a time by producing PostgreSQL SQL that is applied to \
-the TARGET database immediately — no human review — so it must be complete and safe.
 
-Rules:
-- Object missing in the target: produce the complete CREATE statement, translating the
-  provided T-SQL definition to PostgreSQL (LANGUAGE plpgsql for procedures/functions).
-  A T-SQL trigger becomes a trigger function plus a CREATE TRIGGER statement — multiple
-  statements are fine; they run in one transaction.
-- Structural mismatch: produce ALTER TABLE statements that align the target table with
-  the source columns. If a starting-point fix is provided, refine it rather than
-  restarting from scratch.
-- Keep the mapped schema and object name exactly as given. Always double-quote mapped
-  schema/object identifiers so mixed-case names remain exact and case-sensitive. The
-  statements run alone in one transaction and must be self-contained.
-- If previous attempts are shown, they already failed: do NOT repeat them; use each
-  Postgres error to refine the fix.
-- "sql" must contain ONLY executable PostgreSQL statements — never prose, markdown
-  fences, or JSON.
-- If the inconsistency is genuinely unfixable by SQL, return an empty "sql" and say
-  why in "analysis".
-
-Respond with ONLY a JSON object with these keys, in this order:
-  "analysis": a short diagnosis (2-4 sentences) of the inconsistency — or, on a retry,
-              of why the last attempt failed — and what the SQL does;
-  "sql": the complete Postgres SQL.
-Think through "analysis" first, then produce "sql"."""
+def _system_prompt() -> str:
+    return render(__file__, "validation_repair_agent.system.jinja")
 
 
 # --- Run registry -----------------------------------------------------------------
@@ -163,7 +142,7 @@ def _propose(
     resp = query_chat(
         endpoint or FM_ENDPOINT,
         messages=[
-            ChatMessage(role=ChatMessageRole.SYSTEM, content=_SYSTEM_PROMPT),
+            ChatMessage(role=ChatMessageRole.SYSTEM, content=_system_prompt()),
             ChatMessage(role=ChatMessageRole.USER,
                         content=_build_user_prompt(item, state, target_schema)),
         ],

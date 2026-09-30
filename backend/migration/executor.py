@@ -22,6 +22,7 @@ from backend.migration.models import (
     PlanItem,
 )
 from backend.retry import DB_POLICY, call_with_retry
+from backend.schema_migration.routine_sql import with_kind_guard
 from backend.schema_migration.trigger_sql import sanitize_trigger_sql
 
 log = logging.getLogger("lakebase_express.executor")
@@ -32,12 +33,15 @@ def _ordered(items: list[PlanItem]) -> list[PlanItem]:
 
 
 def _item_sql(item: PlanItem) -> str:
-    """SQL to apply for a plan item. Trigger DDL is sanitized here — at apply
-    time — so a plan built before the fix (or hand-edited) still applies cleanly:
-    the model schema-qualifies trigger names (a Postgres syntax error) and omits
-    OR REPLACE. Other kinds pass through untouched."""
+    """SQL to apply for a plan item, with the deterministic fix-ups applied here —
+    at apply time — so a plan built before them (or hand-edited) still applies
+    cleanly. Triggers: the model schema-qualifies trigger names (a Postgres syntax
+    error) and omits OR REPLACE. Procedures/functions: a reshaped routine cannot
+    replace the other kind, so the stale one is dropped first (routine_sql)."""
     if item.kind is ObjectKind.TRIGGER:
         return sanitize_trigger_sql(item.sql)
+    if item.kind in (ObjectKind.PROCEDURE, ObjectKind.FUNCTION):
+        return with_kind_guard(item.kind.value, item.sql)
     return item.sql
 
 

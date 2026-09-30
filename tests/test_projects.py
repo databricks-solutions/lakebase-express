@@ -10,6 +10,7 @@ from backend.assessment.models import SecretRef
 from backend.connectors.credential_store import MemoryCredentialStore
 from backend.projects.models import PhaseStatus, Project
 from backend.projects.store import LocalFileStore, PostgresStore
+from backend.run_store import MemoryRunStore
 
 # The Postgres store keys on a native uuid column, so ids must be valid UUIDs.
 _UUID_A = "11111111-1111-4111-8111-111111111111"
@@ -67,9 +68,10 @@ def test_store_ignores_corrupt_files(tmp_path):
 # --- Project DELETE also owns project-scoped credential cleanup ------------------
 
 
-def _projects_client(monkeypatch, store, clear_credentials):
+def _projects_client(monkeypatch, store, clear_credentials, runs=None):
     monkeypatch.setattr(projects_routes, "get_store", lambda: store)
     monkeypatch.setattr(projects_routes, "clear_project_credentials", clear_credentials)
+    monkeypatch.setattr(projects_routes, "get_run_store", lambda: runs or MemoryRunStore())
     app = FastAPI()
     app.include_router(projects_routes.router)
     return TestClient(app)
@@ -263,3 +265,71 @@ def test_scanner_excludes_system_objects():
         assert "is_ms_shipped = 0" in sql
         assert "'sys'" in sql
         assert "'INFORMATION_SCHEMA'" in sql
+
+# --- Run history is deleted with the project ----------------------------------------
+#
+# project_id on the runs table is nullable and carries no foreign key — the projects
+# and runs stores can be different backends — so nothing reclaims these rows on their
+# own. Deleting a project has to say so, or its runs outlive it forever.
+
+
+def _run_store_with(*project_ids):
+    store = MemoryRunStore()
+    for i, pid in enumerate(project_ids):
+        store.save("data_migration", f"run-{i}", "success", {"n": i}, project_id=pid)
+    return store
+
+
+def test_deleting_a_project_deletes_its_runs_and_leaves_the_others(tmp_path, monkeypatch):
+    projects = LocalFileStore(str(tmp_path))
+    projects.save(_project("project-one", "One"))
+    projects.save(_project("project-two", "Two"))
+    runs = _run_store_with("project-one", "project-one", "project-two")
+
+    client = _projects_client(monkeypatch, projects, lambda pid: None, runs)
+    assert client.delete("/api/projects/project-one").status_code == 200
+
+    assert runs.list(project_id="project-one") == []
+    assert len(runs.list(project_id="project-two")) == 1
+
+
+def test_a_run_with_no_project_is_left_alone(tmp_path, monkeypatch):
+    """Runs predating project scoping, and jobs started outside one, have no owner."""
+    projects = LocalFileStore(str(tmp_path))
+    projects.save(_project("project-one", "One"))
+    runs = _run_store_with("project-one", None)
+
+    client = _projects_client(monkeypatch, projects, lambda pid: None, runs)
+    client.delete("/api/projects/project-one")
+
+    assert [r.project_id for r in runs.list()] == [None]
+
+
+def test_the_project_is_still_deleted_when_run_cleanup_fails(tmp_path, monkeypatch):
+    """Unlike credentials, leftover run rows carry no secrets — refusing to remove the
+    project over stale history would be the worse outcome."""
+    projects = LocalFileStore(str(tmp_path))
+    projects.save(_project("project-one", "One"))
+
+    class _Broken(MemoryRunStore):
+        def delete_for_project(self, project_id):
+            raise RuntimeError("runs table unreachable")
+
+    client = _projects_client(monkeypatch, projects, lambda pid: None, _Broken())
+    assert client.delete("/api/projects/project-one").status_code == 200
+    assert projects.get("project-one") is None
+
+
+def test_runs_are_kept_when_credential_cleanup_fails(tmp_path, monkeypatch):
+    """Credentials abort the delete, so nothing else should have been removed yet."""
+    projects = LocalFileStore(str(tmp_path))
+    projects.save(_project("project-one", "One"))
+    runs = _run_store_with("project-one")
+
+    def fail_cleanup(project_id):
+        raise RuntimeError("credential store unavailable")
+
+    client = _projects_client(monkeypatch, projects, fail_cleanup, runs)
+    assert client.delete("/api/projects/project-one").status_code == 502
+    assert len(runs.list(project_id="project-one")) == 1
+    assert projects.get("project-one") is not None

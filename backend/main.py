@@ -16,18 +16,22 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend import __version__
 from backend.api.assessment_routes import router as assessment_router
 from backend.api.data_routes import router as data_router
+from backend.api.context_routes import router as context_router
 from backend.api.databricks_routes import router as databricks_router
 from backend.api.migration_routes import router as migration_router
 from backend.api.projects_routes import router as projects_router
 from backend.api.query_parity_routes import router as query_parity_router
+from backend.api.report_routes import router as report_router
 from backend.api.runs_routes import router as runs_router
 from backend.api.schema_routes import router as schema_router
 from backend.api.settings_routes import router as settings_router
 from backend.api.sizing_routes import router as sizing_router
 from backend.api.validation_routes import router as validation_router
 from backend.egress import log_egress_ip
+from backend.storage_status import log_storage
 
 # LBX_LOG_LEVEL raises this to DEBUG for local debugging (./run_local.sh
 # --verbose). A typo must not take the app down at startup, so an unrecognized
@@ -43,10 +47,13 @@ async def lifespan(_: FastAPI):
     # no-op by default; when on it runs in a daemon thread, so it never blocks
     # startup or readiness checks.
     log_egress_ip()
+    # Name the active stores: falling back to the container's disk or process memory
+    # looks exactly like an empty app until a restart loses everything.
+    log_storage()
     yield
 
 
-app = FastAPI(title="Lakebase Express", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Lakebase Express", version=__version__, lifespan=lifespan)
 
 # --- API routers (one per migration phase) ---------------------------------------
 app.include_router(assessment_router)
@@ -58,6 +65,8 @@ app.include_router(migration_router)
 app.include_router(validation_router)
 app.include_router(query_parity_router)
 app.include_router(projects_router)
+app.include_router(context_router)
+app.include_router(report_router)
 app.include_router(runs_router)
 app.include_router(databricks_router)
 

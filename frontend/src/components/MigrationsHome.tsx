@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type PhaseStatus, type ProjectSummary } from "../api";
+import { api, type PhaseStatus, type ProjectSummary, type StorageStatus } from "../api";
 import { SOURCE_CONNECTORS, LAKEBASE_DESTINATION } from "../connectors";
 import ConnectorIcon from "./ConnectorIcon";
 
@@ -12,9 +12,10 @@ interface Props {
   query: string;
   onNew: () => void;
   onOpen: (id: string) => void;
+  storage: StorageStatus | null;
 }
 
-export default function MigrationsHome({ query, onNew, onOpen }: Props) {
+export default function MigrationsHome({ query, onNew, onOpen, storage }: Props) {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -97,6 +98,9 @@ export default function MigrationsHome({ query, onNew, onOpen }: Props) {
 
       <div className="tablewrap">
         {error && <div className="banner banner--err">{error}</div>}
+        {storage && !storage.durable && (
+          <div className="banner banner--warn">{storage.warning}</div>
+        )}
         {projects === null ? (
           <p className="muted">Loading…</p>
         ) : projects.length === 0 ? (

@@ -6,6 +6,11 @@ Structured output (``response_format`` json_schema) constrains the reply to
 {"reasoning", "translated", "notes"}; the parse is still defensive (code fences,
 surrounding prose) for endpoints that don't honor it, and never lets a malformed
 JSON blob through as SQL.
+
+The system prompt is a Jinja template in ``./prompts`` (see backend/prompts.py) so
+the translation rules can be tuned as prose. The user message stays in Python: it
+is per-object logic — schema mapping, trigger naming, and the scratch-collection
+decisions from assessment/temp_objects.
 """
 from __future__ import annotations
 
@@ -18,9 +23,17 @@ from typing import Callable
 
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
+from backend.assessment import callable_shape
 from backend.assessment.models import ProgrammableObject
+from backend.assessment.temp_objects import (
+    REWRITES,
+    Strategy,
+    analyze,
+    temp_table_regression,
+)
 from backend.config import FM_ENDPOINT
 from backend.fm_params import chat_text, query_chat
+from backend.prompts import render
 from backend.schema_migration.models import Translation
 from backend.schema_migration.naming import (
     IdentifierCase,
@@ -31,37 +44,10 @@ from backend.schema_migration.trigger_sql import sanitize_trigger_sql
 
 log = logging.getLogger("lakebase_express.ai_translator")
 
-_SYSTEM_PROMPT = """You are a senior database migration engineer. You convert \
-Microsoft T-SQL (Azure SQL) into PostgreSQL 15+ compatible SQL / PL/pgSQL for \
-Databricks Lakebase.
 
-Rules:
-- Stored procedures -> CREATE OR REPLACE PROCEDURE ... LANGUAGE plpgsql.
-- Scalar/table functions -> CREATE OR REPLACE FUNCTION.
-- Views -> CREATE OR REPLACE VIEW.
-- Convert: ISNULL->COALESCE, GETDATE()->now(), TOP n->LIMIT n, [id]->"id",
-  '+' string concat-> ||, @@IDENTITY/SCOPE_IDENTITY-> RETURNING, TRY/CATCH->
-  BEGIN...EXCEPTION, #temp-> TEMP TABLE, INSERTED/DELETED-> NEW/OLD.
-- COLLATE: a SQL Server collation name is not a Postgres one. The migration creates
-  each source collation in the target under its own lower-cased name (e.g.
-  COLLATE SQL_Latin1_General_CP1_CI_AS -> COLLATE "sql_latin1_general_cp1_ci_as"),
-  so keep the clause and just requote the name that way. A binary collation
-  (_BIN/_BIN2) becomes COLLATE "C". Note that case-insensitive collations are
-  nondeterministic in Postgres, so LIKE/regex against such a column is rejected.
-  If the source code pattern-matches one, put an explicit deterministic collation on
-  the operand: col COLLATE "C" ILIKE '...' keeps the case-insensitive result. Do NOT
-  use lower(col) LIKE lower(...) — lower()'s result inherits the column collation and
-  is rejected the same way. Say what you changed in notes.
-- If a construct has no faithful equivalent, keep best-effort code and explain in notes.
-- "translated" must contain ONLY executable PostgreSQL / PL-pgSQL — never prose,
-  markdown fences, or JSON.
+def _system_prompt() -> str:
+    return render(__file__, "tsql_translation.system.jinja")
 
-Respond with ONLY a JSON object with these keys, in this order:
-  "reasoning": a short step-by-step explanation (2-5 sentences) of how you analyzed
-               the source and the key T-SQL -> Postgres decisions you made;
-  "translated": the Postgres SQL;
-  "notes": brief migration caveats the reviewer must check.
-Think through "reasoning" first, then produce "translated"."""
 
 # Structured output schema: the endpoint is constrained to emit exactly
 # {"reasoning", "translated", "notes"}. Without it, models pretty-print the JSON
@@ -98,6 +84,28 @@ _RESPONSE_FORMAT = {
 
 # A long procedure body can exceed 4000 completion tokens, truncating mid-"translated".
 _MAX_OUTPUT_TOKENS = 128000
+
+
+def _temp_guidance(definition: str) -> str:
+    """Per-collection instructions for the scratch tables in this body.
+
+    The same analysis the assessment ran, so the model is told to do exactly what
+    the user was told would happen. Row counts are not passed: sizing escalates a
+    finding for a human, and a model handed a row count would quietly decide the
+    rewrite instead of flagging it.
+    """
+    usages = analyze(definition)
+    if not usages:
+        return ""
+    lines = [f"  - {u.summary}" for u in usages]
+    wanted = {u.strategy for u in usages}
+    how = "\n".join(f"  {REWRITES[s]}" for s in Strategy if s in wanted)
+    return (
+        "This body uses scratch collections. Rewrite each one as shown — none of them "
+        "may become a Postgres TEMP TABLE:\n"
+        + "\n".join(lines)
+        + f"\n\nHow to apply those:\n{how}\n\n"
+    )
 
 
 def _build_user_prompt(
@@ -144,8 +152,9 @@ def _build_user_prompt(
                 f"using this schema mapping: {pairs}.\n\n"
             )
     return (
-        f"{guidance}Translate this T-SQL {obj.object_type.lower()} named "
-        f'"{obj.schema_name}.{obj.object_name}":\n\n{obj.definition}'
+        f"{guidance}{_temp_guidance(obj.definition)}Translate this T-SQL "
+        f'{obj.object_type.lower()} named "{obj.schema_name}.{obj.object_name}":'
+        f"\n\n{obj.definition}"
     )
 
 
@@ -195,7 +204,7 @@ def translate_object(
         resp = query_chat(
             endpoint,
             messages=[
-                ChatMessage(role=ChatMessageRole.SYSTEM, content=_SYSTEM_PROMPT),
+                ChatMessage(role=ChatMessageRole.SYSTEM, content=_system_prompt()),
                 ChatMessage(
                     role=ChatMessageRole.USER,
                     content=_build_user_prompt(obj, schema_map, identifier_case),
@@ -232,13 +241,26 @@ def translate_object(
         # hand-edited plan is corrected regardless of when it was built.
         if obj.object_type.upper() == "TRIGGER":
             translated = sanitize_trigger_sql(translated)
+        # Not rewritten, only reported: a temp table the prompt forbade is still
+        # applicable SQL, but it breaks on the pooled endpoint and the reviewer has
+        # to be told rather than left to notice.
+        notes = payload["notes"]
+        for regression in (
+            temp_table_regression(obj.definition, translated),
+            # A row-returning procedure left as a Postgres PROCEDURE cannot be called
+            # for its rows at all, and the application cannot compensate — so it is
+            # reported here rather than discovered by whoever migrates the caller.
+            callable_shape.shape_regression(obj.object_type, obj.definition, translated),
+        ):
+            if regression:
+                notes = f"{notes.rstrip()}\n\n{regression}" if notes.strip() else regression
         return Translation(
             object_name=name,
             object_type=obj.object_type,
             original=obj.definition,
             translated=translated,
             reasoning=payload["reasoning"],
-            notes=payload["notes"],
+            notes=notes,
             success=True,
         )
     except Exception as exc:  # one bad object shouldn't fail the batch

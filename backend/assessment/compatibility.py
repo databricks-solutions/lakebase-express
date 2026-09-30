@@ -1,6 +1,6 @@
 """T-SQL -> Postgres/Lakebase compatibility rule engine.
 
-Three rule families:
+Four rule families:
 
   * **Type rules** run over scanned columns and flag SQL Server types that don't
     map 1:1 to Postgres (most are auto-handled and reported as INFO).
@@ -11,6 +11,10 @@ Three rule families:
   * **Code rules** are regex patterns run over the bodies of stored procedures,
     views, functions, and triggers. They surface the constructs that drive manual
     migration effort (cursors, dynamic SQL, T-SQL-only built-ins, etc.).
+  * **Temp-object rules** are the one family a regex cannot answer: whether a
+    `#temp` or `@t TABLE` becomes a CTE, a PL/pgSQL variable, or a real working
+    table depends on how the body uses it, so the decision lives in
+    assessment/temp_objects and this module only shapes it into findings.
 
 Rules are data, not control flow — add a row, get a finding. The same severity
 scale feeds the readiness score in report.py.
@@ -21,11 +25,22 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
+from backend.assessment import callable_shape
 from backend.assessment.models import (
     Finding,
     ProgrammableObject,
     Severity,
     TableInfo,
+)
+from backend.assessment.temp_objects import (
+    KIND_LABELS,
+    KIND_RULE_IDS,
+    REWRITES,
+    STRATEGY_LABELS,
+    WHY_NOT_TEMP,
+    Strategy,
+    TempUsage,
+    analyze,
 )
 
 # --- Type compatibility ----------------------------------------------------------
@@ -110,10 +125,13 @@ CODE_RULES: list[CodeRule] = [
     CodeRule("DYNAMIC_SQL", "Dynamic SQL (EXEC/sp_executesql)", Severity.HIGH,
              _rx(r"\b(sp_executesql|EXEC\s*\(|EXECUTE\s*\()"),
              "Reimplement with PL/pgSQL EXECUTE ... USING and review for injection."),
-    CodeRule("TEMP_TABLE", "Temp table (#table)", Severity.MEDIUM, _rx(r"#\w+"),
-             "Use CREATE TEMP TABLE or a CTE in Postgres."),
+    # Findings for these two come from check_temp_objects, which reads how the body
+    # uses each collection; the rows stay here so the rewrite table the context
+    # bundle builds from CODE_RULES keeps its entry and its severity.
+    CodeRule("TEMP_TABLE", "Temp table (#table)", Severity.MEDIUM, _rx(r"(?<!#)#[A-Za-z_]\w*"),
+             "Rewrite as a CTE or a PL/pgSQL variable — NOT as a Postgres TEMP TABLE."),
     CodeRule("TABLE_VARIABLE", "Table variable (@table)", Severity.MEDIUM, _rx(r"DECLARE\s+@\w+\s+TABLE\b"),
-             "Replace with a TEMP TABLE or array/CTE."),
+             "Rewrite as a CTE or a PL/pgSQL variable — NOT as a Postgres TEMP TABLE."),
     CodeRule("MERGE", "MERGE statement", Severity.MEDIUM, _rx(r"\bMERGE\s+INTO\b|\bMERGE\s+\w+\s+USING\b"),
              "PG 15+ supports MERGE; otherwise use INSERT ... ON CONFLICT."),
     CodeRule("TOP", "TOP clause", Severity.LOW, _rx(r"\bSELECT\s+TOP\b"),
@@ -162,10 +180,17 @@ CODE_RULES: list[CodeRule] = [
 ]
 
 
+# Rules whose findings check_temp_objects emits instead — a regex can see that a
+# scratch collection exists but not what should replace it.
+_ANALYSED_ELSEWHERE = frozenset(KIND_RULE_IDS.values())
+
+
 def check_code(objects: Iterable[ProgrammableObject]) -> list[Finding]:
     findings: list[Finding] = []
     for obj in objects:
         for rule in CODE_RULES:
+            if rule.rule_id in _ANALYSED_ELSEWHERE:
+                continue
             if rule.applies_to and obj.object_type.upper() not in rule.applies_to:
                 continue
             if rule.pattern.search(obj.definition):
@@ -179,6 +204,109 @@ def check_code(objects: Iterable[ProgrammableObject]) -> list[Finding]:
                         recommendation=rule.recommendation,
                     )
                 )
+    return findings
+
+
+# --- Temp tables and table variables ------------------------------------------------
+
+# A collection that needs a real table is a decision someone has to make before the
+# migration runs, not a mechanical rewrite — HIGH so it surfaces rather than sitting
+# in the medium pile with the constructs the translator handles on its own.
+_STRATEGY_SEVERITY = {
+    Strategy.CTE: Severity.MEDIUM,
+    Strategy.PLPGSQL: Severity.MEDIUM,
+    Strategy.WORKING_TABLE: Severity.HIGH,
+    Strategy.REVIEW: Severity.MEDIUM,
+}
+
+
+def check_temp_objects(
+    tables: Iterable[TableInfo], objects: Iterable[ProgrammableObject]
+) -> list[Finding]:
+    """Findings for the `#temp` / `##temp` / `@t TABLE` collections in each body.
+
+    Grouped per object per (kind, strategy) rather than one finding per collection:
+    a reporting procedure with six scratch tables would otherwise contribute six
+    findings saying the same thing and take 24 points off the readiness score over
+    a single rewrite.
+
+    Table row counts are passed through so a collection fed from a large table can
+    escalate — it is the only way to tell "three rows in a variable" from "two
+    million rows staged for a report".
+    """
+    row_counts = {t.fqn.lower(): t.row_count for t in tables}
+
+    findings: list[Finding] = []
+    for obj in objects:
+        grouped: dict[tuple[str, Strategy], list[TempUsage]] = {}
+        for usage in analyze(obj.definition, row_counts):
+            grouped.setdefault((usage.obj.kind, usage.strategy), []).append(usage)
+
+        for (kind, strategy), group in grouped.items():
+            findings.append(
+                Finding(
+                    rule_id=KIND_RULE_IDS[kind],
+                    title=f"{KIND_LABELS[kind]} → {STRATEGY_LABELS[strategy]}",
+                    severity=_STRATEGY_SEVERITY[strategy],
+                    object_name=f"{obj.schema_name}.{obj.object_name} ({obj.object_type})",
+                    detail=f"{_evidence(group)}. {WHY_NOT_TEMP}",
+                    recommendation=REWRITES[strategy],
+                )
+            )
+    return findings
+
+
+def _evidence(group: list[TempUsage]) -> str:
+    """The collections in one finding and why they share a rewrite.
+
+    Collapsed to `#a, #b — <reason>` when the reason is the same for all of them,
+    which it usually is; only a mixed group pairs each name with its own.
+    """
+    reasons = {u.reason for u in group}
+    names = ", ".join(u.obj.name for u in group)
+    if len(reasons) == 1:
+        return f"{names} — {reasons.pop()}"
+    return "; ".join(f"{u.obj.name} ({u.reason})" for u in group)
+
+
+# --- Callable shape ----------------------------------------------------------------
+
+
+def check_result_set_procedures(
+    objects: Iterable[ProgrammableObject],
+) -> list[Finding]:
+    """Procedures whose caller reads rows, so they must become functions.
+
+    INFO, not a penalty: the translator does this reshaping on its own, and the
+    readiness score is meant to measure manual effort. It is reported because the
+    *call site* changes — `EXEC` becomes `SELECT * FROM`, never `CALL` — and an
+    application migrated on the assumption that a procedure stays a procedure fails
+    on every request with SQLSTATE 42809.
+    """
+    findings: list[Finding] = []
+    for obj in objects:
+        if obj.object_type.upper() != "PROCEDURE":
+            continue
+        if not callable_shape.returns_result_set(obj.definition):
+            continue
+        findings.append(
+            Finding(
+                rule_id="PROC_RETURNS_ROWS",
+                title="Procedure returns a result set → becomes a FUNCTION",
+                severity=Severity.INFO,
+                object_name=f"{obj.schema_name}.{obj.object_name} ({obj.object_type})",
+                detail=(
+                    "This procedure ends with a SELECT, so its caller reads rows back. A "
+                    "Postgres procedure cannot return a result set, so it is translated as "
+                    "CREATE FUNCTION ... RETURNS TABLE instead."
+                ),
+                recommendation=(
+                    "No schema work, but the call site changes: `EXEC` becomes "
+                    "`SELECT * FROM <name>(...)`. Calling it with `CALL` fails with "
+                    "SQLSTATE 42809."
+                ),
+            )
+        )
     return findings
 
 
@@ -316,4 +444,13 @@ def check_collations(tables: Iterable[TableInfo]) -> list[Finding]:
 def run_all_rules(
     tables: Iterable[TableInfo], objects: Iterable[ProgrammableObject]
 ) -> list[Finding]:
-    return check_types(tables) + check_collations(tables) + check_code(objects)
+    # Materialised: every family below walks both sequences, so a generator would
+    # arrive empty at the second one.
+    tables, objects = list(tables), list(objects)
+    return (
+        check_types(tables)
+        + check_collations(tables)
+        + check_code(objects)
+        + check_temp_objects(tables, objects)
+        + check_result_set_procedures(objects)
+    )

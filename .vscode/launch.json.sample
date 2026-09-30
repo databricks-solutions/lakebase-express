@@ -1,0 +1,108 @@
+{
+    // SAMPLE — copy to `.vscode/launch.json` (gitignored) and edit for your
+    // workspace. Replace every <placeholder>: the CLI profile you authenticated
+    // with, and your Lakebase instance host and role.
+    //
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // FastAPI backend with breakpoints. No --reload here on purpose:
+            // the reloader runs the app in a subprocess debugpy can't trace,
+            // so restart the debugger (F5) instead of waiting for hot reload.
+            // Start the frontend separately: (cd frontend && npm run dev)
+            //
+            // Env mirrors the documented local run against Lakebase:
+            //   LBX_PROJECTS_BACKEND=postgres \
+            //   LBX_PROJECTS_PG_HOST=... LBX_PROJECTS_PG_USER=<role> \
+            //   DATABRICKS_CONFIG_PROFILE=<profile> ./run_local.sh
+            // The PG password isn't listed: the store reads it from the
+            // Databricks secret scope, which authenticates via the profile.
+            "name": "Backend: FastAPI (uvicorn)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "backend.main:app",
+                "--host", "127.0.0.1",
+                "--port", "8000"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DATABRICKS_CONFIG_PROFILE": "<your-cli-profile>",
+                "LBX_LOG_LEVEL": "DEBUG",
+                "LBX_PROJECTS_BACKEND": "postgres",
+                "LBX_PROJECTS_PG_HOST": "<instance>.database.<region>.azuredatabricks.net",
+                "LBX_PROJECTS_PG_USER": "<your-lakebase-role>"
+            },
+            "justMyCode": false
+        },
+        {
+            // Frontend debugging in Chrome. Requires both servers to already be
+            // running (./run_local.sh) — this only attaches to the page, so
+            // breakpoints in .tsx/.ts under frontend/src work via Vite's
+            // sourcemaps. Don't run alongside the backend debug config: both
+            // want port 8000.
+            "name": "Frontend: Chrome",
+            "type": "chrome",
+            "request": "launch",
+            "url": "http://127.0.0.1:5173",
+            "webRoot": "${workspaceFolder}/frontend/src"
+        },
+        {
+            // Debug a single test file: open it in the editor, then F5.
+            "name": "Tests: pytest (current file)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["${relativeFile}"],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "DATABRICKS_CONFIG_PROFILE": "<your-cli-profile>"
+            },
+            "justMyCode": false
+        },
+        {
+            // Real server, real credentials. The probe reads coordinates from
+            // .vscode/azure_sql.env (gitignored):
+            //   LBX_SRC_HOST / LBX_SRC_DATABASE / LBX_SRC_USER / LBX_SRC_PASSWORD
+            //   optional: LBX_SRC_PORT, LBX_SRC_TYPE
+            "name": "Azure SQL probe (env file)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/azure_sql_connect.py",
+            "args": [
+                "--env-file",
+                "${workspaceFolder}/.vscode/azure_sql.env"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            // .venv314 has no pymssql — pin the interpreter that does.
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        }
+    ],
+    "compounds": [
+        {
+            // Full-stack debugging: launches the backend under the debugger
+            // and opens Chrome against the Vite dev server. Start Vite first
+            // in a terminal: (cd frontend && npm run dev)
+            "name": "Full stack (backend + Chrome)",
+            "configurations": [
+                "Backend: FastAPI (uvicorn)",
+                "Frontend: Chrome"
+            ]
+        }
+    ]
+}

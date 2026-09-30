@@ -5,6 +5,10 @@ loop): the user reviews the proposed SQL in an editor and applies it explicitly
 through the existing /api/migration/apply endpoint, so the human stays in the
 loop for every change made to the target. Fail-soft like the other AI helpers —
 returns ``FixProposal(success=False, error=…)`` instead of raising.
+
+The system prompt is a Jinja template in ``./prompts`` (see backend/prompts.py). It
+is a sibling of the repair agent's: same remediation rules, but it tells the model
+the SQL is reviewed by a human first, so the two must be edited as a pair.
 """
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 from backend.config import FM_ENDPOINT
 from backend.fm_params import chat_text, query_chat
+from backend.prompts import render
 from backend.validation.models import FixProposal, MatchStatus, ValidationItem
 
 log = logging.getLogger("lakebase_express.validation.fixer")
@@ -27,35 +32,9 @@ _MAX_SQL_CHARS = 6000
 # which surfaced as a fix with analysis but an empty (or half-written) SQL string.
 _MAX_OUTPUT_TOKENS = 128000
 
-_SYSTEM_PROMPT = """You are a database migration validation remediation agent. A \
-post-migration validation compared a source Azure SQL / SQL Server database with its \
-migrated Databricks Lakebase (PostgreSQL 15+) target and found an inconsistency. \
-Produce PostgreSQL SQL that resolves it in the TARGET database.
 
-Rules:
-- Object missing in the target: produce the complete CREATE statement, translating the
-  provided T-SQL definition to PostgreSQL (LANGUAGE plpgsql for procedures/functions).
-  A T-SQL trigger becomes a trigger function plus a CREATE TRIGGER statement — multiple
-  statements are fine; they run in one transaction.
-- Structural mismatch: produce ALTER TABLE statements that align the target table with
-  the source columns. If a starting-point fix is provided, refine it rather than
-  restarting from scratch.
-- A row-count mismatch cannot be fixed by SQL alone: return an empty "sql" and explain
-  that the table's data should be re-copied.
-- Keep the mapped schema and object name exactly as given. Always double-quote mapped
-  schema/object identifiers so mixed-case names remain exact and case-sensitive. The
-  statements run alone in one transaction and must be self-contained.
-- "sql" must contain ONLY executable PostgreSQL statements — never prose, markdown
-  fences, or JSON. Leave it empty ONLY when SQL cannot fix the issue (row-count
-  mismatch); for a missing object a complete statement is always required.
-- The SQL is shown to a human for review before it runs: format it for reading —
-  multi-line, one clause per line, indented bodies — never a single long line. Inside
-  the JSON string, encode line breaks as \\n.
-
-Respond with ONLY a JSON object with these keys, in this order:
-  "analysis": a short diagnosis (2-4 sentences) of the inconsistency and what the SQL does;
-  "sql": the complete Postgres SQL, or "" if SQL cannot fix it.
-Think through "analysis" first, then produce "sql"."""
+def _system_prompt() -> str:
+    return render(__file__, "validation_fix.system.jinja")
 
 
 def _clip(text: str, limit: int = _MAX_SQL_CHARS) -> str:
@@ -260,7 +239,7 @@ def propose_fix(
     endpoint = endpoint or FM_ENDPOINT
     try:
         messages = [
-            ChatMessage(role=ChatMessageRole.SYSTEM, content=_SYSTEM_PROMPT),
+            ChatMessage(role=ChatMessageRole.SYSTEM, content=_system_prompt()),
             ChatMessage(role=ChatMessageRole.USER,
                         content=_build_user_prompt(item, target_schema)),
         ]

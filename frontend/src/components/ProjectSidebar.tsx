@@ -9,7 +9,9 @@ export type ModuleId =
   | "data"
   | "sync"
   | "validation"
-  | "parity";
+  | "parity"
+  | "skill"
+  | "report";
 
 // Ordered migration journey. `step` 0 = the project hub; 1..5 = guided sequence.
 // `group: "post"` marks independent post-migration modules — rendered in their
@@ -23,6 +25,8 @@ export const MODULES: { id: ModuleId; label: string; desc: string; step: number;
   { id: "sync", label: "Create Sync", desc: "Run the migration now in-app, or offload it to a re-runnable (optionally scheduled) Databricks snapshot job.", step: 5 },
   { id: "validation", label: "Validation", desc: "Compare source and Lakebase — object coverage, row counts, structure, and constraints/indexes/foreign keys — then let the AI repair agent resolve inconsistencies, or fix them manually.", step: 0, group: "post" },
   { id: "parity", label: "Query Parity", desc: "Generate synthetic read-only queries, run them against source and Lakebase, and compare row count, result format, and performance.", step: 0, group: "post" },
+  { id: "skill", label: "App Migration Skill", desc: "Download a SKILL.md your AI agent uses to migrate the application that talks to this database — identifier and column changes, call-site changes, T-SQL rewrites, known gaps, and the trade-offs not to undo.", step: 0, group: "post" },
+  { id: "report", label: "Migration Report", desc: "Export the whole audit cycle — assessment, plan, what the run copied, validation and query parity — as one printable HTML/PDF report to hand to the client.", step: 0, group: "post" },
 ];
 
 interface Props {

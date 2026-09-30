@@ -48,6 +48,14 @@ class RunStore(ABC):
     @abstractmethod
     def list(self, kind: str | None = None, limit: int = 50,
              project_id: str | None = None) -> list[RunRecord]: ...
+    @abstractmethod
+    def delete_for_project(self, project_id: str) -> int:
+        """Remove every run belonging to ``project_id``; returns how many.
+
+        ``project_id`` is nullable here and carries no foreign key — the projects
+        table may live in another store entirely — so nothing reclaims these rows on
+        its own. Deleting a project has to say so explicitly or its runs outlive it.
+        """
 
     def notebook_config(self) -> dict | None:
         """Coordinates a Databricks job needs to record its own run state, or None
@@ -86,6 +94,13 @@ class MemoryRunStore(RunStore):
             ]
         records.sort(key=lambda r: r.updated_at, reverse=True)
         return records[:limit]
+
+    def delete_for_project(self, project_id: str) -> int:
+        with self._lock:
+            doomed = [key for key, row in self._rows.items() if row[3] == project_id]
+            for key in doomed:
+                del self._rows[key]
+        return len(doomed)
 
 
 class PostgresRunStore(RunStore):
@@ -227,6 +242,16 @@ class PostgresRunStore(RunStore):
                           project_id=str(r["project_id"]) if r["project_id"] else None)
                 for r in cur.fetchall()
             ]
+
+    def delete_for_project(self, project_id: str) -> int:
+        pid = self._as_uuid(project_id)
+        if pid is None:
+            return 0
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {self._table} WHERE project_id = %s::uuid", (pid,))
+            deleted = cur.rowcount
+            conn.commit()
+        return max(0, deleted)
 
 
 def _runs_endpoint(host: str) -> str:

@@ -51,6 +51,10 @@ class ValidationItem(BaseModel):
     kind: ObjectKind
     source_name: str = ""                # "" for target-only (extra) items
     target_name: str
+    # What the object actually is in the target (procedure|function|view|trigger),
+    # which is not always its source kind: a procedure returning a result set must
+    # be a function. "" when nothing was found.
+    target_kind: str = ""
     status: MatchStatus
     severity: Severity = Severity.INFO
     detail: str = ""

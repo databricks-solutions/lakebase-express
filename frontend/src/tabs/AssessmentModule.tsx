@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { api, type AIAssessment, type AIRisk, type AssessmentReport, type Severity } from "../api";
 import type { MigrationState } from "../App";
 import { ProgressBar } from "../components/Progress";
+import { printReport } from "../reportExport";
 import Sizing from "./Sizing";
 
 interface Props {
@@ -9,11 +10,16 @@ interface Props {
   setState: React.Dispatch<React.SetStateAction<MigrationState>>;
   goConnection: () => void;
   fmEndpoint?: string;
+  projectId: string;
+  /** Flushes the debounced autosave — the export is built from the *saved* project. */
+  onSave: () => Promise<void>;
 }
 
 const SEVERITY_ORDER: Severity[] = ["high", "medium", "low", "info"];
 
-export default function AssessmentModule({ state, setState, goConnection, fmEndpoint }: Props) {
+export default function AssessmentModule({
+  state, setState, goConnection, fmEndpoint, projectId, onSave,
+}: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [assessOpen, setAssessOpen] = useState(true);
@@ -81,7 +87,21 @@ export default function AssessmentModule({ state, setState, goConnection, fmEndp
             </section>
 
             {report && <ReportView report={report} />}
-            {report && <AIAnalysis ai={report.ai_assessment} busy={busy} onRetry={scan} />}
+            {report && (
+              <AIAnalysis
+                ai={report.ai_assessment}
+                busy={busy}
+                onRetry={scan}
+                action={<DownloadAssessment projectId={projectId} onSave={onSave} onError={setError} />}
+              />
+            )}
+            {/* Older reports carry no AI analysis, so that panel never renders — the
+                export would otherwise be unreachable. */}
+            {report && !report.ai_assessment && (
+              <div className="actions">
+                <DownloadAssessment projectId={projectId} onSave={onSave} onError={setError} />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -103,6 +123,49 @@ export default function AssessmentModule({ state, setState, goConnection, fmEndp
         )}
       </div>
     </div>
+  );
+}
+
+/** Icon-only download of the assessment as a PDF, in the idiom of CopyButton.
+ *
+ *  The browser's print dialog is what writes the file — rendering a PDF server-side
+ *  would need a headless browser the Apps container does not carry. */
+function DownloadAssessment({
+  projectId, onSave, onError,
+}: {
+  projectId: string;
+  onSave: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function download() {
+    setBusy(true);
+    try {
+      // The report is rendered from the saved project, so flush the autosave first.
+      await onSave();
+      await printReport(projectId, "assessment");
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const label = busy ? "Preparing the report…" : "Download the assessment report (PDF)";
+  return (
+    <button
+      className="btn btn--sm btn--icon"
+      disabled={busy}
+      onClick={download}
+      title={label}
+      aria-label={label}
+    >
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+           strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M12 3v11" /><path d="m7.5 10.5 4.5 4.5 4.5-4.5" /><path d="M5 20h14" />
+      </svg>
+    </button>
   );
 }
 
@@ -238,7 +301,14 @@ function riskSeverity(s: string): Severity {
   return v === "high" ? "high" : v === "low" ? "low" : v === "info" ? "info" : "medium";
 }
 
-function AIAnalysis({ ai, busy, onRetry }: { ai?: AIAssessment | null; busy: boolean; onRetry: () => void }) {
+function AIAnalysis({ ai, busy, onRetry, action }: {
+  ai?: AIAssessment | null;
+  busy: boolean;
+  onRetry: () => void;
+  /** Sits at the right of this panel — in the footer note, or the head when the
+   *  analysis failed and there is no footer. */
+  action?: ReactNode;
+}) {
   // While the scan+AI call is in flight and we have no prior result, show a thinking state.
   if (busy && !ai) {
     return (
@@ -256,7 +326,10 @@ function AIAnalysis({ ai, busy, onRetry }: { ai?: AIAssessment | null; busy: boo
     <section className="card ai-card">
       <div className="ai-card__head">
         <h3><span className="ai-spark" aria-hidden>✦</span> AI migration analysis</h3>
-        {ai.endpoint && <span className="muted">{ai.endpoint}</span>}
+        <div className="ai-card__meta">
+          {ai.endpoint && <span className="muted">{ai.endpoint}</span>}
+          {!ai.success && action}
+        </div>
       </div>
 
       {!ai.success ? (
@@ -294,10 +367,13 @@ function AIAnalysis({ ai, busy, onRetry }: { ai?: AIAssessment | null; busy: boo
             </>
           )}
 
-          <p className="ai-note">
-            <span aria-hidden>✦</span> AI-generated analysis — review before acting. The readiness score and
-            findings above are deterministic.
-          </p>
+          <div className="ai-note ai-note--row">
+            <span>
+              <span aria-hidden>✦</span> AI-generated analysis — review before acting. The readiness score and
+              findings above are deterministic.
+            </span>
+            {action}
+          </div>
         </>
       )}
     </section>

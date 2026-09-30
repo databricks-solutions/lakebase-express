@@ -74,9 +74,10 @@ databricks secrets put-secret lakebase-express lakebase-password --profile <your
 DATABRICKS_PROFILE=<your-profile> ./deploy.sh
 ```
 
-`deploy.sh` builds `frontend/dist`, runs `databricks bundle deploy`, grants the
-app's service principal `WRITE` on the secret scope, then `databricks bundle run`
-to launch the app. When it finishes it prints the app URL — open it and:
+`deploy.sh` builds `frontend/dist`, renders `app.yaml` from the bundle's resolved
+app config, runs `databricks bundle deploy`, grants the app's service principal
+`WRITE` on the secret scope, then `databricks bundle run` to launch the app. When
+it finishes it prints the app URL — open it and:
 
 1. **New migration** → pick a source connector.
 2. **Connections & Target** — enter the source (Azure SQL / SQL Server) and the
@@ -98,6 +99,14 @@ resume. Passwords are never stored; optional workspace-bound secret scope/key
 references are. Projects persist to a local dir (dev) or a UC volume
 (`LBX_PROJECTS_BACKEND=volume`) or Lakebase (`=postgres`).
 
+Every store falls back rather than fail — projects to the app's own filesystem,
+credentials and run state to process memory — and a Databricks App gets a fresh
+container on each restart, so a deployment that never received
+`LBX_PROJECTS_BACKEND=postgres` loses its projects and looks like a new install.
+The app now says which stores are in use: a line in the startup log
+(`databricks apps logs`), a **Storage** panel under Settings, and a warning on the
+migrations list when anything is held in the process or container only.
+
 Modules are **independent and always enabled** — no forced sequence. Connections
 are configured once and reused; other modules show a soft hint if something is
 missing.
@@ -111,10 +120,122 @@ missing.
 | **Create Sync** | Sync now (in-app) or offload a re-runnable PySpark snapshot to a Databricks Job (run now, create unstarted, or schedule) |
 | **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, column collations, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
 | **Query Parity** *(post-migration)* | Generate N synthetic read-only queries, run each against both sides, and compare row count, result format, and performance — with a side-by-side result preview on any mismatch |
+| **App Migration Skill** *(post-migration)* | Export a drop-in `SKILL.md` describing how the database's contract with *application* code changed, for whoever migrates the app — an engineer or another AI agent |
+| **Migration Report** *(post-migration)* | Export the whole audit cycle — assessment, plan, what the run copied, validation, query parity — as one printable HTML/PDF report to hand to the client (the Assessment module exports the scan on its own) |
 
 Target identifiers are lower-cased by default (PostgreSQL convention); a project
 can instead **preserve source casing** (double-quoted, case-sensitive). System
 objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
+
+### App migration skill
+
+Migrating the database is only half the work: the application that talks to it
+has to move too. `GET /api/projects/{id}/context-skill` renders everything this
+tool learned into a **self-contained `SKILL.md`** — download it from the *App
+Migration Skill* module and drop it into another AI agent's skills directory
+(the module shows the path for Claude Code, Codex, Cursor, or anything else). No
+glue required.
+
+It carries what application code has to follow: the schema and identifier-casing
+rules every call site depends on, the columns whose value semantics changed, the
+columns where Postgres now rejects `LIKE`, how procedure and trigger call sites
+change, the T-SQL rewrite table applied to this database, what did not come
+across, and the deliberate trades a reader must *not* "fix". It deliberately says
+nothing about how to *connect* — how this tool reached Lakebase says nothing about
+how your application should — and carries no coordinates and no secret values, so
+it is safe to commit next to the code it describes.
+
+It is a **delta**, so anything absent round-trips unchanged, and changes are
+**grouped** ("these 45 columns reject `LIKE`") rather than listed per row, so a
+200-table database still produces a skill an agent reads in one pass. Long groups
+are capped and defer to `GET /api/projects/{id}/context-bundle`, the same context
+as JSON for scripts. Both render from stored state alone, so they can be exported
+at any phase and say up front what they cannot yet vouch for.
+
+Everything above is derived deterministically — no model writes it, which is what
+makes it safe to act on. One optional section is the exception: **model notes**
+(`POST /api/projects/{id}/context-notes`) hand each translated procedure, function,
+view and trigger to the configured Foundation Model together with its original
+T-SQL, and ask what changes for the code that *calls* it. That catches what no rule
+can — on a test database it found a function parameter shadowed by a column (so the
+filter silently matched every row) and an `UPDATE` setting a column to itself. The
+section names the endpoint that wrote it, says it is advisory, and says how many
+objects the model actually read. The pass takes minutes, so it runs in the
+background and the UI polls; once a run succeeds both exports carry its result, and
+a failure leaves the deterministic export intact.
+
+The AI migration *analysis* from the Assessment module is deliberately **not**
+included: it is produced before the plan exists, so it warns about risks the
+migration then handled and suggests approaches the migration deliberately rejected
+(citext, deterministic collations). In an artifact whose purpose is to stop a
+downstream agent contradicting those decisions, carrying it would do the opposite.
+
+### Migration report
+
+The audit deliverable: `GET /api/projects/{id}/report` renders the whole cycle —
+assessment, plan, what the run actually copied, validation, query parity — as **one
+self-contained HTML page**, downloadable from the *Migration Report* module. There
+is no external stylesheet, font, or script, so it can be emailed, committed, or
+opened offline years later.
+
+**The PDF is the browser's own print output** (the page carries a *Save as PDF*
+button, and a print stylesheet with A4 page setup, repeating table headers, and
+page breaks that never split a finding in half). Rendering it server-side would mean
+WeasyPrint or wkhtmltopdf — system libraries the Databricks Apps container does not
+carry — for a worse result than the print engine already in the reader's browser.
+
+Sections run in the order the work happened, and **every one is rendered even when
+its phase never ran**, because a missing heading reads as a phase that passed. For
+the same reason a score whose phase never ran prints *Not run* rather than `0`, and
+the report opens with **what it cannot vouch for** — validation not run, row counts
+taken by planner estimate, run history held in memory, and the fact that applying
+the plan is not recorded anywhere, so Validation is the only evidence of what
+reached the target.
+
+**What it deliberately leaves out.** The report is built to be emailed and committed, so
+it is a summary, not a dump of the project row. It carries no password and no secret
+scope/key reference, and no connecting identity — not the source username, not the
+Lakebase role. It carries no SQL: not a source object's T-SQL, not the translated
+PL/pgSQL, not a validation fix, not a generated parity query. Above all it carries **no
+row data**: query parity samples real rows from both databases to compare them, and
+neither the previews nor the differing cells are read — only which *columns* disagreed.
+Database error text is cut to its primary message, because Postgres appends a `DETAIL`
+line to a constraint violation that names the offending key values, or prints the whole
+failing row; the full text stays in the app. What it does carry, by design, is the source
+and target **host and database name** plus the target schema — that is the audit trail of
+what moved where, and it is the one reason to treat the file as internal to the customer
+who owns that infrastructure.
+
+It is derived entirely from what the phases stored: no source or target connection
+is opened and no model is called, so a report costs nothing to produce and is
+reproducible from the project row plus its run history. Rows are counted as they
+landed — a table that failed was copied in one transaction and committed nothing, so
+its progress is not counted, and a run that resumed another is counted once.
+Unlike the app-migration skill, this one *does* carry the AI assessment (labelled
+with the endpoint that wrote it, and as written before the plan existed): the report
+is a record of what each phase produced, not instructions for an agent to follow.
+
+Long enumerations are capped, always report their true size, and say that the project
+itself — not the JSON export, which carries the same caps — holds the rest. A 1.6 MB
+project row with 250 tables and 900 findings renders a 172 KB report.
+`GET /api/projects/{id}/report-data` is the same report as JSON, for machine consumers.
+
+**`?scope=assessment` narrows either route to the source scan alone**, which is what the
+Assessment module's download icon produces — readiness, what was scanned, every finding,
+and the AI analysis, for the stage where there is no plan, no load and nothing compared
+yet. The icon sits at the right of the AI analysis panel's footer and goes straight to
+the print dialog (the report is loaded into an offscreen frame and printed), so the one
+step is *Save as PDF*; the document title becomes the suggested filename. A section outside the scope is `null` rather than empty,
+so "not part of this artifact" cannot read as "nothing found"; the sole section is
+unnumbered, since `1.` implies a sequence; no phase the scope excludes gets a *Not run*
+tile, which would answer a question the artifact never asked; and the caveats are about
+the scan — its age, and that **source row counts come from the source's partition
+statistics rather than `COUNT(*)`, so they are approximate**. It reads no run history, so
+it costs a single project read. Anything else is a 422 rather than a silent full export.
+
+`scripts/preview_report.py` renders a fully-populated example without a workspace or
+a database, for iterating on the print layout (`--serve` seeds it into a throwaway
+store and runs the app).
 
 ### Collations
 
@@ -178,7 +299,8 @@ keeps the column's collation. For an accent-*insensitive* source collation
 ## Architecture
 
 ```
-app.yaml       Databricks Apps runtime config
+databricks.yml Bundle: the app resource, its runtime command and its env
+app.yaml       Apps runtime spec — GENERATED by deploy.sh from databricks.yml
 backend/       FastAPI + all migration logic (framework-free, unit-testable)
 frontend/      React + Vite + TypeScript SPA (built to frontend/dist/)
 tests/         Pure-Python unit tests
@@ -200,6 +322,37 @@ project store is Postgres
 `GET /api/runs`, filterable by `kind` and `project_id`. Each run's `run_id` is a
 `uuid` and carries the `lbx_projects` row it belongs to.
 `LBX_RUNS_BACKEND=memory|postgres` overrides.
+
+Because that per-table state is durable, a **sync run can be resumed instead of
+restarted**. A run whose loader is gone — it failed, or the app restarted mid-load —
+is offered on Create Sync as *Resume last run*; the tables it already loaded are
+marked `skipped` (their row counts carried over) and only the rest are streamed.
+Each table is copied in one transaction, so "already loaded" is exact rather than a
+guess: a table either committed in full or left nothing behind. A run only counts as
+resumable once its loader is gone, which the run's own heartbeat decides — a run
+working through a slow table reports no progress for minutes, and resuming a live one
+would put two loaders on the same `TRUNCATE`.
+
+The foreign keys dropped for the load are persisted with the run, so an interrupted
+one no longer takes the only copy of their definitions with it; the resume restores
+what it left dropped.
+
+**Async (job) runs resume the same way.** The generated loader notebook checkpoints
+each table into its own run-state row as that table settles, and reads that
+checkpoint back before it copies anything: the tables already loaded are kept, only
+the rest are copied, and the foreign keys the interrupted attempt left dropped are
+restored with this run's.
+
+Which run it continues depends on how it was started. **Repair run** (or a task retry)
+re-runs inside the same run, so the notebook reads *its own* row and carries on from
+where the failed attempt stopped — no parameter needed. Continuing a *different* run
+takes the `resume_from` job parameter, which is what *Resume last run* passes in async
+mode; it defaults to empty, so a scheduled refresh — or a plain `Run now` on a fresh
+run, whose row holds no checkpoint yet — is still a full snapshot. A run is offered in
+the app only once its Databricks run is over (the Jobs API is asked) and only when
+resuming would skip work, so it never competes with a live job for the same
+`TRUNCATE`. Resuming stays table-level in both modes: a single table that failed
+restarts from row zero.
 
 Async (Databricks job) migrations are recorded as two kinds, because provisioning
 a job and running one are different events: `async_job` is what a setup produced
@@ -379,9 +532,23 @@ lock is there when you want CI's exact set.
 ## Deploy as a Databricks App
 
 Deployment is an Asset Bundle (`databricks.yml`) orchestrated by `deploy.sh` (see
-the [Quick Start](#quick-start) for the end-to-end steps). It builds the SPA, runs
-`databricks bundle deploy`, grants the app's service principal access to the secret
-scope, then `databricks bundle run` to start the app.
+the [Quick Start](#quick-start) for the end-to-end steps). It builds the SPA,
+renders `app.yaml`, runs `databricks bundle deploy`, grants the app's service
+principal access to the secret scope, then `databricks bundle run` to start the app.
+
+**`app.yaml` is generated, not committed.** The runtime spec — the uvicorn command
+and every `LBX_*` variable — is declared once in `databricks.yml`
+(`resources.apps.*.config`, values from `target.yml`), and `deploy.sh` renders
+`app.yaml` from that resolved config before the deploy. It has to be a real file in
+the deployed source: `bundle deploy` does send the command and env in the deployment
+request, but `databricks apps stop && start` builds a **new deployment from the
+source path** that inherits neither. Tested both ways — with no `app.yaml` the
+restart fails outright (`No command to run and no Python file found`), and with the
+command alone it comes back with no `LBX_*` variable set, silently falling back to
+the ephemeral local stores and losing every project. `app.yaml` is gitignored
+(workspace-specific values) and re-included in the bundle's `sync` block, since
+bundle sync honors `.gitignore`. Keep `app.yaml.sample` as the documented shape;
+never edit `app.yaml` by hand.
 
 **Deploy targets** live in `target.yml`, a per-user file that is **gitignored** so
 no workspace-specific config is committed. Copy `target.yml.sample` to `target.yml`
@@ -494,11 +661,20 @@ most of the codebase, so formatting is not part of the gate either.
 
 - Data-type coercion is light: `bit`→`boolean` is handled; other edge types rely
   on psycopg adapters and surface as a per-table error rather than dropping rows.
+- System-versioned (temporal) source tables copy as plain tables: their `ValidFrom`/
+  `ValidTo` values come across as data — those columns are `HIDDEN`, so the in-app
+  loader names them explicitly and the job's read projects them through an expression
+  (SQL Server keeps the flag even through a subquery) — but Postgres has no system
+  versioning, so history is not maintained on the target.
 - Check constraints, defaults, and filtered-index predicates are translated
   mechanically; anything unrecognized passes through verbatim and fails visibly
   at apply time for review.
-- Run state is in-process memory — fine for a single-user App; use a table/Redis
-  for multi-worker deployments.
+- Run state persists to a Lakebase table only when the project store is Postgres;
+  otherwise it is process memory, and a restart loses the history (and with it the
+  ability to resume).
+- Resume is table-level: a table that failed part-way is re-copied from row zero.
+  An async run can only be resumed if it recorded its checkpoints, which needs the
+  Lakebase run store and a job identity allowed to write to it.
 - **Lakebase auth in lakebase-express is native Postgres roles only** — a role name
   and password over the Postgres wire protocol. Databricks identity auth
   (OAuth/OIDC for users, service principals, or groups) is **not** supported yet,
@@ -596,9 +772,18 @@ cp .vscode/azure_sql.env.sample .vscode/azure_sql.env   # gitignored — fill it
 PYTHONPATH=. python3 scripts/azure_sql_connect.py --env-file .vscode/azure_sql.env
 ```
 
-To step through it in VS Code, use the **Azure SQL probe (env file)** launch
-configuration in `.vscode/launch.json`, which reads `.vscode/azure_sql.env` and
-pins the interpreter that has `pymssql` installed.
+To step through it in VS Code, copy the launch configurations first — the real
+`launch.json` is gitignored, since it holds your own workspace's profile and
+Lakebase coordinates:
+
+```bash
+cp .vscode/launch.json.sample .vscode/launch.json   # gitignored — fill in the <placeholders>
+```
+
+That gives you four configurations: the FastAPI backend under `debugpy`, Chrome
+against the Vite dev server, `pytest` on the current file, and **Azure SQL probe
+(env file)**, which reads `.vscode/azure_sql.env` and pins the interpreter that
+has `pymssql` installed.
 
 ## Roadmap
 
@@ -610,9 +795,9 @@ Not commitments — the gaps we'd close next, in rough priority order.
   inherits SSO/MFA and credential rotation.
 - **More source connectors** — Oracle, PostgreSQL, MySQL. The scanner is
   connector-agnostic; see [Adding a source connector](#adding-a-source-connector).
-- **Multi-user run state.** Run state is in-process memory, so the app is
-  single-user today; persisting it would allow concurrent users and multi-worker
-  deployments.
+- **Mid-table checkpoints.** A resumed run skips whole tables; a single very large
+  table still restarts from row zero. Chunked commits keyed on a sortable primary key
+  would let one table resume mid-copy, at the cost of its all-or-nothing load.
 
 ## How to get help
 

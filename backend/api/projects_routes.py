@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from backend.connectors.credentials import clear_project as clear_project_credentials
 from backend.projects.models import Project, ProjectSummary, SourceConfig
 from backend.projects.store import get_store
+from backend.run_store import get_run_store
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 log = logging.getLogger("lakebase_express.projects")
@@ -83,5 +84,19 @@ def delete_project(project_id: str) -> dict:
             status_code=502,
             detail="Project was not deleted because its stored credentials could not be removed.",
         ) from exc
+    # Runs are cleaned before the project so a failure can still bail out with the
+    # project intact. Unlike credentials this does not abort the delete: run rows carry
+    # no secrets, and refusing to remove a project over leftover history would be the
+    # worse outcome. They are not reclaimed on their own — project_id on the runs table
+    # is nullable and carries no foreign key, because the two stores can be different.
+    try:
+        removed = get_run_store().delete_for_project(project_id)
+        if removed:
+            log.info("Deleted %d run row(s) for project %s", removed, project_id)
+    except Exception:
+        log.warning(
+            "Could not delete run history for project %s — the rows are now orphaned",
+            project_id, exc_info=True,
+        )
     get_store().delete(project_id)
     return {"ok": True}

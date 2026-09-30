@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import CopyButton from "../components/CopyButton";
 import { api, type MatchStatus, type ObjectDiff, type ObjectKind, type RepairState, type RunState, type ValidationItem, type ValidationRunState } from "../api";
 import type { MigrationState } from "../App";
 
@@ -36,6 +37,13 @@ const STATUS_ORDER: MatchStatus[] = ["missing", "mismatch", "extra", "matched"];
 // explanation without having to expand the row.
 const isNoteworthyMatch = (i: ValidationItem) =>
   i.status === "matched" && i.id.startsWith("trigger-fn:") && !!i.detail;
+
+// The object is a different kind in the target than it was in the source — a
+// procedure that returns a result set has to be a function, because a Postgres
+// procedure cannot return one. Shown on the collapsed row, since it changes how
+// every caller invokes it (SELECT * FROM rather than CALL).
+const reshapedKind = (i: ValidationItem): string | null =>
+  i.target_kind && i.target_kind !== i.kind ? i.target_kind : null;
 
 // Constraints, indexes, and foreign keys are compared per table, as a count with
 // a per-object breakdown (backend/validation/models.ObjectDiff) — not one report
@@ -605,6 +613,12 @@ function MatchList({ state, setState, fmEndpoint }: {
         {groups.map(({ kind, items }) => {
           const groupIssues = items.filter((i) => i.status !== "matched").length;
           const open = openGroups[kind] ?? groupIssues > 0;
+          // Objects of this kind that are a different kind in the target, summarised on
+          // the group head so the reshaping is visible without opening the group.
+          const reshapedTargets = items.map(reshapedKind).filter(Boolean) as string[];
+          const reshapedLabel = new Set(reshapedTargets).size === 1
+            ? `${reshapedTargets.length} now ${reshapedTargets[0]}s`
+            : `${reshapedTargets.length} reshaped`;
           return (
             <div key={kind} className="plangroup">
               <button className="plangroup__head" onClick={() => setOpenGroups((g) => ({ ...g, [kind]: !open }))}>
@@ -612,6 +626,14 @@ function MatchList({ state, setState, fmEndpoint }: {
                 <span className="plangroup__title">{KIND_LABEL[kind]}</span>
                 <span className="plangroup__count">{items.length}</span>
                 {groupIssues > 0 && <span className="sbadge sbadge--warn">{groupIssues} issue{groupIssues === 1 ? "" : "s"}</span>}
+                {reshapedTargets.length > 0 && (
+                  <span
+                    className="sbadge sbadge--info"
+                    title="These return a result set, which a Postgres procedure cannot — so they were created as functions. Callers use SELECT * FROM, not CALL."
+                  >
+                    {reshapedLabel}
+                  </span>
+                )}
               </button>
               {open && (
                 <div className="plangroup__items">
@@ -658,11 +680,18 @@ function MatchRow({ item, open, onToggle, state, setState, fmEndpoint }: {
   // Post-data rollups summarise many objects in one row — show the count so the
   // collapsed row already says how much was checked, not just pass/fail.
   const rollup = isRollup(item) ? item : null;
+  const reshaped = reshapedKind(item);
   return (
     <div className={`planrow ${open ? "is-open" : ""}`}>
       <button className="planrow__head" onClick={onToggle}>
         <Caret open={open} />
-        <span className="tag tag--kind">{item.kind}</span>
+        {reshaped ? (
+          <span className="tag tag--reshaped" title={item.detail}>
+            {item.kind} → {reshaped}
+          </span>
+        ) : (
+          <span className="tag tag--kind">{item.kind}</span>
+        )}
         <span className="planrow__name">
           {item.source_name || item.target_name}
           {item.source_name && <span className="trow__target"> → {item.target_name}</span>}
@@ -931,13 +960,6 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
 
 /** Titled code-style pane used by the side-by-side remediation compare. */
 function FixPane({ title, copyText, children }: { title: string; copyText?: string; children: React.ReactNode }) {
-  const [copied, setCopied] = useState(false);
-  function copy() {
-    navigator.clipboard.writeText(copyText!).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }
   return (
     <div className="fixpane">
       <div className="code fixpane__frame">
@@ -945,7 +967,7 @@ function FixPane({ title, copyText, children }: { title: string; copyText?: stri
           <span className="code__lang">{title}</span>
           {copyText && (
             <div className="code__actions">
-              <button className="btn btn--sm" onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+              <CopyButton text={copyText} />
             </div>
           )}
         </div>

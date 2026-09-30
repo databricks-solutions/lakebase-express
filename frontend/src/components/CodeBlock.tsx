@@ -1,4 +1,5 @@
-import { ReactNode, useState } from "react";
+import { ReactNode } from "react";
+import CopyButton from "./CopyButton";
 
 interface Props {
   code: string;
@@ -6,20 +7,13 @@ interface Props {
   filename?: string;
   /** Replaces the download button, for panels where saving a file is not the point. */
   action?: ReactNode;
+  /** Wrap long lines instead of scrolling sideways — for prose, not code. */
+  wrap?: boolean;
 }
 
 /** Read-only code panel with copy + download. No syntax-highlight dep — keeps the
  *  bundle small; the monospace block is enough for review/export. */
-export default function CodeBlock({ code, language, filename, action }: Props) {
-  const [copied, setCopied] = useState(false);
-
-  function copy() {
-    navigator.clipboard.writeText(code).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }
-
+export default function CodeBlock({ code, language, filename, action, wrap }: Props) {
   function download() {
     const blob = new Blob([code], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
@@ -35,20 +29,11 @@ export default function CodeBlock({ code, language, filename, action }: Props) {
       <div className="code__bar">
         <span className="code__lang">{filename ?? language}</span>
         <div className="code__actions">
-          <button className="btn btn--sm btn--icon" onClick={copy}
-                  title={copied ? "Copied" : "Copy"} aria-label={copied ? "Copied" : "Copy"}>
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              {copied
-                ? <path d="M20 6 9 17l-5-5" />
-                : <><rect x="9" y="9" width="11" height="11" rx="2" />
-                    <path d="M5 15V5a2 2 0 0 1 2-2h8" /></>}
-            </svg>
-          </button>
+          <CopyButton text={code} />
           {action ?? <button className="btn btn--sm" onClick={download}>Download</button>}
         </div>
       </div>
-      <pre className="code__body">{code}</pre>
+      <pre className={`code__body${wrap ? " code__body--wrap" : ""}`}>{code}</pre>
     </div>
   );
 }

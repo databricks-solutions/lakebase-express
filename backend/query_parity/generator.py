@@ -11,6 +11,9 @@ Fail-soft like the other AI helpers — returns ``success=False`` with an error
 instead of raising, so the module degrades to "couldn't generate" rather than a
 500. Queries must be strictly read-only; the runner independently guards against
 anything that isn't a ``SELECT``/``WITH`` before executing.
+
+The system prompt is a Jinja template in ``./prompts`` (see backend/prompts.py);
+the schema summary and the requested count are assembled here as the user message.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 from backend.assessment.models import TableInfo
 from backend.config import FM_ENDPOINT
 from backend.fm_params import chat_text, query_chat
+from backend.prompts import render
 from backend.query_parity.models import GenerateQueriesResponse, SyntheticQuery
 from backend.schema_migration.naming import IdentifierCase, map_object, map_schema
 
@@ -37,34 +41,10 @@ _MAX_COLS = 20
 # query_chat clamp to the endpoint's real output window.
 _MAX_OUTPUT_TOKENS = 128000
 
-_SYSTEM_PROMPT = """You are a database migration validation engineer. A database was \
-migrated from Azure SQL / SQL Server (T-SQL) to a Databricks Lakebase (PostgreSQL 15+) \
-target. To confirm the migration preserved query behaviour, you write synthetic, \
-READ-ONLY queries that will be run against BOTH databases and their results compared.
 
-For each query, produce the SAME query intent expressed twice:
-- "source_sql": T-SQL for the ORIGINAL source (uses the source schema/table names given).
-- "target_sql": the equivalent PostgreSQL for the migrated target (uses the MAPPED
-  Postgres schema/table names given).
+def _system_prompt() -> str:
+    return render(__file__, "synthetic_queries.system.jinja")
 
-Rules:
-- Queries MUST be strictly read-only: a single SELECT statement (a leading WITH/CTE is
-  fine). Never write INSERT/UPDATE/DELETE/MERGE/DDL or call procedures.
-- Exercise a VARIETY of behaviour across the batch: simple projections, WHERE filters,
-  aggregations (COUNT/SUM/AVG/GROUP BY), multi-table JOINs, ORDER BY, and window
-  functions where the schema supports them. Prefer queries whose results are
-  deterministic so both sides return identical rows — always add an ORDER BY over a
-  stable key when returning row detail, and a LIMIT/TOP to keep result sets small.
-- Reference only tables and columns from the provided schema. Match column names exactly
-  as given (case-sensitive). Quote mixed-case Postgres identifiers with double quotes.
-- The two dialects must be SEMANTICALLY EQUIVALENT: T-SQL "SELECT TOP 10 ..." becomes
-  PostgreSQL "SELECT ... LIMIT 10"; bracket-quoting [x] becomes double-quoting "x";
-  GETDATE() becomes now(); ISNULL(a,b) becomes COALESCE(a,b); string concat + becomes ||.
-- "source_sql" and "target_sql" must contain ONLY the executable query — no prose,
-  markdown fences, comments, or trailing semicolons required.
-
-Respond with ONLY a JSON object: {"queries": [ ... ]}. Produce exactly the requested
-number of queries."""
 
 _RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -168,7 +148,7 @@ def generate_queries(
         resp = query_chat(
             endpoint,
             messages=[
-                ChatMessage(role=ChatMessageRole.SYSTEM, content=_SYSTEM_PROMPT),
+                ChatMessage(role=ChatMessageRole.SYSTEM, content=_system_prompt()),
                 ChatMessage(role=ChatMessageRole.USER, content=user_prompt),
             ],
             temperature=0.4,  # a little variety across the batch

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ModelBadge from "../components/ModelBadge";
 import { api, type ParityStatus, type QueryComparison, type QueryParityRunState, type SideResult, type SyntheticQuery } from "../api";
 import type { MigrationState } from "../App";
 
@@ -178,14 +179,11 @@ export default function QueryParityModule({ state, setState, goConnection, goAss
               <button className="btn btn--primary parity-gen__go" disabled={genBusy || running} onClick={generate}>
                 {genBusy ? "Generating…" : <><span className="ai-spark" aria-hidden>✦</span> {queries.length ? "Regenerate queries" : "Generate queries"}</>}
               </button>
-              {llm && (
-                <span className="parity-gen__model">
-                  <span className="parity-gen__model-label">Model</span>
-                  <span className="sbadge sbadge--ai" title="The Foundation Model serving endpoint behind query generation — change it in Settings.">
-                    {llm}
-                  </span>
-                </span>
-              )}
+              <ModelBadge
+                endpoint={llm}
+                className="parity-gen__model"
+                title="The Foundation Model serving endpoint behind query generation — change it in Settings."
+              />
             </div>
             {genErr && <div className="banner banner--err">{genErr}</div>}
           </>

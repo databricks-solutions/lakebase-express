@@ -292,6 +292,51 @@ def _rewrite_bit_comparisons(expr: str, bit_columns: frozenset[str]) -> str:
     return _BIT_COMPARISON.sub(_repl, expr)
 
 
+# Postgres has no isjson(); IS JSON is a predicate, so the rewrite has to consume
+# the 0/1 comparison too. Any other use of ISJSON stays verbatim.
+_ISJSON_CALL = re.compile(r"\bisjson\s*\(", re.IGNORECASE)
+
+# Balanced parens, for the reason _BIT_COMPARISON documents.
+_ISJSON_COMPARISON = re.compile(
+    r"\s*(?P<op>=|<>|!=)\s*(?P<open>\(*)\s*(?P<value>[01])\s*(?P<close>\)*)"
+)
+
+# ISJSON(x, ARRAY) -> x IS JSON ARRAY. An unknown kind is left verbatim, not
+# dropped, which would widen what the constraint accepts.
+_ISJSON_KINDS = {"value": "VALUE", "array": "ARRAY", "object": "OBJECT", "scalar": "SCALAR"}
+
+
+def _rewrite_isjson(expr: str) -> str:
+    """Rewrite ``ISJSON(x) = 1`` to Postgres's ``x IS JSON`` predicate."""
+    out = expr
+    pos = 0
+    while True:
+        call = _ISJSON_CALL.search(out, pos)
+        if call is None:
+            return out
+        pos = call.end()
+        close = _matching_paren(out, call.end() - 1)
+        if close is None:
+            return out                       # unbalanced call: leave it verbatim
+        comparison = _ISJSON_COMPARISON.match(out, close + 1)
+        args = _split_top_level(out[call.end():close])
+        kind = _ISJSON_KINDS.get(args[1].strip().lower(), "") if len(args) == 2 else ""
+        if comparison is None or len(args) > 2 or (len(args) == 2 and not kind):
+            continue                         # no faithful equivalent for this form
+        # "= 1" and "<> 0" mean valid; "= 0" and "<> 1" the negation.
+        equality = comparison.group("op") == "="
+        valid = equality == (comparison.group("value") == "1")
+        # Only the literal's own parens; a surplus closer encloses the predicate.
+        depth = min(len(comparison.group("open")), len(comparison.group("close")))
+        kept = comparison.group("close")[depth:]
+        predicate = (
+            f"{args[0].strip()} IS {'' if valid else 'NOT '}JSON"
+            + (f" {kind}" if kind else "")
+        )
+        out = out[:call.start()] + predicate + kept + out[comparison.end():]
+        pos = call.start() + len(predicate) + len(kept)
+
+
 def _translate_time_zones(expr: str) -> str:
     """Rewrite the zone name in any ``AT TIME ZONE 'name'`` clause from its
     Windows (SQL Server) form to the IANA name Postgres requires.
@@ -311,8 +356,9 @@ def map_expression(expr: str, *, columns=None) -> str:
 
     Handles bracket quoting ([Col] -> "Col", case preserved to match the
     scanned column names the tables keep), N'..' literals, the common
-    date/uuid/null functions, and Windows time-zone names in AT TIME ZONE
-    clauses. Unknown constructs pass through verbatim.
+    date/uuid/null functions, ``ISJSON(x) = 1`` (to the IS JSON predicate), and
+    Windows time-zone names in AT TIME ZONE clauses. Unknown constructs pass
+    through verbatim.
 
     ``columns`` is the scanned column list of the table the expression belongs
     to. It is what makes a ``bit`` column's ``= 1`` comparison translatable:
@@ -334,6 +380,8 @@ def map_expression(expr: str, *, columns=None) -> str:
 
     # After the bracket pass, so the column name is already double-quoted.
     out = _rewrite_bit_comparisons(out, _bit_columns(columns))
+    # Consumes its comparison as well as the call (see _rewrite_isjson).
+    out = _rewrite_isjson(out)
 
     for pat, repl in _CALL_REWRITES:
         out = pat.sub(repl, out)
