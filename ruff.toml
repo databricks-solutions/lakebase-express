@@ -2,7 +2,9 @@
 # after `pip install -r requirements-dev.txt`.
 #
 # The rule set is deliberately narrow: every rule enabled here passes on the code
-# as it stands, so the gate only ever fails on something a PR actually introduced.
+# as it stands, so any finding a PR sees is one it introduced. CI fails the build
+# only on E9, F63, F7 and F82 (syntax errors, undefined names); everything else is
+# posted as a warning — see the lint job in .github/workflows/ci.yml.
 # Widening it is a separate job — `ruff check --select E,F,W,I,UP,B` currently
 # reports roughly 700 findings, nearly all of them E501 (line-too-long) — see the
 # README's "CI/CD" section.

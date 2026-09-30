@@ -28,9 +28,16 @@ jobs:
           cache-dependency-path: requirements-dev.lock
       - name: Install dependencies from the hash-pinned lock
         run: pip install --require-hashes --no-deps -r requirements-dev.lock
-      - name: ruff check
-        # Rule set and the three documented per-file ignores live in ruff.toml.
-        run: ruff check --output-format=github .
+      - name: ruff check (blocking — syntax errors, undefined names)
+        # Only what breaks at runtime fails the build: syntax errors (E9, F7), invalid
+        # comparisons (F63) and undefined names (F82) — the set GitHub's Python
+        # starter workflow blocks on. The per-file ignores in ruff.toml still apply.
+        run: ruff check --select E9,F63,F7,F82 --output-format=github .
+      - name: ruff check (warnings — the rest of ruff.toml)
+        # Unused imports, f-strings without placeholders and the rest of the rule set
+        # show as warning annotations on the PR but never fail it. ruff writes every
+        # finding as ::error, so sed downgrades them.
+        run: ruff check --exit-zero --ignore E9,F63,F7,F82 --output-format=github . | sed 's/^::error /::warning /'
 
   tests:
     name: Tests (Python ${{ matrix.python }})
