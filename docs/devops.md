@@ -70,8 +70,9 @@ runs.
 
 One constraint on the runtime pins: keep them to versions Databricks' internal PyPI
 mirror carries as well as PyPI, or the lock cannot be regenerated from a Databricks
-laptop. `fastapi` is pinned at `0.115.9` for exactly that reason — the mirror does
-not serve `0.115.6`-`0.115.8`.
+laptop. The mirror also drops old releases — it stopped serving `fastapi` below
+`0.115.12`, which is why the pin moved from `0.115.9` to `0.141.1` — so when
+`uv pip compile` reports no matching version for a pin that used to lock, bump it.
 
 ### Lint scope
 

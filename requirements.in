@@ -3,7 +3,7 @@
 # it is what the app installs (see "Dependency locks" in docs/devops.md).
 
 # --- Web service ---
-fastapi==0.115.9
+fastapi==0.141.1
 uvicorn[standard]==0.34.0
 pydantic==2.12.5
 python-multipart==0.0.20
