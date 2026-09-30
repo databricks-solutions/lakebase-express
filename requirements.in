@@ -6,7 +6,7 @@
 fastapi==0.141.1
 uvicorn[standard]==0.34.0
 pydantic==2.13.4
-python-multipart==0.0.30
+python-multipart==0.0.32
 
 # --- Databricks ---
 # >=0.81.0 for w.postgres (Lakebase projects/endpoints, OAuth credentials).
@@ -23,7 +23,7 @@ pymssql==2.3.13
 psycopg[binary]==3.2.13
 
 # --- Credential encryption (Fernet) for the Lakebase-backed password store ---
-cryptography==48.0.0
+cryptography==50.0.1
 
 # --- Sizing config ---
 PyYAML==6.0.3
