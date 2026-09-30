@@ -1,6 +1,6 @@
 # Direct runtime dependencies. Edit pins here, never in requirements.txt: that file
 # is generated from this one with every transitive package pinned and hashed, and
-# it is what the app installs (see the README's "Dependency locks").
+# it is what the app installs (see "Dependency locks" in docs/devops.md).
 
 # --- Web service ---
 fastapi==0.115.9

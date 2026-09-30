@@ -6,8 +6,8 @@
 # only on E9, F63, F7 and F82 (syntax errors, undefined names); everything else is
 # posted as a warning — see the lint job in .github/workflows/ci.yml.
 # Widening it is a separate job — `ruff check --select E,F,W,I,UP,B` currently
-# reports roughly 700 findings, nearly all of them E501 (line-too-long) — see the
-# README's "CI/CD" section.
+# reports roughly 700 findings, nearly all of them E501 (line-too-long) — see
+# "Lint scope" in docs/devops.md.
 target-version = "py310"  # the floor the CI matrix and README's Prerequisites claim
 
 [lint]
