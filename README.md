@@ -579,9 +579,9 @@ push to `main`:
 | Job | What it does |
 | --- | --- |
 | Lint | `ruff check` with the rule set in `ruff.toml` |
-| Tests | `pytest tests/` on Python 3.10, 3.11, 3.12 and 3.13, then imports `backend.main:app` — the entrypoint `app.yaml` starts |
+| Tests | `pytest tests/` on Python 3.10, 3.11, 3.12 and 3.13, then imports `backend.main:app` — the entrypoint the app's uvicorn command starts |
 | Frontend | `npm run lockfile:check` (every package must be its own sha512-hashed tarball on registry.npmjs.org — no mirrors, git or other hosts; it runs before `npm ci` because that install's `postinstall` rewrites the lockfile), then `npm ci` and `npm run build` (`tsc -b` + `vite build`), and asserts `frontend/dist/index.html` exists |
-| Deploy config | `.github/scripts/check_bundle_config.py`: the three YAML files parse, `app.yaml` declares a command, every `${var.*}` in `databricks.yml` is declared, every variable without a default appears in `target.yml.sample`, and every package in `requirements.txt` is hash-pinned, matches `requirements-dev.lock` exactly, and agrees with the pins in `requirements.in` |
+| Deploy config | `.github/scripts/check_bundle_config.py`: `databricks.yml` and `target.yml.sample` parse, the app's `config.command` is declared in `databricks.yml` (`deploy.sh` renders `app.yaml` from it), every `${var.*}` in `databricks.yml` is declared, every variable without a default appears in `target.yml.sample`, and every package in `requirements.txt` is hash-pinned, matches `requirements-dev.lock` exactly, and agrees with the pins in `requirements.in` |
 
 Nothing in CI needs a workspace or a secret — `tests/conftest.py` stubs the single
 live lookup, so the suite runs with no Databricks credentials on the runner. Every

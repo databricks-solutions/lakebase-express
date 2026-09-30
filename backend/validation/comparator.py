@@ -27,7 +27,7 @@ from backend.assessment import callable_shape
 from backend.assessment.models import ProgrammableObject, Severity, TableInfo
 from backend.assessment.scanner import scan_objects, scan_tables
 from backend.connectors.lakebase import LakebaseConnection
-from backend.migration.models import KIND_ORDER, ObjectKind
+from backend.migration.models import KIND_ORDER, ObjectKind, PlanItem
 from backend.schema_migration.collation_mapper import column_collation
 from backend.schema_migration.ddl_generator import (
     check_constraint_ddl,

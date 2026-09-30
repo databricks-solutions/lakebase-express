@@ -176,7 +176,7 @@ def test_views_and_triggers_are_untouched_by_the_kind_rule():
 # from EXEC-ing another procedure), and which target objects the migration created as
 # helpers (naming is not stable between translations).
 
-from backend.migration.models import ObjectKind, PlanItem  # noqa: E402
+from backend.migration.models import PlanItem  # noqa: E402
 
 SET_RETURNING = ("CREATE OR REPLACE FUNCTION public.usp_itemreport(p text) "
                  "RETURNS TABLE(a int) LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY "

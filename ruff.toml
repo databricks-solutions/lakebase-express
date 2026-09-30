@@ -18,7 +18,7 @@ select = [
 ]
 
 [lint.per-file-ignores]
-# These three modules all end in the same shape:
+# These modules all end in the same shape:
 #
 #     except Exception as exc:
 #         _set(run_id, lambda s: (..., setattr(s, "error", str(exc))))
@@ -29,6 +29,7 @@ select = [
 # binding is already deleted, so it reports F841 (assigned but never used) plus
 # F821 (undefined name) on code that is correct. Ignored per file rather than
 # silenced with noqa comments, to keep the runtime code untouched.
+"backend/context_bundle/runs.py" = ["F821", "F841"]
 "backend/migration/plan_runs.py" = ["F821", "F841"]
 "backend/query_parity/runner.py" = ["F821", "F841"]
 "backend/validation/runs.py" = ["F821", "F841"]

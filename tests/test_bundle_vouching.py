@@ -261,7 +261,7 @@ def test_every_source_spelling_the_model_has_produced_resolves():
     exact string silently lost both the object type and the digest, leaving the staleness
     check permanently inert."""
     from backend.context_bundle.ai_notes import _resolve, _source_of
-    from backend.migration.models import ObjectKind, PlanItem
+    from backend.migration.models import PlanItem
 
     items = [
         PlanItem(id="procedure:dbo.usp_Report", kind=ObjectKind.PROCEDURE,

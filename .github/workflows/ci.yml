@@ -57,7 +57,7 @@ jobs:
         # No workspace needed: conftest.py stubs the one live lookup, so the suite
         # runs with no Databricks credentials on the runner.
         run: pytest tests/ -q
-      - name: Import the entrypoint app.yaml runs
+      - name: Import the entrypoint the app runs
         # Catches an import-time break that the unit tests could miss but that
         # would fail the app on its first start.
         run: python -c "from backend.main import app; assert app"
@@ -89,7 +89,7 @@ jobs:
         run: test -f dist/index.html
 
   config:
-    name: Deploy config (app.yaml + bundle)
+    name: Deploy config (bundle + locks)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -100,7 +100,7 @@ jobs:
           cache-dependency-path: requirements-dev.lock
       - name: Install dependencies from the hash-pinned lock
         run: pip install --require-hashes --no-deps -r requirements-dev.lock
-      - name: Check app.yaml, databricks.yml and target.yml.sample agree
+      - name: Check databricks.yml, target.yml.sample and the requirements locks agree
         # `databricks bundle validate` resolves the current user against the
         # workspace, so it needs credentials a PR must not have. This covers the
         # part that can be checked locally.

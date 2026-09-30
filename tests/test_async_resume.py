@@ -21,7 +21,6 @@ from backend.api import migration_routes
 from backend.data_migration.etl_generator import generate
 from backend.data_migration.models import (
     DataGenRequest,
-    PostLoadStatement,
     RunStoreTarget,
     TableRef,
 )

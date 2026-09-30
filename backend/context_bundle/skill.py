@@ -446,7 +446,7 @@ def _ai_notes(w, bundle: ContextBundle) -> None:
     w("")
     if ai.stale_dropped:
         plural = "" if ai.stale_dropped == 1 else "s"
-        w(f"> [!NOTE]")
+        w("> [!NOTE]")
         w(f"> {ai.stale_dropped} note{plural} described a translation that has since been "
           "replaced and {} left out — re-run the notes for advice that matches the "
           "objects as they are now.".format("was" if ai.stale_dropped == 1 else "were"))

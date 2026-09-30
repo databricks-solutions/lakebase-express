@@ -644,7 +644,7 @@ def _parity(w, report: MigrationReport, n: str = "") -> None:
         w(f"<tr><td><strong>{_e(row.title or row.id)}</strong>"
           + (f" <span class='pill'>{_e(row.category)}</span>" if row.category else "")
           + (f"<br><span class='muted small'>{_e(row.detail)}</span>" if row.detail else "")
-          + (f"<br><span class='muted small'>differs on "
+          + ("<br><span class='muted small'>differs on "
              + ", ".join(f"<code>{_e(c)}</code>" for c in row.mismatch_columns)
              + "</span>" if row.mismatch_columns else "")
           + (f"<br><span class='muted small'>source error: {_e(row.source_error)}</span>"
