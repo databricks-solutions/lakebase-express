@@ -76,12 +76,13 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Lockfile only pulls from registry.npmjs.org
+        # Before npm ci: its postinstall rewrites mirror URLs in place, so a check
+        # after it would only ever see a clean file. Fails on any package that is not
+        # its own sha512-hashed tarball on the public registry.
+        run: npm run lockfile:check
       - name: npm ci
         run: npm ci
-      - name: Lockfile stays canonical
-        # postinstall rewrites mirror URLs back to registry.npmjs.org; this fails if
-        # a committed lockfile still pins a private mirror.
-        run: npm run lockfile:check
       - name: Type-check and build the SPA
         run: npm run build # tsc -b && vite build
       - name: The app serves frontend/dist — fail if the build produced nothing
