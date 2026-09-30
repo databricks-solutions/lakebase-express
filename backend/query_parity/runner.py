@@ -26,7 +26,6 @@ from backend.query_parity.models import (
     QueryParityRunRequest,
     QueryParityRunState,
     SideResult,
-    SyntheticQuery,
 )
 from backend.run_registry import RunRegistry
 from datetime import datetime, timezone

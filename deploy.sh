@@ -32,8 +32,25 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-# Empty means "use the bundle's own default target".
+# With no BUNDLE_TARGET, take the target target.yml marks `default: true`. The CLI
+# would pick the same one, but the profile below is named after it — leaving it
+# empty makes the CLI fall back to its DEFAULT profile, i.e. some other workspace.
 TARGET="${BUNDLE_TARGET:-}"
+if [[ -z "$TARGET" && -f target.yml ]]; then
+  # ponytail: line-based read of target.yml's sample layout (targets two spaces in,
+  # `default: true` under them); set BUNDLE_TARGET if yours is shaped differently.
+  TARGET="$(python3 -c '
+import re
+name = None
+for line in open("target.yml"):
+    m = re.match(r"  ([A-Za-z0-9_.-]+):\s*(#.*)?$", line)
+    if m:
+        name = m[1]
+    elif name and re.match(r"    default:\s*true\s*(#.*)?$", line):
+        print(name)
+        break
+')"
+fi
 SKIP_BUILD=0
 [[ "${1:-}" == "--skip-build" ]] && SKIP_BUILD=1
 
@@ -51,6 +68,8 @@ BUNDLE_ARGS=()
 db() { local cmd="$1"; shift; databricks bundle "$cmd" ${BUNDLE_ARGS[@]+"${BUNDLE_ARGS[@]}"} "$@"; }
 
 fail() { echo "✗ $*" >&2; exit 1; }
+
+[[ -n "$TARGET" || -n "${DATABRICKS_PROFILE:-}" ]] || fail "No deploy target: mark one target in target.yml \`default: true\`, or set BUNDLE_TARGET / DATABRICKS_PROFILE."
 
 # --- Prerequisites -----------------------------------------------------------
 command -v databricks >/dev/null 2>&1 || fail "databricks CLI not found. Install it and run 'databricks auth login'."

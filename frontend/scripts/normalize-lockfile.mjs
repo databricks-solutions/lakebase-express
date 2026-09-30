@@ -21,7 +21,11 @@
  * before it can be committed. Also runnable directly:
  *
  *   node scripts/normalize-lockfile.mjs           # rewrite in place
- *   node scripts/normalize-lockfile.mjs --check   # report only, exit 1 if dirty
+ *   node scripts/normalize-lockfile.mjs --check   # exit 1 unless every package is on npmjs.org
+ *
+ * --check is stricter than the rewrite, and CI runs it before `npm ci`: that
+ * install runs this postinstall, which would clean the file before a later
+ * check could read it.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -37,6 +41,31 @@ try {
 } catch (err) {
   if (err.code === 'ENOENT') process.exit(0); // no lockfile yet (e.g. --no-package-lock)
   throw err;
+}
+
+if (checkOnly) {
+  // Each package must resolve to exactly the tarball npm writes for its own name
+  // and version on the public registry, with a sha512 hash. That rejects mirror
+  // hosts, git and tarball sources (github.com, codeload, git+ssh:), and an entry
+  // quietly pointed at another package's tarball.
+  const bad = [];
+  let checked = 0;
+  for (const [path, pkg] of Object.entries(JSON.parse(original).packages ?? {})) {
+    if (!path || pkg.inBundle) continue; // the project itself; bundled deps ship inside their parent's tarball
+    checked++;
+    const name = pkg.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    const expected = `${CANONICAL}${name}/-/${name.split('/').pop()}-${pkg.version}.tgz`;
+    if (pkg.resolved !== expected) bad.push(`${path}: resolved ${pkg.resolved ?? '(none)'}, expected ${expected}`);
+    else if (!pkg.integrity?.startsWith('sha512-')) bad.push(`${path}: no sha512 integrity hash`);
+  }
+  if (bad.length) {
+    console.error(`package-lock.json has ${bad.length} package(s) not locked to ${CANONICAL}:`);
+    for (const line of bad) console.error(`  ${line}`);
+    console.error('Mirror URLs: run `npm run lockfile:normalize`. Anything else must come from the public registry.');
+    process.exit(1);
+  }
+  console.log(`package-lock.json: all ${checked} packages resolve to ${CANONICAL} with sha512 integrity`);
+  process.exit(0);
 }
 
 // Only the registry host is replaced, and only in "resolved" values. Tarballs
@@ -65,20 +94,10 @@ const hostsOf = (text) => {
   return found;
 };
 
-if (normalized === original) {
-  if (!checkOnly) process.exit(0);
-  console.log(`package-lock.json is canonical (${[...hostsOf(original).keys()].join(', ') || 'no resolved URLs'})`);
-  process.exit(0);
-}
+if (normalized === original) process.exit(0);
 
 const rewritten = [...hostsOf(original)].filter(([host]) => host !== CANONICAL && !nonRegistry.has(host));
 const summary = rewritten.map(([host, n]) => `${n} from ${host}`).join(', ');
-
-if (checkOnly) {
-  console.error(`package-lock.json pins a non-canonical registry: ${summary}`);
-  console.error('Run `npm run lockfile:normalize` before committing.');
-  process.exit(1);
-}
 
 writeFileSync(lockfile, normalized);
 console.log(`Normalized package-lock.json to ${CANONICAL} (${summary})`);

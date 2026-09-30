@@ -91,9 +91,9 @@ def build_plan(
             )
         if coll.locale_fallback:
             note += (
-                f" The source locale was not recognised, so the ICU root locale is used "
-                f"with the same strength — review the sort order if this collation is "
-                f"language-specific."
+                " The source locale was not recognised, so the ICU root locale is used "
+                "with the same strength — review the sort order if this collation is "
+                "language-specific."
             )
         items.append(
             PlanItem(
