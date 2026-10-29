@@ -1,0 +1,42 @@
+---
+sidebar_position: 4
+title: Adding a source connector
+---
+
+# Adding a source connector
+
+The connector catalog lists every source; only enabled ones can be picked. Enabling a new
+one has a frontend half and a backend half.
+
+## 1. Frontend
+
+In `frontend/src/connectors.ts`, set `enabled: true` on the connector and add its
+connection-form hints. Optionally drop a logo at `frontend/public/logos/<id>.svg`.
+
+## 2. Backend
+
+Register the connector's `source_type` (the same id) in `backend/connectors/factory.py`.
+
+- A **T-SQL-family** source reuses `AzureSqlConnection` — add its id to `_TSQL_SOURCES`.
+- A **different dialect** needs a connector class exposing:
+
+```python
+class MyConnection:
+    database: str
+
+    def query(self, sql: str) -> list[dict]: ...
+    def test_connection(self) -> bool: ...
+```
+
+The scanner only depends on that interface. Classify the driver's transient errors with a
+`transient_reason(exc)` function and wrap calls in `call_with_retry` from
+`backend/retry.py` (see `azure_sql.py`), so a resuming database retries and a bad password
+fails on the first attempt.
+
+## What else a new dialect touches
+
+The interface above is enough to connect and test. A full migration path from a non-T-SQL
+source also needs its catalog queries in the scanner, its type, collation and expression
+mappings in `backend/schema_migration/`, a translation prompt, and the data-load read side
+(the in-app loader and the snapshot notebook's Spark reader). Tests for each mapping belong
+next to the existing ones in `tests/`.

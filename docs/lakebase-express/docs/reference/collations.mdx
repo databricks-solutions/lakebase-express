@@ -1,0 +1,63 @@
+---
+sidebar_position: 4
+title: Collations
+---
+
+# Collations
+
+Column collations are **translated, not dropped**. SQL Server's usual collations are
+case-insensitive (`SQL_Latin1_General_CP1_CI_AS` is the Azure SQL default) while
+PostgreSQL's default is case-sensitive, so ignoring them silently changes results —
+`'ana' = 'ANA'`, sort order, `GROUP BY`, `DISTINCT`, unique indexes — without raising an
+error.
+
+## The mapping
+
+Each source collation becomes an ICU collation, created before the tables that use it, and
+every character column carries a `COLLATE` clause. The comparison strength maps to an ICU
+level and the locale to the closest ICU tag:
+
+| Source suffix | ICU collation | Deterministic |
+|---------------|---------------|---------------|
+| `CS_AS` | `<locale>-u-ks-level3` | yes |
+| `CI_AS` | `<locale>-u-ks-level2` | no |
+| `CS_AI` | `<locale>-u-ks-level1-kc-true` | no |
+| `CI_AI` | `<locale>-u-ks-level1` | no |
+| `_BIN` / `_BIN2` | built-in `"C"` | yes |
+
+An unrecognized locale falls back to the ICU root with the strength kept (and the fallback
+reported); a name that cannot be parsed at all is declined rather than guessed.
+
+## Why nondeterministic
+
+Case- or accent-insensitive collations must be **nondeterministic**. A deterministic "CI"
+collation would fix the sort order but still compare equality byte-wise, leaving
+`'ana' <> 'ANA'`.
+
+The assessment flags every affected column (`COLLATION_INSENSITIVE`) and any CHECK or
+filtered index that pattern-matches one (`COLLATION_PATTERN_MATCH`, which will fail to
+apply). Validation compares each target column's collation and reports drift with a fix.
+
+## Rewriting `LIKE`
+
+PostgreSQL rejects pattern matching on a nondeterministic collation, so **queries that
+`LIKE` those columns must be rewritten**. Put a deterministic collation on the operand and
+use `ILIKE` to keep the case-insensitive result:
+
+```sql
+WHERE email LIKE '%gmail%'                  -- ERROR: not supported for LIKE
+WHERE email COLLATE "C" ILIKE '%gmail%'     -- same rows as the source
+```
+
+Two traps:
+
+- Plain `LIKE` after `COLLATE "C"` is case-**sensitive** — fewer rows than the source.
+- `lower(email) LIKE lower(?)` is rejected too: `lower()`'s result keeps the column's
+  collation.
+
+For an accent-*insensitive* source collation (`…_CI_AI`), `ILIKE` alone still
+under-matches; wrap both sides in `unaccent()` (available on Lakebase with
+`CREATE EXTENSION unaccent`).
+
+The [App Migration Skill](../guide/app_migration_skill.mdx) lists the columns where `LIKE`
+is now rejected, so whoever migrates the application knows which call sites to change.

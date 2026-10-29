@@ -8,6 +8,11 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
+# Docs site (Docusaurus) — dependencies, build output, generated cache
+docs/lakebase-express/node_modules/
+docs/lakebase-express/build/
+docs/lakebase-express/.docusaurus/
+
 # Local env files — NEVER commit (hold DB hosts, logins, passwords).
 .env
 *.env

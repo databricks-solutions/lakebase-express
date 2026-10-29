@@ -1,0 +1,60 @@
+---
+sidebar_position: 8
+title: App Migration Skill
+---
+
+# App Migration Skill
+
+Migrating the database is only half the work: the application that talks to it has to
+move too. The App Migration Skill module renders everything Lakebase Express learned into
+a **self-contained `SKILL.md`** for whoever migrates the application — an engineer or
+another AI agent.
+
+## Using it
+
+1. Download the skill and save it where your agent looks for skills — the module shows the
+   path for Claude Code, Codex, Cursor, or anything else.
+2. Paste the prompt the module gives you into the agent.
+
+No glue code is needed. `GET /api/projects/{id}/context-skill` returns the same file.
+
+## What it carries
+
+What application code has to follow:
+
+- the schema and identifier-casing rules every call site depends on;
+- the columns whose value semantics changed, and the columns where Postgres now rejects
+  `LIKE` (see [Collations](../reference/collations.mdx));
+- how procedure and trigger call sites change;
+- the T-SQL rewrite table applied to this database;
+- what did not come across;
+- the deliberate trade-offs a reader must *not* "fix".
+
+It is a **delta**: anything absent round-trips unchanged. Changes are **grouped** ("these 45
+columns reject `LIKE`") rather than listed per row, so a 200-table database still produces a
+skill an agent reads in one pass. Long groups are capped and defer to
+`GET /api/projects/{id}/context-bundle` — the same context as JSON, for scripts.
+
+It says nothing about how to *connect* and carries no coordinates and no secret values, so
+it is safe to commit next to the code it describes. Both exports render from stored state
+alone, so they can be exported at any phase and say up front what they cannot yet vouch
+for.
+
+## Deterministic, with optional model notes
+
+Everything above is derived deterministically — no model writes it, which is what makes it
+safe to act on. The one exception is optional: **model notes**
+(`POST /api/projects/{id}/context-notes`) hand each translated procedure, function, view
+and trigger to the Foundation Model with its original T-SQL and ask what changes for the
+code that *calls* it. That catches what no rule can — on a test database it found a
+function parameter shadowed by a column (so the filter silently matched every row) and an
+`UPDATE` setting a column to itself.
+
+The notes section names the endpoint that wrote it, says it is advisory, and says how many
+objects the model read. The pass takes minutes, so it runs in the background; once it
+succeeds both exports carry the result, and a failure leaves the deterministic export
+intact.
+
+The Assessment's AI analysis is deliberately **not** included: it is written before the
+plan exists, so it warns about risks the migration then handled and suggests approaches
+the migration deliberately rejected.

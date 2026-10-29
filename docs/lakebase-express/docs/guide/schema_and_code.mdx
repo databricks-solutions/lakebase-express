@@ -1,0 +1,56 @@
+---
+sidebar_position: 4
+title: Schema & Code
+---
+
+# Schema & Code
+
+The Schema & Code module turns the assessment into an **editable migration plan** — the
+exact SQL that will run on Lakebase — and applies it.
+
+## Building the plan
+
+**Generate plan** builds one plan item per object:
+
+- **Table DDL** comes from the deterministic type mapper, with each character column's
+  collation translated to an ICU collation (see [Collations](../reference/collations.mdx)).
+- **Column defaults, CHECK predicates and filtered-index `WHERE` clauses** are translated
+  mechanically. Known constructs are rewritten; anything else is left verbatim so it fails
+  visibly at apply time instead of silently changing meaning.
+- **Procedures, functions, views and triggers** are translated from T-SQL to PL/pgSQL by
+  the Foundation Model, which returns its reasoning and notes alongside the SQL.
+
+Translating every code object takes minutes on a real schema, so the build runs in the
+background and the page shows progress.
+
+## Reviewing it
+
+Items are grouped by kind in dependency order. Each code item shows the original T-SQL
+next to the **editable Postgres SQL**, with the model's reasoning. Search, filter by kind,
+or show only the AI-translated items. Edit any item before applying it.
+
+Translations of a procedure that returns a result set become **functions** (a Postgres
+procedure cannot return one) — callers use `SELECT * FROM`, not `CALL`.
+
+## Two phases
+
+The plan has a **pre-data** and a **post-data** phase:
+
+| Phase | Kinds | Why |
+|-------|-------|-----|
+| Pre-data | schemas, collations, tables, functions, views, procedures | The structure the data loads into |
+| Post-data | constraints, indexes, foreign keys, triggers | Created **after** the load, so the bulk `COPY` pays no per-row index or FK maintenance, and identity sequences sync to `MAX + 1` once rows exist |
+
+Post-data statements are idempotent (`IF NOT EXISTS`, conditional `DO` blocks,
+`CREATE OR REPLACE TRIGGER`), so re-running a migration converges instead of failing on
+objects that already exist.
+
+## Applying
+
+Items apply in dependency order (schema → tables → functions → views → procedures →
+triggers), **each in its own transaction**: a failing item is reported with its database
+error and the rest continue. Fix the SQL in the plan and apply again.
+
+The usual way to apply the plan is from [Create Sync](./data_migration.mdx), which runs the
+pre-data items, loads the data, then runs the post-data items. *Schema & code only* applies
+the whole plan without loading data.

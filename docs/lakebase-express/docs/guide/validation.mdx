@@ -1,0 +1,40 @@
+---
+sidebar_position: 6
+title: Validation
+---
+
+# Validation
+
+Validation is a post-migration module: it re-scans **both sides live** and matches every
+object, independently of how the migration ran.
+
+## What it compares
+
+- **Existence** — every source object is matched to its target name through the
+  project's [naming rules](./index.mdx#naming-on-the-target). Only the schemas the migration
+  maps into are inventoried on the target, so unrelated schemas are never flagged.
+- **Structure** — columns, types and **column collations** (drift is reported with a fix).
+- **Row counts** — exact `COUNT(*)` on both sides; the assessment's partition-stats counts
+  are not trustworthy enough to declare a migration consistent. Very large tables fall back
+  to planner estimates on both sides, compared with a small tolerance and marked as
+  estimated, rather than risk the target's statement timeout.
+- **Constraints, indexes and foreign keys** — one row per table per kind ("5 of 5
+  present"), rather than one row per object; expand a row to see exactly what differs.
+
+Results are grouped as **Matched**, **Missing in target**, **Mismatches** and **Extra in
+target**. Large tables take a while, so the run reports per-table progress.
+
+## Remediation
+
+Three ways to resolve what it finds:
+
+| Option | How it works |
+|--------|--------------|
+| **AI repair agent** | For each open inconsistency, the agent asks the Foundation Model for remediation SQL, applies it, and iterates on any Postgres error until the object is consistent or the attempts run out (*Max fix attempts per run*). Dependency chains resolve across rounds — creating a function can unblock the view that references it. The SQL is applied **without human review**. |
+| **One-shot AI fix** | One model call proposes SQL for one finding; you review it in an editor and apply it explicitly. |
+| **Manual SQL** | Write and apply the fix yourself. |
+
+The agent only converts source objects into the target (missing or mismatched). Row-count
+drift needs a data re-copy, and extra (target-only) objects need an explicit **Remove from
+target** — applying that SQL permanently drops the object from Lakebase. Both are marked
+straight away with a pointer to the right action, at no model cost.

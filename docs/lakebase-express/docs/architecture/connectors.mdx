@@ -1,0 +1,61 @@
+---
+sidebar_position: 3
+title: Connectors
+---
+
+# Connectors
+
+`backend/connectors/` holds the drivers for both ends of a migration and the handling of
+their passwords.
+
+## Source connectors
+
+`factory.py` is the seam for new sources. It maps the catalog's `source_type` (the
+connector id in `frontend/src/connectors.ts`) to a connector instance. A connector
+exposes:
+
+- `database` — the database name;
+- `query(sql) -> list[dict]` — run a catalog query;
+- `test_connection() -> bool`.
+
+The scanner only uses that interface, so it is connector-agnostic. Sources not yet enabled
+raise `ValueError` (the catalog shows them as *Coming soon*).
+
+**Azure SQL and SQL Server** share the T-SQL dialect and driver, so both route to
+`AzureSqlConnection` (`azure_sql.py`). It uses `pymssql` — pure Python with FreeTDS bundled,
+so there is no system ODBC driver to install, and it works inside the Apps container. The
+scan pulls only small catalog result sets; Spark is reserved for the generated snapshot
+notebooks that run on Databricks, which use Spark's `sqlserver` connector.
+
+Adding one is covered in [Adding a source connector](../dev/adding_a_connector.mdx).
+
+## Lakebase target
+
+`lakebase.py` connects to the Lakebase instance over the Postgres wire protocol with
+`psycopg` and a native role (username + password), always over TLS. The engine uses it to
+apply DDL and code and to bulk-load with `COPY`.
+
+The generated **notebooks** authenticate differently: they mint a short-lived Lakebase
+**OAuth** credential from the job's own identity, so no password is embedded. Minting it
+needs the Lakebase endpoint resource path (`projects/<id>/branches/<branch>/endpoints/<endpoint>`),
+which `config.lakebase_endpoint` resolves by matching the host against the workspace's
+Lakebase endpoints (override with `LBX_PROJECTS_PG_ENDPOINT`).
+
+## Credentials
+
+Passwords never live in a project. A connection's password is either:
+
+- **typed** per browser session, or
+- a **secret reference** — `(kind, scope, key, workspace host)` — resolved from a
+  Databricks secret scope at use time (`credentials.py`). Key Vault-backed scopes work on
+  Azure. A secret whose value is a full connection string is parsed (`conn_string.py`) to
+  fill in the coordinates too.
+
+Because the SPA loses a typed password on reload, the backend remembers the last password
+that **worked** for a `(project_id, source_type, host, database, username)` key and falls
+back to it when a request omits one. A wrong password is never cached — callers only store
+it after a successful connection. Scoping by project means two projects pointing at the
+same host never share a password.
+
+Where that cache lives is the credential store — process memory, or Lakebase with
+encryption. See [Persistence](./persistence.mdx#credentials).

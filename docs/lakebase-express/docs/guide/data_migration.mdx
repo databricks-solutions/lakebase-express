@@ -1,0 +1,98 @@
+---
+sidebar_position: 5
+title: 'Data migration: sync and async'
+---
+
+# Data migration: sync and async
+
+Two modules move the data. **Data Migration** selects the tables and load options;
+**Create Sync** runs the load, either in the app (**Sync now**) or as a Databricks Job
+(**Async mode**).
+
+## Select tables & options
+
+- Pick the tables to load (search, *Select all*). Selecting a table without the tables its
+  foreign keys reference shows a warning.
+- **Truncate target before load** — otherwise rows are appended.
+- **Batch size** — rows per `fetchmany`/`COPY` batch.
+
+## Sync now (in-app)
+
+Runs inside the app with live per-table progress. Two scopes:
+
+| Scope | What runs |
+|-------|-----------|
+| **Schema & code only** | The whole plan, pre- and post-data. No data is loaded — load it later with a full run or Async mode. |
+| **Full migration** | The pre-data plan items, then the selected tables are streamed in, then the constraints, indexes, foreign keys and triggers are created. |
+
+How the load works:
+
+- Each table is extracted in batches (`fetchmany`) and bulk-loaded with
+  `COPY … FROM STDIN`, so memory stays bounded on large tables.
+- Foreign keys touching the target tables are captured and dropped up front and restored
+  afterwards; user triggers are disabled during each table's `COPY`, so translated
+  triggers don't fire once per bulk-loaded row.
+- Each table loads in **one transaction**: it either commits in full or leaves nothing.
+- Types the driver can't read (`sql_variant`, `hierarchyid`, spatial) are converted to text
+  on the source. A table that hits a coercion edge fails with the database error — rows are
+  never silently dropped.
+- Transient failures on either side (a resuming serverless database, a dropped connection)
+  retry; real errors fail on the first attempt.
+
+## Async mode (Databricks Job)
+
+For tables too large for the in-app loader, Async mode generates a **PySpark snapshot
+notebook** and provisions a Databricks Job that runs it. The notebook reads each source
+table with Spark's `sqlserver` connector — range-partitioned on the primary key when there
+is one — and streams every partition straight into the plan-created table with `COPY`,
+loading tables concurrently. There is no Delta landing, synced table or CDC: it is a
+one-off full snapshot, re-runnable.
+
+| Option | Effect |
+|--------|--------|
+| **Create job, run later** | Create the job without starting it — open it in the workspace to choose compute (serverless or a cluster), tune it, and *Run now* |
+| **Run once** | Create the job and start a run now, on serverless compute |
+
+The job is persistent either way, so the snapshot can be re-run later from the Jobs UI, or
+put on a schedule there (`POST /api/migration/async/setup` also accepts a `quartz_cron`).
+
+- The app applies the plan's pre-data items itself; the job runs the copy, then the
+  constraints, indexes, foreign keys and triggers in chained tasks — one per object type —
+  each with per-statement progress in its own run output.
+- Source and Lakebase passwords are read from the **runtime secret scope** you pick, never
+  embedded in the notebook; the app creates or updates that scope for you. The notebooks
+  are written to the **workspace folder** you choose.
+- Each project gets its own job and notebook folder (`<workspace folder>/<project id>`).
+  The job is titled `lakebase-express-snapshot · <project name>` and tagged
+  `lbx_project_id` / `lbx_project`; the tag identifies it, so renaming the project retitles
+  the job.
+- The notebooks record their progress in the run history using a short-lived Lakebase
+  OAuth credential. The job's identity needs a Postgres role for that; if it has none,
+  provisioning shows the SQL to run and a **Re-validate permission** button — see
+  [Run-state role](../installation.mdx#run-state-role-lakebase).
+
+## Resuming a failed run
+
+When the project store is Lakebase, run state is durable, so a run can be **resumed
+instead of restarted**:
+
+- **Sync** — a run whose loader is gone (it failed, or the app restarted mid-load) is
+  offered on Create Sync as **Resume last run**. Tables it already loaded are marked
+  `skipped`, their row counts carried over, and only the rest are streamed. Because each
+  table commits atomically, "already loaded" is exact. The foreign keys dropped for the
+  load are stored with the run, so the resume restores any it left dropped.
+- **Async** — the loader notebook checkpoints each table as it settles. A **Repair run**
+  (or task retry) in the Jobs UI continues the same run with no parameter. **Resume last
+  run** in the app continues a different run by passing the `resume_from` job parameter;
+  a scheduled refresh or a plain *Run now* is still a full snapshot.
+
+A run is offered for resume only once it is over — its heartbeat has stopped (sync) or the
+Jobs API says the run ended (async) — so two loaders never compete for the same `TRUNCATE`.
+Resume is table-level: a table that failed part-way restarts from row zero.
+
+## Run history
+
+Every run (data loads, plan builds, validation, repair, query parity) is listed at
+`GET /api/runs`, filterable by `kind` and `project_id`. Async jobs record two kinds:
+`async_job` for a provisioning (`created` or `scheduled`) and `async_run` for each
+execution, with per-task status — a run is only `success` once its **last** task succeeds.

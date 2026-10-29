@@ -1,0 +1,88 @@
+---
+sidebar_position: 2
+title: Configuration
+---
+
+# Configuration
+
+The app is configured through environment variables. Deployed, they come from the bundle:
+`databricks.yml` declares them under `resources.apps.lakebase_express.config.env`, with
+values from bundle variables you set per target in `target.yml`. Locally, export them
+before starting the backend.
+
+Never put a password in either place — passwords come from the secret scope.
+
+## Bundle variables
+
+Set these under `targets.<name>.variables` in `target.yml`.
+
+| Variable | Default | Becomes | Description |
+|----------|---------|---------|-------------|
+| `app_name` | `lakebase-express` | — | Databricks App name (2–30 chars, lowercase alphanumeric and hyphens) |
+| `secret_scope` | `lakebase-express` | `LBX_SECRET_SCOPE` | Secret scope holding the Lakebase password and the credential key |
+| `fm_endpoint` | `databricks-claude-opus-4-8` | `LBX_FM_ENDPOINT` | Default Foundation Model endpoint |
+| `fm_api` | `gateway` | `LBX_FM_API` | API carrying the chat calls (`serving` or `gateway`) |
+| `projects_backend` | `postgres` | `LBX_PROJECTS_BACKEND` | Project store (`local`, `volume` or `postgres`) |
+| `projects_pg_host` | **required** | `LBX_PROJECTS_PG_HOST` | Lakebase host for the app's own state |
+| `projects_pg_user` | **required** | `LBX_PROJECTS_PG_USER` | Lakebase role the stores connect as |
+| `projects_pg_database` | `databricks_postgres` | `LBX_PROJECTS_PG_DATABASE` | Database holding the project, credential and run tables |
+| `projects_pg_secret_key` | `lakebase-password` | `LBX_PROJECTS_PG_SECRET_KEY` | Secret key holding that role's password |
+| `credential_key_secret_key` | `lbx-credential-key` | `LBX_CREDENTIAL_KEY_SECRET_KEY` | Secret key holding the Fernet key that encrypts stored passwords |
+| `egress_probe` | `"false"` | `LBX_EGRESS_PROBE` | Log the app's public egress IP at startup, for firewall allowlisting |
+
+The CI job *Deploy config* checks that every `${var.*}` in `databricks.yml` is declared and
+that every variable without a default appears in `target.yml.sample`.
+
+## Environment variables
+
+### Workspace and models
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABRICKS_CONFIG_PROFILE` | — | Local only: the `~/.databrickscfg` profile, which binds the workspace for the session. Deployed, the app's service principal is used |
+| `LBX_SECRET_SCOPE` | `lakebase-express` | Default secret scope |
+| `LBX_FM_ENDPOINT` | `databricks-claude-opus-4-8` | Default model endpoint; Settings can override it per session |
+| `LBX_FM_API` | `gateway` | `serving` or `gateway`; an unknown value falls back to `gateway` with a warning |
+| `LBX_LOG_LEVEL` | `INFO` | Backend log level (`./run_local.sh --verbose` sets `DEBUG`); an unknown name falls back to `INFO` |
+| `LBX_EGRESS_PROBE` | off | Truthy to log the public egress IP once at startup |
+
+### Project store
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LBX_PROJECTS_BACKEND` | `local` | `local`, `volume` or `postgres` (the bundle sets `postgres`) |
+| `LBX_PROJECTS_DIR` | `~/.lakebase-express/projects` | Directory for `local`, or the UC volume path for `volume` |
+| `LBX_PROJECTS_PG_HOST` | — | Lakebase host (`postgres`) |
+| `LBX_PROJECTS_PG_PORT` | `5432` | Port |
+| `LBX_PROJECTS_PG_DATABASE` | `databricks_postgres` | Database |
+| `LBX_PROJECTS_PG_USER` | — | Role |
+| `LBX_PROJECTS_PG_PASSWORD` | — | The role password directly — for local runs; takes precedence over the secret |
+| `LBX_PROJECTS_PG_SECRET_SCOPE` | `LBX_SECRET_SCOPE` | Scope holding the role password |
+| `LBX_PROJECTS_PG_SECRET_KEY` | `lakebase-password` | Key holding the role password |
+| `LBX_PROJECTS_PG_TABLE` | `lbx_projects` | Project table |
+| `LBX_PROJECTS_PG_ENDPOINT` | resolved | Lakebase endpoint resource path for minting OAuth credentials; normally resolved from the host — set it only when the identity cannot list Lakebase projects |
+
+### Credentials and run state
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LBX_CREDENTIAL_KEY_SECRET_KEY` | `lbx-credential-key` | Secret key holding the Fernet key; generated on first use |
+| `LBX_CREDENTIALS_PG_TABLE` | `lbx_credentials` | Credential table |
+| `LBX_RUNS_BACKEND` | follows the project store | `memory` or `postgres` |
+| `LBX_RUNS_PG_TABLE` | `lbx_runs` | Run-state table |
+
+The credential and run stores reuse the project store's Lakebase connection, so they are
+Lakebase-backed only when `LBX_PROJECTS_BACKEND=postgres` (or, for runs,
+`LBX_RUNS_BACKEND=postgres`). See [Persistence](../architecture/persistence.mdx).
+
+### Developer scripts
+
+`scripts/azure_sql_connect.py` reads `LBX_SRC_HOST`, `LBX_SRC_DATABASE`, `LBX_SRC_USER`,
+`LBX_SRC_PASSWORD` and `LBX_SRC_PORT` (or the same keys from an `--env-file`) — see
+[Troubleshooting](./troubleshooting.mdx#testing-the-source-connection).
+
+## Sizing assumptions
+
+`backend/sizing/pricing.yaml` holds the Lakebase prices and the conversion heuristics
+(DTUs or vCores per CU, autoscale floor and headroom, scale-to-zero timeout per
+environment). Edit it to your region or contract; no code change is needed.

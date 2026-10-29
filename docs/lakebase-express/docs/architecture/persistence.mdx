@@ -1,0 +1,71 @@
+---
+sidebar_position: 4
+title: Persistence
+---
+
+# Persistence
+
+The app keeps three kinds of state. Each has a durable backend and an ephemeral fallback,
+and **every store falls back rather than fails**.
+
+| State | Durable backend | Fallback | Selected by |
+|-------|-----------------|----------|-------------|
+| Projects | `PostgresStore` — one JSONB row per project in `lbx_projects`; or `VolumeStore` — JSON files in a UC volume | `LocalFileStore` — JSON files in `~/.lakebase-express/projects` | `LBX_PROJECTS_BACKEND=postgres\|volume\|local` |
+| Credentials | `PostgresCredentialStore` — Fernet-encrypted rows in `lbx_credentials` | `MemoryCredentialStore` | Follows the project store |
+| Run state | `PostgresRunStore` — one JSONB row per run in `lbx_runs` | `MemoryRunStore` | Follows the project store; `LBX_RUNS_BACKEND=memory\|postgres` overrides |
+
+The bundle deploys with `projects_backend: postgres` by default. All three Lakebase stores
+share one connection (`LBX_PROJECTS_PG_*`), with the role password read from the secret
+scope (`LBX_PROJECTS_PG_SECRET_KEY`, default `lakebase-password`).
+
+:::warning Silent fallback
+
+A Databricks App gets a fresh container on each restart. A deployment that never received
+`LBX_PROJECTS_BACKEND=postgres` keeps projects on the container's disk and run state in
+memory, and loses all of it on the next restart — it looks like a new install. That is why
+`app.yaml` must be rendered by `deploy.sh` (see [Installation](../installation.mdx#why-appyaml-is-generated)).
+
+The app names the stores in use in three places: a line in the startup log
+(`databricks apps logs`), the **Storage** panel under Settings
+(`GET /api/settings/storage`), and a warning on the migrations list when anything is held
+in the process or container only.
+
+:::
+
+## Projects
+
+A project (`backend/projects/models.py`) holds the source and target coordinates, object
+selection, assessment, plan and settings — never a password. The store interface is
+`list / get / save / delete`.
+
+## Credentials
+
+With the Lakebase store, a remembered password is **Fernet-encrypted before it leaves the
+process**; only ciphertext is written. The Fernet key lives in the secret scope
+(`LBX_CREDENTIAL_KEY_SECRET_KEY`, default `lbx-credential-key`), never in the database, so a
+dump of the credentials table alone cannot decrypt anything. The key is generated on first
+use if the scope has none — which is why the app's service principal needs `WRITE` on the
+scope.
+
+## Run state
+
+`RunRegistry` (`backend/run_registry.py`) keeps one registry per run kind — `sync_run`,
+`async_job`, `async_run`, `plan_build`, `validation`, `validation_repair`, `query_parity`,
+`context_notes` — in memory, as the hot path for polling, and **writes through** to the run store:
+
+- reads fall back to the store, so a run owned by another worker, or started before a
+  restart, is still visible;
+- progress ticks fire per `COPY` batch, so writes are throttled — a status change or a
+  terminal state flushes at once, anything else at most every two seconds;
+- each run's `run_id` is a UUID and carries the `lbx_projects` row it belongs to.
+
+Durable run state is what makes [resume](../guide/data_migration.mdx#resuming-a-failed-run)
+possible and gives the history at `GET /api/runs`.
+
+**Async runs write their own rows.** The generated notebooks record each execution from
+inside the job, under an id derived from the Databricks job and run ids
+(`uuid5("lakebase-express/run/<job_id>:<run_id>")`), so every task of one job run updates
+the same row, and a run started from the Jobs UI or by a schedule is recorded too. They
+authenticate with a Lakebase OAuth credential, so the job's identity needs a Postgres role
+([Run-state role](../installation.mdx#run-state-role-lakebase)); the app grants it
+`INSERT`/`UPDATE` on the table when it provisions the job.

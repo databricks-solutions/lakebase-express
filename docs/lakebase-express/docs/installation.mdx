@@ -1,0 +1,217 @@
+---
+sidebar_position: 2
+title: Installation
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Installation
+
+Lakebase Express deploys as a **Databricks App** through a Declarative Automation
+Bundle (`databricks.yml`), orchestrated by `deploy.sh`. To run it on your laptop instead,
+see [Local development](./dev/index.mdx#local-development).
+
+## Prerequisites
+
+- **Databricks CLI** ≥ 0.239, authenticated to your workspace (`databricks auth login`).
+- **Node.js** and **npm** — `deploy.sh` builds the React frontend.
+- **Python** 3.10+ (tested on 3.13) — for local development and tests.
+- A **Databricks workspace** with a **Lakebase** database instance — the migration target,
+  and by default also where the app keeps its own state.
+- A **source database** — Azure SQL or SQL Server — reachable from the app (a firewall
+  rule for the app's egress IP, or a private link).
+- A **Databricks secret scope** holding the Lakebase role password under
+  `lakebase-password`. The app errors on every request without it.
+
+The scan and assessment run without a Databricks workspace; the Foundation Model features
+and the job/async data paths need one, plus [grants on `system.ai`](#foundation-model-access).
+
+## Deploy
+
+```bash
+# 1. Authenticate the CLI (pick any profile name)
+databricks auth login --host <workspace-url> --profile <your-profile>
+
+# 2. Create your deploy target from the sample (target.yml is gitignored)
+cp target.yml.sample target.yml
+#    Then edit target.yml:
+#      * name the target after your CLI profile, so deploy.sh matches them automatically;
+#      * set projects_pg_host / projects_pg_user to your Lakebase instance and role
+#        (required — the app won't start without them).
+
+# 3. Create the secret scope and store the Lakebase role password in it
+databricks secrets create-scope lakebase-express --profile <your-profile>
+databricks secrets put-secret lakebase-express lakebase-password --profile <your-profile>
+
+# 4. Build the SPA, deploy the bundle, grant scope access, and start the app
+DATABRICKS_PROFILE=<your-profile> ./deploy.sh
+```
+
+`deploy.sh` builds `frontend/dist`, renders `app.yaml` from the bundle's resolved app
+config, runs `databricks bundle deploy`, grants the app's service principal `WRITE` on the
+secret scope, checks the scope holds the Lakebase password, then runs
+`databricks bundle run` to start the app. It prints the app URL when it finishes — continue
+with the [User guide](./guide/index.mdx).
+
+### `target.yml`
+
+Deploy targets live in `target.yml`, a per-user file that is **gitignored** so no
+workspace-specific config is committed; `databricks.yml` pulls it in through its
+`include:` list. Auth comes from the CLI profile named after the target (the `deploy.sh`
+default), an explicit `DATABRICKS_PROFILE`, or a `workspace.host` you add to the target.
+
+```yaml
+targets:
+  my-workspace:
+    default: true
+    variables:
+      projects_pg_host: my-instance.database.eastus2.azuredatabricks.net
+      projects_pg_user: my-lakebase-role
+      # secret_scope: lakebase-express
+      # projects_backend: postgres
+      # fm_endpoint: databricks-claude-opus-4-8
+      # fm_api: gateway
+      # egress_probe: "true"
+```
+
+Every variable and its default is listed in [Configuration](./reference/configuration.mdx).
+
+### `deploy.sh` options
+
+| Option | Effect |
+|--------|--------|
+| `--skip-build` | Reuse the existing `frontend/dist` |
+| `BUNDLE_TARGET=<target>` | Pick a target from `target.yml` (default: the one marked `default: true`) |
+| `DATABRICKS_PROFILE=<profile>` | Pin a CLI profile (default: the target name) |
+| `APP_NAME=<name>` | Override the app name |
+| `LBX_SECRET_ACL=READ` | Grant `READ` on the scope instead of `WRITE` |
+| `LBX_SKIP_ACL=1` | Don't touch the scope's ACL |
+
+To deploy to another workspace, add a target to `target.yml` and run
+`BUNDLE_TARGET=<target> ./deploy.sh`.
+
+### Why `app.yaml` is generated
+
+The runtime spec — the uvicorn command and every `LBX_*` variable — is declared once in
+`databricks.yml` (`resources.apps.*.config`), and `deploy.sh` renders `app.yaml` from it.
+It has to be a real file in the deployed source: `bundle deploy` sends the command and env
+in the deployment request, but `databricks apps stop && start` builds a **new deployment
+from the source path** that inherits neither. Without `app.yaml` the restart fails
+(`No command to run and no Python file found`); with the command alone it comes back with
+no `LBX_*` variable set, silently falls back to ephemeral stores and loses every project.
+
+`app.yaml` is gitignored and re-included in the bundle's `sync` block. Keep
+`app.yaml.sample` as the documented shape; never edit `app.yaml` by hand.
+
+## Permissions and access
+
+The app runs as its own **service principal**. Everything below is granted to that
+principal when deployed, or to your own user when running locally.
+
+### Secret scope
+
+`deploy.sh` grants the service principal `WRITE` on the scope (the Fernet key that
+encrypts stored passwords is generated there on first use). Setting the ACL needs
+**MANAGE** on the scope; without it the script prints the command and carries on.
+Async mode also needs to create and write the runtime scope its jobs read from.
+
+### Network access to the source
+
+Give the app a network path to the source database: a firewall rule for its egress IP, or
+a private link. Set `egress_probe: "true"` in `target.yml` to log the app's public egress
+IP at startup (`databricks apps logs <app-name>`), for allowlisting.
+
+### Source database grants
+
+The source login needs read-only grants — nothing ever writes to the source:
+
+```sql
+GRANT CONNECT             TO [<login>];
+GRANT VIEW DEFINITION     TO [<login>];  -- object definitions to translate
+GRANT VIEW DATABASE STATE TO [<login>];  -- row counts
+ALTER ROLE db_datareader ADD MEMBER [<login>];
+```
+
+`scripts/source_grants.sql` applies all of the above (idempotent, one run per database)
+and ends with a verification query.
+
+### Foundation Model access
+
+The AI features need both grants on `system.ai`:
+
+```sql
+GRANT USE SCHEMA ON SCHEMA system.ai TO `<principal>`;
+GRANT EXECUTE    ON SCHEMA system.ai TO `<principal>`;
+```
+
+Verify:
+
+```bash
+databricks serving-endpoints query databricks-claude-opus-4-8 \
+  --json '{"messages":[{"role":"user","content":"ping"}],"max_tokens":16}' \
+  --profile <your-profile>
+```
+
+Which model and which API carry the calls is covered in
+[Foundation Models](./reference/foundation_models.mdx).
+
+### Run-state role (Lakebase)
+
+Async migrations record their progress from inside the generated notebooks over a
+Lakebase **OAuth** credential, which authenticates against a Postgres role. Lakebase
+creates one only for the project owner, so the identity your jobs run as needs one,
+created once per Lakebase branch. The app grants the privileges itself at provisioning;
+only the role has to exist first.
+
+<Tabs>
+<TabItem value="find" label="1. Find the identity" default>
+
+```bash
+databricks apps get <app-name> --profile <your-profile> -o json \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['service_principal_client_id'])"
+```
+
+</TabItem>
+<TabItem value="create" label="2. Create the role">
+
+This must run from a session authenticated as a Databricks identity — `databricks psql`
+gives you one; a native password login does **not**, which is why the app cannot do it for
+you:
+
+```bash
+databricks psql --project <lakebase-project> --profile <your-profile>
+```
+
+```sql
+CREATE EXTENSION IF NOT EXISTS databricks_auth;
+-- 'SERVICE_PRINCIPAL' for a deployed app, 'USER' for your own identity
+SELECT databricks_create_role('<identity>', 'SERVICE_PRINCIPAL');
+```
+
+</TabItem>
+<TabItem value="verify" label="3. Verify">
+
+The new role should appear with `LAKEBASE_OAUTH_V1`:
+
+```bash
+databricks postgres list-roles projects/<project>/branches/<branch> \
+  --profile <your-profile> -o json
+```
+
+</TabItem>
+</Tabs>
+
+Creating roles needs the Lakebase project owner or a member of `databricks_superuser`.
+Skipping this breaks nothing: migrations still run, and provisioning shows the same SQL
+with a **Re-validate permission** button to confirm the fix without provisioning again.
+
+## Check the deployment
+
+- **Settings → Storage** shows which store holds projects, credentials and run state, and
+  whether each survives a restart. The same line is in the startup log, and the migrations
+  list warns when anything is held in the process or container only.
+- **Settings** also shows the bound workspace and the Foundation Model endpoint.
+
+If projects disappear after a restart, the app did not receive
+`LBX_PROJECTS_BACKEND=postgres` — see [Persistence](./architecture/persistence.mdx).

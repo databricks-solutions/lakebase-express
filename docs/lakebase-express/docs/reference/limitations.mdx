@@ -1,0 +1,82 @@
+---
+sidebar_position: 5
+title: Limitations and roadmap
+---
+
+# Limitations and roadmap
+
+## Limitations
+
+- **Light data-type coercion.** `bit` → `boolean` is handled; other edge types rely on
+  psycopg's adapters and surface as a per-table error rather than dropping rows.
+- **Temporal tables copy as plain tables.** For system-versioned source tables the
+  `ValidFrom` / `ValidTo` values come across as data (those columns are `HIDDEN`, so the
+  in-app loader names them explicitly and the job's read projects them through an
+  expression), but Postgres has no system versioning, so history is not maintained on the
+  target.
+- **Mechanical expression translation.** CHECK constraints, defaults and filtered-index
+  predicates are translated mechanically; anything unrecognized passes through verbatim and
+  fails visibly at apply time for review.
+- **Run state needs the Lakebase store.** Run state persists only when the project store is
+  Postgres; otherwise it is process memory, and a restart loses the history and the ability
+  to resume.
+- **Resume is table-level.** A table that failed part-way is re-copied from row zero. An
+  async run can only be resumed if it recorded its checkpoints, which needs the Lakebase run
+  store and a job identity allowed to write to it.
+- **Job and async paths need a workspace.** They also expect the schema plan to have
+  created the target tables. Key Vault-backed runtime scopes work only when the keys
+  already exist (Databricks can't write through to them).
+- **`money` arithmetic differs** even though the type mapping is lossless — see below.
+
+### Lakebase authentication
+
+Lakebase auth in Lakebase Express is **native Postgres roles only** — a role name and
+password over the Postgres wire protocol. Databricks identity auth (OAuth/OIDC for users,
+service principals or groups) is **not** supported yet, so target access isn't governed by
+workspace RBAC and doesn't inherit SSO/MFA or short-lived credentials.
+
+TLS is always required and passwords are never stored in clear text, but a long-lived role
+password is a shared secret you must rotate yourself: use a dedicated least-privilege role,
+and prefer a **private network path** (Private Link / private endpoints) over a public
+endpoint with an IP allowlist.
+
+### `money` and fixed-scale arithmetic
+
+`money` / `smallmoney` map to `numeric(19,4)` / `numeric(10,4)` — lossless: same scale,
+full range, no stored value changes. The **arithmetic** differs. T-SQL `AVG()` over a
+`money` column
+[returns `money`](https://learn.microsoft.com/en-us/sql/t-sql/functions/avg-transact-sql),
+truncating the division to four decimals inside the aggregate; Postgres `avg(numeric)`
+rounds at the end. Same data, same query, one digit apart (for example `254759.0624` vs
+`254759.0625`).
+
+From the Microsoft documentation:
+
+> You can experience rounding errors through truncation, when storing monetary values as
+> **money** and **smallmoney**. Avoid using this data type if your money or currency values
+> are used in calculations. Instead, use the **decimal** data type with at least four
+> decimal places.
+> — [money and smallmoney (Transact-SQL)](https://learn.microsoft.com/en-us/sql/t-sql/data-types/money-and-smallmoney-transact-sql)
+
+Only division is exposed — `SUM`, `COUNT`, `MIN` and `MAX` are exact on both sides. Review
+places where a divided `money` value is written back to a column and feeds later
+calculations, since truncation always biases the same way and accumulates. Converting
+`MONEY` → `DECIMAL(19,4)` on the source before migrating avoids it entirely.
+
+[Query Parity](../guide/query_parity.mdx) reports these as mismatches, correctly. Matching
+counts and sums with a difference confined to the last decimal point to this behavior
+rather than to missing or altered data.
+
+## Roadmap
+
+Not commitments — the gaps we'd close next, in rough priority order.
+
+- **Databricks identity auth for Lakebase (OAuth/OIDC).** Connect as a Databricks user,
+  service principal or group with short-lived tokens instead of a native role password, so
+  target access is governed by workspace identity and inherits SSO/MFA and credential
+  rotation.
+- **More source connectors** — Oracle, PostgreSQL, MySQL. The scanner is
+  connector-agnostic; see [Adding a source connector](../dev/adding_a_connector.mdx).
+- **Mid-table checkpoints.** A resumed run skips whole tables; a single very large table
+  still restarts from row zero. Chunked commits keyed on a sortable primary key would let
+  one table resume mid-copy, at the cost of its all-or-nothing load.

@@ -1,0 +1,53 @@
+---
+sidebar_position: 2
+title: Connections & Target
+---
+
+# Connections & Target
+
+The first module configures both ends of the migration. Every other module reuses them.
+
+## Source
+
+Enter the server host, port, database and login, then **Test source connection**. The
+login needs the read-only [source grants](../installation.mdx#source-database-grants).
+
+## Lakebase target
+
+Enter the Lakebase host, port, database, SSL mode and **role**, then **Test Lakebase
+connection**. Use a Postgres role with create and insert privileges on the target database.
+The **Identifier casing** option (*Preserve source schema and object casing*) switches the
+project from lower-cased to source-cased names — see
+[Naming on the target](./index.mdx#naming-on-the-target).
+
+:::note
+
+Lakebase auth is **native Postgres roles only** today — a role name and password over the
+Postgres wire protocol, always over TLS. Databricks identity auth (OAuth) is on the
+roadmap; see [Limitations](../reference/limitations.mdx#lakebase-authentication).
+
+:::
+
+## Passwords
+
+Each password can be **typed** or taken from a **Databricks secret** (scope and key in the
+bound workspace, including Key Vault-backed scopes on Azure). A secret holding a full
+connection string fills in the coordinates too.
+
+- Password values are **never saved in the project**. Secret mode saves only the
+  workspace/scope/key reference.
+- A typed password that tested successfully is remembered by the backend for that project,
+  so a page reload does not lose it. With the Lakebase project store it is kept
+  **Fernet-encrypted**, with the key in the secret scope — never in clear text. See
+  [Persistence](../architecture/persistence.mdx#credentials).
+
+**Save connection** stores the coordinates and secret references on the project.
+
+## When the test fails
+
+- **Timeouts** usually mean no network path: the source firewall needs the app's egress IP
+  (set `egress_probe: "true"` to log it), or a private link.
+- **Login failures** — check the login and its grants.
+- Reproduce the app's exact connection path from a terminal with
+  `scripts/azure_sql_connect.py` — see
+  [Troubleshooting](../reference/troubleshooting.mdx#testing-the-source-connection).

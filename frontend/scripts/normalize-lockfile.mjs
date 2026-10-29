@@ -22,17 +22,20 @@
  *
  *   node scripts/normalize-lockfile.mjs           # rewrite in place
  *   node scripts/normalize-lockfile.mjs --check   # exit 1 unless every package is on npmjs.org
+ *   node <path>/normalize-lockfile.mjs <dir>      # another package's lockfile (the docs site)
  *
  * --check is stricter than the rewrite, and CI runs it before `npm ci`: that
  * install runs this postinstall, which would clean the file before a later
  * check could read it.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CANONICAL = 'https://registry.npmjs.org/';
-const lockfile = join(dirname(dirname(fileURLToPath(import.meta.url))), 'package-lock.json');
+const dirArg = process.argv.slice(2).find((arg) => !arg.startsWith('--'));
+const packageDir = dirArg ? resolve(dirArg) : dirname(dirname(fileURLToPath(import.meta.url)));
+const lockfile = join(packageDir, 'package-lock.json');
 const checkOnly = process.argv.includes('--check');
 
 let original;

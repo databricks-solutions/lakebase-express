@@ -1,0 +1,8 @@
+{
+  // Editor support only — Docusaurus compiles the site itself.
+  "extends": "@docusaurus/tsconfig",
+  "compilerOptions": {
+    "baseUrl": "."
+  },
+  "exclude": [".docusaurus", "build"]
+}

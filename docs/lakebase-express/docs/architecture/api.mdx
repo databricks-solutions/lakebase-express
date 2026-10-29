@@ -1,0 +1,85 @@
+---
+sidebar_position: 5
+title: REST API
+---
+
+# REST API
+
+The SPA is a client of the same REST API you can call from scripts. Every router lives in
+`backend/api/` and is mounted under `/api`. FastAPI also serves the generated OpenAPI
+schema at `/docs` and `/openapi.json` on a running app (for example
+`http://localhost:8000/docs` locally).
+
+Endpoints that start background work return a `run_id`; poll the matching `status`
+endpoint until the run is terminal (`success`, `failed` or `partial`).
+
+## Projects — `/api/projects`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/projects` | List project summaries, newest first |
+| `POST` | `/api/projects` | Create a project |
+| `GET` / `PUT` / `DELETE` | `/api/projects/{id}` | Read, update or delete one |
+| `GET` | `/api/projects/{id}/report` | The printable [Migration Report](../guide/migration_report.mdx) (HTML); `?scope=assessment` for the scan alone |
+| `GET` | `/api/projects/{id}/report-data` | The same report as JSON |
+| `GET` | `/api/projects/{id}/context-skill` | The [App Migration Skill](../guide/app_migration_skill.mdx) (`SKILL.md`) |
+| `GET` | `/api/projects/{id}/context-bundle` | The same context as JSON |
+| `POST` | `/api/projects/{id}/context-notes` | Start the optional model notes pass |
+| `GET` | `/api/projects/{id}/context-notes/status/{run_id}` | Poll it |
+
+## Assessment and sizing
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/assessment/test-connection` | Test the source connection |
+| `POST` | `/api/assessment/scan` | Scan the source and (by default) run the AI analysis |
+| `POST` | `/api/sizing/estimate` | Lakebase CU, autoscale and cost estimate |
+
+## Schema, plan and data — `/api/migration`, `/api/schema`, `/api/data`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/migration/lakebase/test` | Test the Lakebase connection |
+| `POST` | `/api/migration/plan/start` | Build the plan in the background |
+| `GET` | `/api/migration/plan/status/{run_id}` | Poll it; returns the finished plan |
+| `POST` | `/api/migration/plan` | Synchronous plan build — only for schemas with few code objects (the Apps proxy times out at ~120 s) |
+| `POST` | `/api/migration/apply` | Apply plan items, each in its own transaction |
+| `POST` | `/api/migration/data/start` | Start a sync data load (optionally resuming a run) |
+| `GET` | `/api/migration/data/status/{run_id}` | Poll it |
+| `GET` | `/api/migration/data/resumable` | The project's newest resumable sync run, if any |
+| `POST` | `/api/migration/secrets/ensure` | Create or update the runtime secret scope the snapshot job reads |
+| `POST` | `/api/migration/async/setup` | Provision async mode: run once, create without running, or schedule (`quartz_cron`) |
+| `GET` | `/api/migration/async/resumable` | The project's newest resumable async run, if any |
+| `POST` | `/api/migration/async/run-state-access` | Re-check the job identity's Lakebase role after creating it |
+| `POST` | `/api/migration/job/submit` | Create or reuse the snapshot job and run it now |
+| `POST` | `/api/migration/job/schedule` | Create the snapshot job with an optional schedule |
+| `GET` | `/api/migration/job/status/{run_id}` | Status of a job run |
+| `POST` | `/api/schema/ddl` | Generate table DDL from scanned metadata |
+| `POST` | `/api/schema/translate` | Translate one T-SQL object with the Foundation Model |
+| `POST` | `/api/data/generate` | Generate the PySpark snapshot notebook as text |
+
+## Post-migration
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/validation/start` | Scan both sides and compare them |
+| `GET` | `/api/validation/status/{run_id}` | Poll it |
+| `POST` | `/api/validation/fix` | One-shot AI fix proposal for one inconsistency (fail-soft) |
+| `POST` | `/api/validation/repair/start` | Start the AI repair agent |
+| `GET` | `/api/validation/repair/status/{run_id}` | Poll it |
+| `POST` | `/api/query-parity/generate` | Generate synthetic read-only query pairs |
+| `POST` | `/api/query-parity/run/start` | Run each pair on both sides and compare |
+| `GET` | `/api/query-parity/run/status/{run_id}` | Poll it |
+
+## Runs, settings and workspace
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/runs` | Run history; filter with `kind` and `project_id` |
+| `GET` | `/api/settings/storage` | Which stores are in use and whether each survives a restart |
+| `GET` | `/api/settings/fm-endpoints` | Serving endpoints usable for translation |
+| `GET` | `/api/databricks/status` | The bound workspace and identity |
+| `GET` | `/api/databricks/secret-scopes` | Secret scopes visible to the app (Key Vault-backed ones tagged) |
+| `GET` | `/api/databricks/secret-scopes/{scope}/keys` | Keys in a scope |
+| `GET` | `/api/databricks/secret-scopes/{scope}/keys/{key}/preview` | Inspect a secret so the form can fill connection fields |
+| `GET` | `/api/health` | Liveness |

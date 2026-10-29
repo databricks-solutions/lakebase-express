@@ -1,0 +1,86 @@
+---
+sidebar_position: 1
+title: Motivation
+---
+
+# Motivation
+
+Moving a transactional database to [Databricks Lakebase](https://docs.databricks.com/aws/en/oltp/)
+(managed serverless Postgres) is more than a type-mapping exercise. Schemas carry
+collations whose semantics differ between engines, T-SQL code has to become PL/pgSQL,
+the data has to be copied fast without paying per-row index maintenance, and at the end
+someone has to prove that the target matches the source.
+
+Lakebase Express is a **Databricks App** that walks an engineer through that whole cycle
+from one place, for one database at a time.
+
+## A migration engine, not a code generator
+
+Generating DDL is the easy part. Lakebase Express also **applies** the schema and code to
+Lakebase, **streams** the data in with live per-table progress, and **validates** the
+result — while keeping you in the loop:
+
+- Every artifact is editable before it runs. The migration plan is a list of SQL items
+  you review, change, or drop.
+- Deterministic first, AI where it helps. The scan, type mapping, collation mapping and
+  scalar-expression translation are rule-based. A Foundation Model translates stored
+  procedures, functions, views and triggers, adds a deeper risk analysis to the
+  assessment, and proposes fixes for validation findings — and every one of those
+  outputs is reviewable.
+- Fail visibly. Anything the engine does not recognize passes through verbatim and fails
+  at apply time, in its own transaction, where you can fix it — never silently changing
+  meaning.
+
+## What you get
+
+| Module | What it does |
+|--------|--------------|
+| **Connections & Target** | Configure and test the source and the Lakebase target once; every other module reuses them |
+| **Assessment** | Deterministic scan (schema, data types, T-SQL objects) and a rule-based compatibility report, augmented by an AI migration analysis; maps source capacity to Lakebase CUs and cost |
+| **Schema & Code** | Builds an editable plan — DDL plus AI-translated code — and applies it to Lakebase |
+| **Data Migration** | Selects the tables and the load options |
+| **Create Sync** | Runs the migration in-app with live progress, or offloads a re-runnable PySpark snapshot to a Databricks Job (run it now, or create it to run later) |
+| **Validation** | Re-scans both sides and matches every object — existence, structure, collations, exact row counts, constraints, indexes and foreign keys — then remediates with an AI repair agent, one-shot AI fixes, or manual SQL |
+| **Query Parity** | Generates synthetic read-only queries, runs each on both sides, and compares row count, result format and performance |
+| **App Migration Skill** | Exports a `SKILL.md` describing how the database contract changed, for whoever migrates the application |
+| **Migration Report** | Exports the whole audit cycle as one printable HTML/PDF report |
+
+The [User guide](./guide/index.mdx) covers each module in detail.
+
+## Supported sources
+
+Enabled today: **Azure SQL** and **SQL Server** (they share the T-SQL dialect and
+driver). Oracle, PostgreSQL, MySQL and others appear as *Coming soon* in the connector
+catalog; the scanner is connector-agnostic, see
+[Adding a source connector](./dev/adding_a_connector.mdx).
+
+## Disclaimer
+
+:::warning Not an official Databricks product
+
+This is **not an official Databricks product or service**. It is an independent,
+community/solution accelerator provided **"as is", without any warranty or support
+commitment**, and carries **no SLA**. Databricks is not liable for its use. **You are
+solely responsible** for reviewing every generated artifact, validating the migration
+against your own requirements, testing on non-production data first, securing
+credentials, and verifying the results before relying on them. Migrating databases is
+inherently risky — always keep verified backups of your source and target. See
+[`LICENSE.md`](https://github.com/databricks-solutions/lakebase-express/blob/main/LICENSE.md)
+for the full terms.
+
+:::
+
+:::tip Try it in dev/QA first
+
+Point the app at a non-production source and a throwaway Lakebase target until you've
+seen a full cycle — assessment, plan, apply, data load, validation — succeed on your own
+schema. Plan items execute real DDL against the target and the data load can truncate
+target tables, so a first run belongs somewhere you can drop and recreate.
+
+:::
+
+## Getting help
+
+Databricks support doesn't cover this content. For questions or bugs, open a
+[GitHub issue](https://github.com/databricks-solutions/lakebase-express/issues) and the
+team will help on a best-effort basis.
