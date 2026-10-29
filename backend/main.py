@@ -12,12 +12,13 @@ import logging
 import os
 import pathlib
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import __version__
+from backend import __version__, audit
 from backend.api.assessment_routes import router as assessment_router
+from backend.api.audit_routes import router as audit_router
 from backend.api.data_routes import router as data_router
 from backend.api.context_routes import router as context_router
 from backend.api.databricks_routes import router as databricks_router
@@ -55,6 +56,18 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Lakebase Express", version=__version__, lifespan=lifespan)
 
+
+@app.middleware("http")
+async def bind_actor(request: Request, call_next):
+    """Attribute audit events to the signed-in user the Apps proxy names."""
+    actor = next((request.headers[h] for h in audit.IDENTITY_HEADERS if request.headers.get(h)), None)
+    token = audit.set_actor(actor)
+    try:
+        return await call_next(request)
+    finally:
+        audit.reset_actor(token)
+
+
 # --- API routers (one per migration phase) ---------------------------------------
 app.include_router(assessment_router)
 app.include_router(sizing_router)
@@ -69,6 +82,7 @@ app.include_router(context_router)
 app.include_router(report_router)
 app.include_router(runs_router)
 app.include_router(databricks_router)
+app.include_router(audit_router)
 
 
 @app.get("/api/health")

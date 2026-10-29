@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 import time
 import uuid
 
+from backend import audit
 from backend.connectors.credentials import LAKEBASE_NAMESPACE, remember_effective
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
@@ -80,7 +80,7 @@ def start_run(req: QueryParityRunRequest) -> str:
         QueryParityRunState(run_id=run_id, queries_total=len(req.queries)),
         req.source.project_id,
     )
-    threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
+    audit.spawn(_execute, run_id, req)
     return run_id
 
 

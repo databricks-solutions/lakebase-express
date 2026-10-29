@@ -15,6 +15,7 @@ from backend import storage_status as mod
 from backend.api import settings_routes
 from backend.connectors import credential_store as cred_mod
 from backend.projects import store as projects_mod
+from backend import audit as audit_mod
 from backend import run_store as runs_mod
 
 
@@ -23,15 +24,19 @@ from backend import run_store as runs_mod
 class PostgresStore: ...
 class PostgresCredentialStore: ...
 class PostgresRunStore: ...
+class PostgresAuditStore: ...
 class LocalFileStore: ...
 class MemoryCredentialStore: ...
 class MemoryRunStore: ...
+class MemoryAuditStore: ...
 
 
-def _stores(monkeypatch, projects, credentials, runs) -> list[mod.StoreStatus]:
+def _stores(monkeypatch, projects, credentials, runs,
+            audit=PostgresAuditStore) -> list[mod.StoreStatus]:
     monkeypatch.setattr(projects_mod, "get_store", projects)
     monkeypatch.setattr(cred_mod, "get_credential_store", credentials)
     monkeypatch.setattr(runs_mod, "get_run_store", runs)
+    monkeypatch.setattr(audit_mod, "get_audit_store", audit)
     return mod.storage_status()
 
 
@@ -40,13 +45,14 @@ def _all_lakebase(monkeypatch) -> list[mod.StoreStatus]:
 
 
 def _nothing_durable(monkeypatch) -> list[mod.StoreStatus]:
-    return _stores(monkeypatch, LocalFileStore, MemoryCredentialStore, MemoryRunStore)
+    return _stores(monkeypatch, LocalFileStore, MemoryCredentialStore, MemoryRunStore,
+                   MemoryAuditStore)
 
 
 def test_a_lakebase_backed_app_is_durable(monkeypatch):
     stores = _all_lakebase(monkeypatch)
 
-    assert [s.backend for s in stores] == ["lakebase"] * 3
+    assert [s.backend for s in stores] == ["lakebase"] * 4
     assert all(s.durable for s in stores)
     assert mod.warning(stores) is None
 
@@ -54,7 +60,7 @@ def test_a_lakebase_backed_app_is_durable(monkeypatch):
 def test_the_default_deployment_is_not_durable(monkeypatch):
     stores = _nothing_durable(monkeypatch)
 
-    assert [s.backend for s in stores] == ["local-files", "memory", "memory"]
+    assert [s.backend for s in stores] == ["local-files", "memory", "memory", "memory"]
     assert not any(s.durable for s in stores)
 
 
@@ -76,7 +82,7 @@ def test_a_lakebase_store_reports_where_it_writes(monkeypatch):
     monkeypatch.setenv("LBX_PROJECTS_PG_HOST", "ep-x.database.azuredatabricks.net")
     monkeypatch.setenv("LBX_RUNS_PG_TABLE", "lbx_runs_v2")
 
-    projects, _credentials, runs = _all_lakebase(monkeypatch)
+    projects, _credentials, runs, _audit = _all_lakebase(monkeypatch)
 
     assert "ep-x.database.azuredatabricks.net" in projects.detail
     assert "lbx_projects" in projects.detail
@@ -90,7 +96,7 @@ def _boom():
 def test_an_unreachable_project_store_says_why(monkeypatch):
     """get_store is the one that raises instead of falling back — a missing secret or
     env var must read as a reason, not as an empty app."""
-    projects, _c, _r = _stores(monkeypatch, _boom, MemoryCredentialStore, MemoryRunStore)
+    projects, *_ = _stores(monkeypatch, _boom, MemoryCredentialStore, MemoryRunStore)
 
     assert projects.backend == "unavailable"
     assert projects.durable is False
@@ -112,7 +118,7 @@ def test_an_unreachable_store_is_not_blamed_on_a_missing_env_var(monkeypatch):
 def test_an_unknown_store_class_is_never_assumed_durable(monkeypatch):
     class SomeFutureStore: ...
 
-    projects, _c, _r = _stores(monkeypatch, SomeFutureStore, MemoryCredentialStore, MemoryRunStore)
+    projects, *_ = _stores(monkeypatch, SomeFutureStore, MemoryCredentialStore, MemoryRunStore)
 
     assert projects.durable is False
     assert projects.backend == "SomeFutureStore"
@@ -130,8 +136,10 @@ def test_every_store_class_is_classified():
         VolumeStore as RealVolume,
     )
     from backend.run_store import MemoryRunStore as RealMemoryRuns, PostgresRunStore as RealPgRuns
+    from backend.audit import MemoryAuditStore as RealMemoryAudit, PostgresAuditStore as RealPgAudit
 
-    for cls in (RealPg, RealVolume, RealLocal, RealPgCred, RealMemoryCred, RealPgRuns, RealMemoryRuns):
+    for cls in (RealPg, RealVolume, RealLocal, RealPgCred, RealMemoryCred, RealPgRuns,
+                RealMemoryRuns, RealPgAudit, RealMemoryAudit):
         assert cls.__name__ in mod._BACKENDS, f"{cls.__name__} is not classified"
 
 
@@ -170,7 +178,7 @@ def test_the_endpoint_reports_every_store(client, monkeypatch):
 
     body = client.get("/api/settings/storage").json()
 
-    assert [s["store"] for s in body["stores"]] == ["projects", "credentials", "runs"]
+    assert [s["store"] for s in body["stores"]] == ["projects", "credentials", "runs", "audit"]
     assert body["durable"] is False
     assert "lost" in body["warning"]
 

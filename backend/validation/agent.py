@@ -22,11 +22,11 @@ with no human review, so the two must be edited as a pair.
 from __future__ import annotations
 
 import logging
-import threading
 import uuid
 
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
+from backend import audit
 from backend.config import FM_ENDPOINT
 from backend.connectors.lakebase import LakebaseConnection
 from backend.fm_params import chat_text, query_chat
@@ -83,7 +83,7 @@ def _register(req: ValidationRepairRequest) -> str:
 
 def start_repair(req: ValidationRepairRequest) -> str:
     run_id = _register(req)
-    threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
+    audit.spawn(_execute, run_id, req)
     return run_id
 
 

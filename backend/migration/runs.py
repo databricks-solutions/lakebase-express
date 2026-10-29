@@ -16,6 +16,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
+from backend import audit
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
 from backend.migration.data_loader import capture_and_drop_fks, load_table, restore_fks
@@ -152,7 +153,7 @@ def start_run(req: DataLoadRequest) -> str:
         tables=[_seed(t, req, loaded) for t in req.tables],
     )
     _REGISTRY.create(state, req.project_id)
-    threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
+    audit.spawn(_execute, run_id, req)
     return run_id
 
 

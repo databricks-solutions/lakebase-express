@@ -76,6 +76,7 @@ endpoint until the run is terminal (`success`, `failed` or `partial`).
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/runs` | Run history; filter with `kind` and `project_id` |
+| `GET` | `/api/audit` | Audit trail, newest first; filter with `project_id` and `action` (exact, or a prefix ending in `.`) |
 | `GET` | `/api/settings/storage` | Which stores are in use and whether each survives a restart |
 | `GET` | `/api/settings/fm-endpoints` | Serving endpoints usable for translation |
 | `GET` | `/api/databricks/status` | The bound workspace and identity |

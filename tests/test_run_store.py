@@ -404,9 +404,9 @@ def test_a_late_stale_snapshot_cannot_overwrite_a_finished_run(monkeypatch):
 
     # Take a progress snapshot, then finish the run before that write lands.
     captured: list = []
-    monkeypatch.setattr(reg, "_save", captured.append)
-    reg.update(RUN_ID, lambda s: setattr(s.tables[0], "rows_copied", 10))
-    monkeypatch.undo()
+    with monkeypatch.context() as m:
+        m.setattr(reg, "_save", captured.append)
+        reg.update(RUN_ID, lambda s: setattr(s.tables[0], "rows_copied", 10))
     reg.update(RUN_ID, lambda s: setattr(s, "status", "success"))
 
     # Replaying the stale snapshot is dropped by the version guard.

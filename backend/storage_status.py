@@ -20,16 +20,18 @@ _BACKENDS: dict[str, tuple[str, bool]] = {
     "PostgresStore": ("lakebase", True),
     "PostgresCredentialStore": ("lakebase", True),
     "PostgresRunStore": ("lakebase", True),
+    "PostgresAuditStore": ("lakebase", True),
     "VolumeStore": ("uc-volume", True),
     "LocalFileStore": ("local-files", False),
     "MemoryCredentialStore": ("memory", False),
     "MemoryRunStore": ("memory", False),
+    "MemoryAuditStore": ("memory", False),
 }
 
 
 @dataclass(frozen=True)
 class StoreStatus:
-    store: str            # projects | credentials | runs
+    store: str            # projects | credentials | runs | audit
     backend: str          # lakebase | uc-volume | local-files | memory | unavailable
     durable: bool         # survives an app restart
     detail: str = ""      # where it writes, or why it is unavailable
@@ -45,7 +47,7 @@ def _describe(store: str, factory: Callable[[], object], table_env: str, table: 
     try:
         instance = factory()
     except Exception as exc:
-        # Only the project store raises; the other two fall back to memory themselves.
+        # Only the project store raises; the others fall back to memory themselves.
         return StoreStatus(store=store, backend="unavailable", durable=False, detail=str(exc))
     cls = type(instance).__name__
     backend, durable = _BACKENDS.get(cls, (cls, False))
@@ -59,6 +61,7 @@ def _describe(store: str, factory: Callable[[], object], table_env: str, table: 
 
 
 def storage_status() -> list[StoreStatus]:
+    from backend.audit import get_audit_store
     from backend.connectors.credential_store import get_credential_store
     from backend.projects.store import get_store
     from backend.run_store import get_run_store
@@ -67,6 +70,7 @@ def storage_status() -> list[StoreStatus]:
         _describe("projects", get_store, "LBX_PROJECTS_PG_TABLE", "lbx_projects"),
         _describe("credentials", get_credential_store, "LBX_CREDENTIALS_PG_TABLE", "lbx_credentials"),
         _describe("runs", get_run_store, "LBX_RUNS_PG_TABLE", "lbx_runs"),
+        _describe("audit", get_audit_store, "LBX_AUDIT_PG_TABLE", "lbx_audit"),
     ]
 
 

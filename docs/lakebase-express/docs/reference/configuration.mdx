@@ -62,7 +62,7 @@ that every variable without a default appears in `target.yml.sample`.
 | `LBX_PROJECTS_PG_TABLE` | `lbx_projects` | Project table |
 | `LBX_PROJECTS_PG_ENDPOINT` | resolved | Lakebase endpoint resource path for minting OAuth credentials; normally resolved from the host — set it only when the identity cannot list Lakebase projects |
 
-### Credentials and run state
+### Credentials, run state and audit trail
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -70,10 +70,12 @@ that every variable without a default appears in `target.yml.sample`.
 | `LBX_CREDENTIALS_PG_TABLE` | `lbx_credentials` | Credential table |
 | `LBX_RUNS_BACKEND` | follows the project store | `memory` or `postgres` |
 | `LBX_RUNS_PG_TABLE` | `lbx_runs` | Run-state table |
+| `LBX_AUDIT_BACKEND` | follows the project store | `memory` or `postgres` |
+| `LBX_AUDIT_PG_TABLE` | `lbx_audit` | Audit-trail table |
 
-The credential and run stores reuse the project store's Lakebase connection, so they are
-Lakebase-backed only when `LBX_PROJECTS_BACKEND=postgres` (or, for runs,
-`LBX_RUNS_BACKEND=postgres`). See [Persistence](../architecture/persistence.mdx).
+The credential, run and audit stores reuse the project store's Lakebase connection, so
+they are Lakebase-backed only when `LBX_PROJECTS_BACKEND=postgres` (or, for runs and the
+audit trail, `LBX_RUNS_BACKEND` / `LBX_AUDIT_BACKEND=postgres`). See [Persistence](../architecture/persistence.mdx).
 
 ### Developer scripts
 

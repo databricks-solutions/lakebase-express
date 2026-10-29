@@ -27,6 +27,8 @@ import os
 import threading
 from abc import ABC, abstractmethod
 
+from backend import audit
+
 log = logging.getLogger("lakebase_express.credential_store")
 
 # Secret-scope key that holds the Fernet encryption key for stored credentials.
@@ -131,6 +133,7 @@ def _fernet():
         raw = Fernet.generate_key().decode("utf-8")
         w.secrets.put_secret(scope=scope, key=key, string_value=raw)
         log.info("Generated a new credential-encryption key in scope %s (key %s)", scope, key)
+        audit.record("credential.key_created", target=f"{scope}/{key}")
     return Fernet(raw.encode("utf-8"))
 
 

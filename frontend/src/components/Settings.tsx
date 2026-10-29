@@ -12,6 +12,7 @@ const STORE_LABEL: Record<string, string> = {
   projects: "Migration projects",
   credentials: "Connection credentials",
   runs: "Run state & history",
+  audit: "Audit trail",
 };
 
 export default function Settings({ fmEndpoint, setFmEndpoint, workspace, storage }: Props) {
