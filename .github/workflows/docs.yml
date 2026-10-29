@@ -56,7 +56,10 @@ jobs:
     name: Deploy to GitHub Pages
     if: github.event_name != 'pull_request'
     needs: build
-    runs-on: ubuntu-latest
+    # The org's IP allow list rejects the Pages API from GitHub-hosted runners.
+    runs-on:
+      group: databricks-solutions-protected-runner-group
+      labels: linux-ubuntu-latest
     permissions:
       pages: write # publish the site
       id-token: write # prove the deployment comes from this workflow
