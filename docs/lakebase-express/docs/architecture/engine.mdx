@@ -53,7 +53,7 @@ kinds (`POST_DATA_KINDS`).
 | `expr_mapper.py` | Deterministic translation of defaults, CHECK predicates and filtered-index predicates; unknown constructs pass through verbatim |
 | `windows_timezones.py` | Windows time-zone names → IANA (generated from CLDR; regenerate rather than hand-edit) |
 | `naming.py` | Source → target name mapping (`dbo` → `public`, lower-casing or preserved casing) |
-| `ai_translator.py` | T-SQL → PL/pgSQL through the Foundation Model, with structured output `{reasoning, translated, notes}` and a defensive parse |
+| `ai_translator.py` | T-SQL → PL/pgSQL through the Foundation Model, with structured output `{reasoning, translated, notes}`, a defensive parse, deterministic validation with one corrective retry, and a bare-SQL multi-pass fallback for replies past the output window |
 | `trigger_sql.py`, `routine_sql.py` | Deterministic fix-ups applied **where SQL is applied** (the executor and the async notebook), so a plan built earlier or edited by hand still applies cleanly: strip a schema-qualified trigger name, upgrade to `CREATE OR REPLACE TRIGGER`, drop a stale routine of the opposite kind when a procedure becomes a function |
 
 ## Apply and load — `backend/migration/`
