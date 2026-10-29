@@ -14,6 +14,7 @@ from typing import Callable, Generic, TypeVar
 
 from pydantic import BaseModel
 
+from backend import audit
 from backend.run_store import RunRecord, RunStore, get_run_store
 
 log = logging.getLogger("lakebase_express.run_registry")
@@ -21,6 +22,8 @@ log = logging.getLogger("lakebase_express.run_registry")
 S = TypeVar("S", bound=BaseModel)
 
 _TERMINAL = frozenset({"success", "failed", "partial"})
+# Audited as finished; gave_up ends a validation repair.
+_FINISHED = _TERMINAL | {"gave_up"}
 _FLUSH_SECONDS = 2.0
 
 
@@ -54,6 +57,8 @@ class RunRegistry(Generic[S]):
             self._project[run_id] = project_id or None
             self._version[run_id] = version = self._version.get(run_id, 0) + 1
         self._persist(state.model_copy(deep=True), version)
+        audit.record("run.started", project_id=project_id, target=run_id, kind=self._kind,
+                     status=getattr(state, "status", None))
 
     def get(self, run_id: str) -> S | None:
         with self._lock:
@@ -82,8 +87,12 @@ class RunRegistry(Generic[S]):
             self._flushed[run_id] = now
             self._version[run_id] = version = self._version.get(run_id, 0) + 1
             snapshot = state.model_copy(deep=True)
+            project_id = self._project.get(run_id)
         # Outside the lock: a store write must not block pollers.
         self._persist(snapshot, version)
+        if after != before and after in _FINISHED:
+            audit.record("run.finished", project_id=project_id, target=run_id,
+                         outcome=after, kind=self._kind)
 
     def list(self, limit: int = 50, project_id: str | None = None) -> list[RunRecord]:
         try:

@@ -6,9 +6,9 @@ updates a state the API polls, persisted through backend/run_registry.py.
 from __future__ import annotations
 
 import logging
-import threading
 import uuid
 
+from backend import audit
 from backend.connectors.credentials import LAKEBASE_NAMESPACE, remember_effective
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
@@ -30,7 +30,7 @@ def get_run(run_id: str) -> ValidationRunState | None:
 def start_run(req: ValidationRunRequest) -> str:
     run_id = str(uuid.uuid4())
     _REGISTRY.create(ValidationRunState(run_id=run_id), req.source.project_id)
-    threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
+    audit.spawn(_execute, run_id, req)
     return run_id
 
 

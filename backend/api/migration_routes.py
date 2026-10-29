@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend import audit
 from backend.assessment.models import ConnectionRequest
 from backend.connectors.credentials import (
     LAKEBASE_NAMESPACE,
@@ -126,17 +127,27 @@ def plan_status(run_id: str) -> PlanRunState:
 @router.post("/apply", response_model=ApplyResponse)
 def apply(req: ApplyRequest) -> ApplyResponse:
     lakebase = with_lakebase_password(req.lakebase)
+    target = f"{lakebase.host}/{lakebase.database}"
     conn = LakebaseConnection(**lakebase.conn_kwargs())
-    results = apply_plan(conn, req.items, req.stop_on_error)
+    try:
+        results = apply_plan(conn, req.items, req.stop_on_error)
+    except Exception as exc:
+        audit.record("schema.applied", project_id=lakebase.project_id, target=target,
+                     outcome="failed", items=len(req.items), error=str(exc))
+        raise
     # apply_plan connects before applying, so returning at all means the
     # credentials authenticated — keep them for the session.
     _remember_lakebase(lakebase)
-    return ApplyResponse(
+    response = ApplyResponse(
         results=results,
         success=sum(r.status is ItemStatus.SUCCESS for r in results),
         failed=sum(r.status is ItemStatus.FAILED for r in results),
         skipped=sum(r.status is ItemStatus.SKIPPED for r in results),
     )
+    audit.record("schema.applied", project_id=lakebase.project_id, target=target,
+                 outcome="failed" if response.failed else "ok", items=len(req.items),
+                 succeeded=response.success, failed=response.failed, skipped=response.skipped)
+    return response
 
 
 # --- Data load (in-app) ----------------------------------------------------------
@@ -250,19 +261,30 @@ def submit_job(req: OffloadRequest) -> dict:
     """Create/reuse the persistent snapshot job and run it now (re-runnable later
     from the Jobs UI)."""
     try:
-        return job_offload.create_job_and_run(req.spec, req.workspace_dir)
+        result = job_offload.create_job_and_run(req.spec, req.workspace_dir)
     except Exception as exc:
         log.exception("Job offload failed")
+        audit.record("job.submitted", project_id=req.spec.project_id, outcome="failed",
+                     error=str(exc))
         raise HTTPException(status_code=502, detail=f"Job submit failed: {exc}") from exc
+    audit.record("job.submitted", project_id=req.spec.project_id,
+                 target=str(result.get("job_id") or ""), job_run_id=result.get("run_id"))
+    return result
 
 
 @router.post("/job/schedule")
 def schedule_job(req: ScheduleJobRequest) -> dict:
     try:
-        return job_offload.create_scheduled_job(req.spec, req.workspace_dir, req.quartz_cron, req.timezone)
+        result = job_offload.create_scheduled_job(req.spec, req.workspace_dir, req.quartz_cron, req.timezone)
     except Exception as exc:
         log.exception("Job schedule failed")
+        audit.record("job.scheduled", project_id=req.spec.project_id, outcome="failed",
+                     quartz_cron=req.quartz_cron, error=str(exc))
         raise HTTPException(status_code=502, detail=f"Schedule failed: {exc}") from exc
+    audit.record("job.scheduled", project_id=req.spec.project_id,
+                 target=str(result.get("job_id") or ""), quartz_cron=req.quartz_cron,
+                 timezone=req.timezone)
+    return result
 
 
 # --- Secret scope (feeds the generated snapshot job) -----------------------------
@@ -306,11 +328,19 @@ def ensure_secrets(req: EnsureSecretsRequest) -> dict:
         )
         if pw:
             secrets[req.lakebase_key] = pw
+    project_id = (req.source and req.source.project_id) or (req.lakebase and req.lakebase.project_id)
+    # Key names only: the values are the passwords.
+    keys = sorted(k for k, v in secrets.items() if v)
     try:
-        return secret_setup.ensure_secret_scope(req.scope, secrets)
+        result = secret_setup.ensure_secret_scope(req.scope, secrets)
     except Exception as exc:
         log.exception("Secret scope setup failed")
+        audit.record("secrets.written", project_id=project_id, target=req.scope,
+                     outcome="failed", keys=keys, error=str(exc))
         raise HTTPException(status_code=502, detail=f"Secret setup failed: {exc}") from exc
+    audit.record("secrets.written", project_id=project_id, target=req.scope,
+                 keys=result.get("keys", keys), scope_created=result.get("created"))
+    return result
 
 
 # --- Async mode (PySpark snapshot) -----------------------------------------------

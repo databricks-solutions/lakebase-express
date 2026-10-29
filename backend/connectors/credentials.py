@@ -25,6 +25,7 @@ import base64
 import logging
 import os
 
+from backend import audit
 from backend.assessment.models import SecretRef
 from backend.connectors.conn_string import ParsedSecret, parse_secret_value
 from backend.connectors.credential_store import (
@@ -48,15 +49,30 @@ def _key(source_type: str, host: str, database: str, username: str, project_id: 
             database.strip(), username.strip())
 
 
+def _audit(action: str, key: CredKey, outcome: str = "ok", **detail) -> None:
+    """Names the connection and how its secret was handled — never the secret."""
+    project_id, namespace, host, database, username = key
+    audit.record(action, project_id=project_id, outcome=outcome,
+                 target=f"{namespace}:{username}@{host}/{database}", **detail)
+
+
+def _ref_detail(ref: SecretRef) -> str:
+    return f"{ref.kind}:{ref.scope}/{ref.key}"
+
+
 def remember_password(source_type: str, host: str, database: str, username: str, password: str,
                       project_id: str = "") -> None:
     """Cache a password that just authenticated successfully. Empty values are ignored."""
     if not password:
         return
+    key = _key(source_type, host, database, username, project_id)
     try:
-        get_credential_store().remember(_key(source_type, host, database, username, project_id), password)
+        get_credential_store().remember(key, password)
     except Exception as exc:  # persistence must never break the request path
         log.warning("Could not persist credential: %s", exc)
+        _audit("credential.stored", key, outcome="failed", kind="password")
+        return
+    _audit("credential.stored", key, kind="password")
 
 
 def resolve_password(source_type: str, host: str, database: str, username: str,
@@ -146,13 +162,14 @@ def remember_secret_ref(source_type: str, host: str, database: str, username: st
                         ref: SecretRef, project_id: str = "") -> None:
     """Persist the secret-manager pointer for this connection (not its value), so a
     resumed session or redeployed App re-resolves it without re-entry."""
+    key = _key(source_type, host, database, username, project_id)
     try:
-        get_credential_store().remember_ref(
-            _key(source_type, host, database, username, project_id),
-            (ref.kind, ref.scope, ref.key, ref.workspace_host),
-        )
+        get_credential_store().remember_ref(key, (ref.kind, ref.scope, ref.key, ref.workspace_host))
     except Exception as exc:  # persistence must never break the request path
         log.warning("Could not persist secret reference: %s", exc)
+        _audit("credential.stored", key, outcome="failed", kind="secret_ref", ref=_ref_detail(ref))
+        return
+    _audit("credential.stored", key, kind="secret_ref", ref=_ref_detail(ref))
 
 
 def resolve_stored_secret_ref(source_type: str, host: str, database: str, username: str,
@@ -188,12 +205,23 @@ def resolve_effective_password(
     """
     if typed_password:
         return typed_password, None
+    key = _key(source_type, host, database, username, project_id)
     if secret_ref is not None:
-        return resolve_secret_ref(secret_ref), secret_ref
+        password = resolve_secret_ref(secret_ref)
+        _audit("credential.read", key, outcome="ok" if password else "failed",
+               via="secret_ref", ref=_ref_detail(secret_ref))
+        return password, secret_ref
     stored_ref = resolve_stored_secret_ref(source_type, host, database, username, project_id)
     if stored_ref is not None:
-        return resolve_secret_ref(stored_ref), stored_ref
-    return resolve_password(source_type, host, database, username, project_id), None
+        password = resolve_secret_ref(stored_ref)
+        _audit("credential.read", key, outcome="ok" if password else "failed",
+               via="stored_secret_ref", ref=_ref_detail(stored_ref))
+        return password, stored_ref
+    password = resolve_password(source_type, host, database, username, project_id)
+    if password:
+        # A miss read nothing, so only a hit is an access.
+        _audit("credential.read", key, via="stored_password")
+    return password, None
 
 
 def remember_effective(
@@ -228,3 +256,4 @@ def clear_project(project_id: str) -> None:
     ):
         raise RuntimeError("Postgres credential store is unavailable")
     store.clear_project(project_id)
+    audit.record("credential.cleared", project_id=project_id, target=project_id)

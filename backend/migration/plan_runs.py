@@ -12,9 +12,9 @@ backend/run_registry.py.
 from __future__ import annotations
 
 import logging
-import threading
 import uuid
 
+from backend import audit
 from backend.migration.models import BuildPlanRequest, PlanRunState
 from backend.migration.planner import build_plan
 from backend.run_registry import RunRegistry
@@ -36,7 +36,7 @@ def start_run(req: BuildPlanRequest) -> str:
         objects_total=len(req.programmable_objects) if req.translate else 0,
     )
     _REGISTRY.create(state, req.project_id)
-    threading.Thread(target=_execute, args=(run_id, req), daemon=True).start()
+    audit.spawn(_execute, run_id, req)
     return run_id
 
 

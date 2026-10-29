@@ -14,9 +14,9 @@ again, and nothing has to be written onto the project row.
 from __future__ import annotations
 
 import logging
-import threading
 import uuid
 
+from backend import audit
 from backend.context_bundle.ai_notes import code_items, generate_ai_notes
 from backend.context_bundle.models import AiNotes, AiNotesRunState
 from backend.projects.models import Project
@@ -43,7 +43,7 @@ def start_run(project: Project, endpoint: str | None = None) -> str:
         objects_total=len(code_items(project)),
     )
     _REGISTRY.create(state, project.id)
-    threading.Thread(target=_execute, args=(run_id, project, endpoint), daemon=True).start()
+    audit.spawn(_execute, run_id, project, endpoint)
     return run_id
 
 

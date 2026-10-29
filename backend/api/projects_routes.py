@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend import audit
 from backend.connectors.credentials import clear_project as clear_project_credentials
 from backend.projects.models import Project, ProjectSummary, SourceConfig
 from backend.projects.store import get_store
@@ -43,6 +44,7 @@ def create_project(req: CreateProjectRequest) -> Project:
         source=SourceConfig(source_type=req.source_connector_id),
     )
     get_store().save(project)
+    audit.record("project.created", project_id=project.id, target=project.name)
     return project
 
 
@@ -74,6 +76,9 @@ def update_project(project_id: str, project: Project) -> Project:
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str) -> dict:
+    # The name is recorded now: once the project is gone, its id resolves to nothing.
+    existing = get_store().get(project_id)
+    name = existing.name if existing else ""
     # Clean credentials first. If that fails, retain the project so the user can
     # retry instead of silently orphaning encrypted passwords/secret references.
     try:
@@ -99,4 +104,5 @@ def delete_project(project_id: str) -> dict:
             project_id, exc_info=True,
         )
     get_store().delete(project_id)
+    audit.record("project.deleted", project_id=project_id, target=name)
     return {"ok": True}

@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 class StoreStatus(BaseModel):
-    store: str            # projects | credentials | runs
+    store: str            # projects | credentials | runs | audit
     backend: str          # lakebase | uc-volume | local-files | memory | unavailable
     durable: bool         # survives an app restart
     detail: str = ""

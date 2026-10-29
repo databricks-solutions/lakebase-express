@@ -5,7 +5,7 @@ title: Persistence
 
 # Persistence
 
-The app keeps three kinds of state. Each has a durable backend and an ephemeral fallback,
+The app keeps four kinds of state. Each has a durable backend and an ephemeral fallback,
 and **every store falls back rather than fails**.
 
 | State | Durable backend | Fallback | Selected by |
@@ -13,8 +13,9 @@ and **every store falls back rather than fails**.
 | Projects | `PostgresStore` — one JSONB row per project in `lbx_projects`; or `VolumeStore` — JSON files in a UC volume | `LocalFileStore` — JSON files in `~/.lakebase-express/projects` | `LBX_PROJECTS_BACKEND=postgres\|volume\|local` |
 | Credentials | `PostgresCredentialStore` — Fernet-encrypted rows in `lbx_credentials` | `MemoryCredentialStore` | Follows the project store |
 | Run state | `PostgresRunStore` — one JSONB row per run in `lbx_runs` | `MemoryRunStore` | Follows the project store; `LBX_RUNS_BACKEND=memory\|postgres` overrides |
+| Audit trail | `PostgresAuditStore` — one append-only row per event in `lbx_audit` | `MemoryAuditStore` | Follows the project store; `LBX_AUDIT_BACKEND=memory\|postgres` overrides |
 
-The bundle deploys with `projects_backend: postgres` by default. All three Lakebase stores
+The bundle deploys with `projects_backend: postgres` by default. All four Lakebase stores
 share one connection (`LBX_PROJECTS_PG_*`), with the role password read from the secret
 scope (`LBX_PROJECTS_PG_SECRET_KEY`, default `lakebase-password`).
 
@@ -69,3 +70,40 @@ the same row, and a run started from the Jobs UI or by a schedule is recorded to
 authenticate with a Lakebase OAuth credential, so the job's identity needs a Postgres role
 ([Run-state role](../installation.mdx#run-state-role-lakebase)); the app grants it
 `INSERT`/`UPDATE` on the table when it provisions the job.
+
+## Audit trail
+
+`backend/audit.py` records who did what, and when, for compliance reviews. Each event has
+the time, the actor, an action, the project, a target and an outcome:
+
+| Action | Recorded when |
+|--------|---------------|
+| `run.started`, `run.finished` | A run of any kind starts, and when it reaches a terminal status (the outcome) |
+| `schema.applied` | The plan is applied to Lakebase, with item counts |
+| `job.submitted`, `job.scheduled` | A snapshot job is run or scheduled from the app |
+| `secrets.written` | Passwords are written to a secret scope for a job (key names only) |
+| `credential.read` | A stored password, a stored secret reference or a request's secret reference is resolved |
+| `credential.stored`, `credential.cleared` | A working credential is remembered, or a project's credentials are deleted |
+| `credential.key_created` | The Fernet key is generated |
+| `project.created`, `project.deleted` | A project is created or deleted (with its name) |
+
+**No event carries a password or a secret value.** A credential event names the
+connection (`namespace:user@host/database`) and, for a secret reference, its
+`kind:scope/key`. A password typed into the request is not a credential read, and neither
+is a lookup that finds nothing.
+
+The **actor** is the signed-in user, from the `X-Forwarded-Email` header that the
+Databricks Apps proxy sets. Without one it is the app's own identity, marked
+`(app identity)`. Locally, that is the developer's profile. Background runs keep the actor
+that started them. Runs a Databricks job starts by itself, such as a schedule, are in the
+job's run history, not here.
+
+The trail is append-only. The app never deletes events, not even with their project,
+because the trail has to outlive what it describes. A trigger on `lbx_audit` rejects
+`UPDATE`, `DELETE` and `TRUNCATE`; the table owner can drop it for a retention purge.
+Every event is also logged on `lakebase_express.audit`, so it reaches
+`databricks apps logs` even when the store is unreachable. Like the other stores, an
+audit write that fails is logged and never fails the request.
+
+Read it at `GET /api/audit`, filtered with `project_id` and `action` (exact, or a prefix
+ending in `.`, such as `credential.`).

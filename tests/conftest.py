@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import config
+from backend import audit, config
 
 _REAL_LAKEBASE_ENDPOINT = config.lakebase_endpoint
 
@@ -14,6 +14,16 @@ def no_lakebase_endpoint_lookup(monkeypatch):
     everywhere; the resolver's own tests take it from ``lakebase_endpoint``."""
     config.lakebase_endpoint.cache_clear()
     monkeypatch.setattr(config, "lakebase_endpoint", lambda host: "")
+
+
+@pytest.fixture(autouse=True)
+def audit_in_memory(monkeypatch):
+    """The actor fallback reads the workspace identity, a live call; and each test
+    gets its own trail."""
+    monkeypatch.setattr(audit, "_app_identity", lambda: "test-app")
+    store = audit.MemoryAuditStore()
+    monkeypatch.setattr(audit, "get_audit_store", lambda: store)
+    return store
 
 
 @pytest.fixture
