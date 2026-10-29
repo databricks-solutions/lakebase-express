@@ -19,6 +19,11 @@ exact SQL that will run on Lakebase — and applies it.
   visibly at apply time instead of silently changing meaning.
 - **Procedures, functions, views and triggers** are translated from T-SQL to PL/pgSQL by
   the Foundation Model, which returns its reasoning and notes alongside the SQL.
+  Each translation is checked for an unclosed `$$` body, leftover T-SQL (`GO`,
+  `DECLARE @x`, `[schema].[name]`) and a missing `CREATE`. One that fails is sent back
+  to the model once with the problems listed. If it still fails, it stays in the plan for
+  you to fix, marked as failed. An object too long for one reply is translated as plain
+  SQL across several passes; it has no reasoning and its caveats are SQL comments.
 
 Translating every code object takes minutes on a real schema, so the build runs in the
 background and the page shows progress.

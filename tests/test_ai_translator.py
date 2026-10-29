@@ -11,6 +11,9 @@ def _obj(definition="CREATE PROCEDURE dbo.usp_Report AS SELECT 1"):
                               object_type="PROCEDURE", line_count=1, definition=definition)
 
 
+_SQL = "CREATE OR REPLACE VIEW public.v AS SELECT 1;"
+
+
 def _resp(content: str, finish_reason: str = "stop"):
     return SimpleNamespace(choices=[SimpleNamespace(
         message=SimpleNamespace(content=content), finish_reason=finish_reason,
@@ -50,11 +53,11 @@ def test_translate_object_requests_structured_output(monkeypatch):
 
     def fake(endpoint, messages, **params):
         sent.update(params)
-        return _resp(json.dumps({"reasoning": "r", "translated": "SELECT 1", "notes": "n"}))
+        return _resp(json.dumps({"reasoning": "r", "translated": _SQL, "notes": "n"}))
 
     monkeypatch.setattr(ai_translator, "query_chat", fake)
     tr = ai_translator.translate_object(_obj(), endpoint="my-endpoint")
-    assert tr.success and tr.translated == "SELECT 1" and tr.reasoning == "r"
+    assert tr.success and tr.translated == _SQL and tr.reasoning == "r"
     # Structured output constrains the reply to {"reasoning", "translated", "notes"}.
     assert sent["response_format"]["type"] == "json_schema"
     schema = sent["response_format"]["json_schema"]["schema"]
@@ -64,13 +67,109 @@ def test_translate_object_requests_structured_output(monkeypatch):
 
 
 def test_translate_object_reports_token_limit_truncation(monkeypatch):
-    monkeypatch.setattr(ai_translator, "query_chat",
-                        lambda endpoint, messages, **p: _resp('{"reasoning": "x", "translated": "CRE', "length"))
+    calls = []
+
+    def fake(endpoint, messages, **p):
+        calls.append(p)
+        return _resp('{"reasoning": "x", "translated": "CRE', "length")
+
+    monkeypatch.setattr(ai_translator, "query_chat", fake)
     tr = ai_translator.translate_object(_obj())
     assert not tr.success and tr.translated == "" and "token limit" in tr.notes
+    # One structured try, then the bare-SQL pass and every continuation — bounded.
+    assert len(calls) == 2 + ai_translator._MAX_CONTINUATIONS
+    assert all("response_format" not in p for p in calls[1:])
+
+
+def test_truncated_reply_is_continued_as_bare_sql(monkeypatch):
+    body = "CREATE OR REPLACE PROCEDURE public.p()\nLANGUAGE plpgsql\nAS $$\nBEGIN\n"
+    replies = iter([
+        _resp('{"reasoning": "x", "translated": "CRE', "length"),
+        _resp(f"```sql\n{body}  PERFORM 1;", "length"),
+        # The model restarts a little before the cut; the overlap is dropped.
+        _resp("BEGIN\n  PERFORM 1;\n  PERFORM 2;\nEND;\n$$;\n```"),
+    ])
+    sent = []
+
+    def fake(endpoint, messages, **p):
+        sent.append(messages)
+        return next(replies)
+
+    monkeypatch.setattr(ai_translator, "query_chat", fake)
+    tr = ai_translator.translate_object(_obj())
+    assert tr.success, tr.notes
+    assert tr.translated == f"{body}  PERFORM 1;\n  PERFORM 2;\nEND;\n$$;"
+    assert "bare SQL" in tr.notes and tr.reasoning == ""
+    assert "Respond with ONLY the Postgres SQL" in sent[1][0].content
+    assert sent[2][-1].content == ai_translator._CONTINUE
+
+
+def test_continuation_keeps_whitespace_at_the_cut(monkeypatch):
+    replies = iter([
+        _resp('{"translated": "CRE', "length"),
+        _resp("CREATE VIEW public.v AS SELECT a\n", "length"),
+        _resp("FROM public.t;"),
+    ])
+    monkeypatch.setattr(ai_translator, "query_chat", lambda *a, **k: next(replies))
+    assert ai_translator.translate_object(_obj()).translated == (
+        "CREATE VIEW public.v AS SELECT a\nFROM public.t;")
+
+
+def test_invalid_translation_is_retried_with_its_problems(monkeypatch):
+    replies = iter([
+        _resp(json.dumps({"reasoning": "r", "translated": "GO\nSELECT 1", "notes": ""})),
+        _resp(json.dumps({"reasoning": "r2", "translated": _SQL, "notes": "n"})),
+    ])
+    sent = []
+
+    def fake(endpoint, messages, **p):
+        sent.append(messages)
+        return next(replies)
+
+    monkeypatch.setattr(ai_translator, "query_chat", fake)
+    tr = ai_translator.translate_object(_obj())
+    assert tr.success and tr.translated == _SQL and tr.reasoning == "r2"
+    fix = sent[1][-1].content
+    assert "no CREATE statement" in fix and "GO batch separator" in fix
+    assert sent[1][-2].content.startswith('{"reasoning"')  # its own reply, shown back
+
+
+def test_translation_still_invalid_after_retry_is_kept_but_failed(monkeypatch):
+    bad = "CREATE OR REPLACE FUNCTION public.f() RETURNS int AS $$ BEGIN RETURN 1; END;"
+    monkeypatch.setattr(ai_translator, "query_chat", lambda *a, **k: _resp(
+        json.dumps({"reasoning": "r", "translated": bad, "notes": "n"})))
+    tr = ai_translator.translate_object(_obj())
+    assert not tr.success and tr.translated == bad  # editable in the plan
+    assert tr.notes.startswith("Failed validation after a retry: the $$ body is never closed")
+
+
+def test_malformed_json_is_retried_once(monkeypatch):
+    replies = iter([_resp('{"reasoning": "x", "translated": "CRE'),
+                    _resp(json.dumps({"reasoning": "r", "translated": _SQL, "notes": ""}))])
+    monkeypatch.setattr(ai_translator, "query_chat", lambda *a, **k: next(replies))
+    assert ai_translator.translate_object(_obj()).success
+
+
+def test_problems_accepts_valid_postgres():
+    sql = ("CREATE OR REPLACE FUNCTION public.f(a int[]) RETURNS int LANGUAGE plpgsql AS $fn$\n"
+           "BEGIN RETURN a[1] + $1[2]; END;\n$fn$;")
+    assert ai_translator._problems({"reasoning": "", "translated": sql, "notes": ""}) == []
+    assert ai_translator._problems({"reasoning": "", "translated": " ", "notes": ""}) == [
+        '"translated" is empty']
+    commented = "-- replaced DECLARE @x and [dbo].[t]\n/* GO\n */\n" + sql
+    assert ai_translator._problems({"reasoning": "", "translated": commented, "notes": ""}) == []
+    tsql = "CREATE VIEW v AS SELECT * FROM [dbo].[t]; DECLARE @x int"
+    assert len(ai_translator._problems({"reasoning": "", "translated": tsql, "notes": ""})) == 2
+
+
+def test_stitch_ignores_short_coincidental_overlap():
+    assert ai_translator._stitch("  x := 1;\n", "\n  y := 2;") == "  x := 1;\n\n  y := 2;"
+    assert ai_translator._stitch("x" * 5 + "0123456789abcdef", "0123456789abcdefZ") == (
+        "xxxxx0123456789abcdefZ")
 
 
 def test_translate_object_reports_malformed_json_instead_of_dumping_it(monkeypatch):
+    # Malformed on the retry too.
     monkeypatch.setattr(ai_translator, "query_chat",
                         lambda endpoint, messages, **p: _resp('{"reasoning": "x", "translated": "CRE'))
     tr = ai_translator.translate_object(_obj())
@@ -164,7 +263,8 @@ def test_translate_all_preserves_order_and_reports_progress(monkeypatch):
     def fake(endpoint, messages, **params):
         body = messages[-1].content
         marker = "obj7" if "obj7" in body else "objX"
-        return _resp(json.dumps({"reasoning": "r", "translated": f"-- {marker}", "notes": "n"}))
+        sql = f"CREATE VIEW public.{marker} AS SELECT 1;"
+        return _resp(json.dumps({"reasoning": "r", "translated": sql, "notes": "n"}))
 
     monkeypatch.setattr(ai_translator, "query_chat", fake)
     objs = [ProgrammableObject(schema_name="dbo", object_name=f"obj{i}",
@@ -176,7 +276,7 @@ def test_translate_all_preserves_order_and_reports_progress(monkeypatch):
     out = ai_translator.translate_all(objs, on_done=lambda d, t: seen.append((d, t)))
 
     assert [t.object_name for t in out] == [f"dbo.obj{i}" for i in range(10)]  # order preserved
-    assert out[7].translated == "-- obj7"                                      # right result per slot
+    assert out[7].translated == "CREATE VIEW public.obj7 AS SELECT 1;"         # right result per slot
     assert len(seen) == 10 and seen[-1] == (10, 10)                            # progress to completion
     assert {t for _, t in seen} == {10}                                        # total constant
 

@@ -45,8 +45,8 @@ from backend.schema_migration.trigger_sql import sanitize_trigger_sql
 log = logging.getLogger("lakebase_express.ai_translator")
 
 
-def _system_prompt() -> str:
-    return render(__file__, "tsql_translation.system.jinja")
+def _system_prompt(sql_only: bool = False) -> str:
+    return render(__file__, "tsql_translation.system.jinja", sql_only=sql_only)
 
 
 # Structured output schema: the endpoint is constrained to emit exactly
@@ -84,6 +84,45 @@ _RESPONSE_FORMAT = {
 
 # A long procedure body can exceed 4000 completion tokens, truncating mid-"translated".
 _MAX_OUTPUT_TOKENS = 128000
+
+# Bounds the SQL-only fallback for replies past the endpoint's output window.
+_MAX_CONTINUATIONS = 4
+# A repeated tail shorter than this is likelier coincidence than the model restarting.
+_MIN_OVERLAP = 16
+_OVERLAP_SCAN = 4000
+
+_CONTINUE = (
+    "Your reply was cut off by the output limit. Continue from exactly where it "
+    "stopped — do not repeat anything already written, and add no preamble or fences."
+)
+_FIX = (
+    "That translation has problems: {problems}. Return the complete corrected "
+    "translation in the same format."
+)
+_SQL_ONLY_NOTE = (
+    "Too long for one structured reply, so it was translated as bare SQL across "
+    "several passes; no reasoning was captured and caveats are in -- comments. "
+    "Review the joins between passes."
+)
+_TOKEN_LIMIT_NOTE = (
+    "The model hit its output-token limit before finishing, even continued across "
+    "several passes — pick an endpoint with a larger output window in Settings, or "
+    "split the object."
+)
+_MALFORMED_NOTE = (
+    "The model returned malformed JSON instead of a translation — re-run the translation."
+)
+
+# Leftovers that cannot be valid Postgres, so the translation is incomplete.
+_TSQL_RESIDUE = (
+    (re.compile(r"^\s*GO\s*$", re.IGNORECASE | re.MULTILINE), "a T-SQL GO batch separator"),
+    (re.compile(r"\bDECLARE\s+@", re.IGNORECASE), "a T-SQL @variable declaration"),
+    (re.compile(r"\[\w+\]\.\[\w+\]"), "a bracket-quoted [schema].[name]"),
+)
+_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+_DOLLAR_QUOTE = re.compile(r"\$([A-Za-z_]\w*)?\$")
+_FENCE_OPEN = re.compile(r"\A\s*```[A-Za-z]*[ \t]*\n?")
+_FENCE_CLOSE = re.compile(r"\n?```\s*\Z")
 
 
 def _temp_guidance(definition: str) -> str:
@@ -193,48 +232,143 @@ def _parse_payload(content: str) -> dict[str, str] | None:
         }
 
 
+def _unfence(sql: str) -> str:
+    """Drop a markdown fence the model wrapped the SQL in, despite the prompt."""
+    return _FENCE_CLOSE.sub("", _FENCE_OPEN.sub("", sql)).strip()
+
+
+def _stitch(head: str, tail: str) -> str:
+    """Join a continuation onto truncated text, dropping a tail the model repeated."""
+    for k in range(min(len(head), len(tail), _OVERLAP_SCAN), _MIN_OVERLAP - 1, -1):
+        if head.endswith(tail[:k]):
+            return head + tail[k:]
+    return head + tail
+
+
+def _problems(payload: dict[str, str] | None) -> list[str]:
+    """Deterministic checks that the translation is complete Postgres, not T-SQL."""
+    if payload is None:
+        return ["the reply was not the requested JSON object"]
+    sql = payload["translated"]
+    if not sql.strip():
+        return ['"translated" is empty']
+    # Caveat comments often name the T-SQL they replaced.
+    sql = _COMMENT.sub("", sql)
+    found = []
+    if not re.search(r"\bCREATE\b", sql, re.IGNORECASE):
+        found.append("it has no CREATE statement")
+    tags: dict[str, int] = {}
+    for m in _DOLLAR_QUOTE.finditer(sql):
+        tags[m.group(0)] = tags.get(m.group(0), 0) + 1
+    found += [f"the {tag} body is never closed" for tag, n in tags.items() if n % 2]
+    found += [f"it still contains {what}" for rx, what in _TSQL_RESIDUE if rx.search(sql)]
+    return found
+
+
+def _ask(endpoint: str, messages: list[ChatMessage], structured: bool) -> tuple[str, bool]:
+    """One chat call -> (reply text, whether it hit the output-token limit)."""
+    resp = query_chat(
+        endpoint,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=_MAX_OUTPUT_TOKENS,
+        **({"response_format": _RESPONSE_FORMAT} if structured else {}),
+    )
+    # chat_text flattens structured content blocks (reasoning models like
+    # fable-5) down to the answer text; plain strings pass through.
+    return chat_text(resp), (resp.choices[0].finish_reason or "").lower() == "length"
+
+
+def _ask_sql(endpoint: str, messages: list[ChatMessage]) -> str | None:
+    """Bare-SQL reply, continued while it truncates; None if still unfinished.
+
+    Bare SQL is used because it concatenates cleanly across passes; a JSON string
+    cut mid-escape does not.
+    """
+    text, truncated = _ask(endpoint, messages, structured=False)
+    # Only the opening fence per pass: whitespace at a cut can be load-bearing.
+    sql = _FENCE_OPEN.sub("", text)
+    for _ in range(_MAX_CONTINUATIONS):
+        if not truncated:
+            break
+        more, truncated = _ask(endpoint, [
+            *messages,
+            ChatMessage(role=ChatMessageRole.ASSISTANT, content=sql),
+            ChatMessage(role=ChatMessageRole.USER, content=_CONTINUE),
+        ], structured=False)
+        sql = _stitch(sql, _FENCE_OPEN.sub("", more))
+    return None if truncated else _unfence(sql)
+
+
+def _to_payload(text: str, sql_only: bool) -> dict[str, str] | None:
+    if sql_only:
+        return {"reasoning": "", "translated": text, "notes": _SQL_ONLY_NOTE}
+    payload = _parse_payload(text)
+    if payload is not None:
+        payload["translated"] = _unfence(payload["translated"])
+    return payload
+
+
+def _failed(obj: ProgrammableObject, notes: str) -> Translation:
+    return Translation(
+        object_name=f"{obj.schema_name}.{obj.object_name}",
+        object_type=obj.object_type,
+        original=obj.definition,
+        translated="",
+        reasoning="",
+        notes=notes,
+        success=False,
+    )
+
+
 def translate_object(
     obj: ProgrammableObject,
     endpoint: str | None = None,
     schema_map: dict[str, str] | None = None,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
 ) -> Translation:
+    """Translate one object: structured reply, a bare-SQL fallback when that is too
+    long, and one corrective retry if the result fails :func:`_problems`."""
     endpoint = endpoint or FM_ENDPOINT
     try:
-        resp = query_chat(
-            endpoint,
-            messages=[
-                ChatMessage(role=ChatMessageRole.SYSTEM, content=_system_prompt()),
-                ChatMessage(
-                    role=ChatMessageRole.USER,
-                    content=_build_user_prompt(obj, schema_map, identifier_case),
-                ),
-            ],
-            temperature=0.0,
-            max_tokens=_MAX_OUTPUT_TOKENS,
-            response_format=_RESPONSE_FORMAT,
+        user = ChatMessage(
+            role=ChatMessageRole.USER,
+            content=_build_user_prompt(obj, schema_map, identifier_case),
         )
-        choice = resp.choices[0]
-        name = f"{obj.schema_name}.{obj.object_name}"
-        if (choice.finish_reason or "").lower() == "length":
-            return Translation(
-                object_name=name, object_type=obj.object_type, original=obj.definition,
-                translated="", reasoning="",
-                notes="The model hit its output-token limit before finishing — re-run the "
-                      "translation, or pick an endpoint with a larger output window in Settings.",
-                success=False,
-            )
-        # chat_text flattens structured content blocks (reasoning models like
-        # fable-5) down to the answer text; plain strings pass through.
-        payload = _parse_payload(chat_text(resp))
+        messages = [ChatMessage(role=ChatMessageRole.SYSTEM, content=_system_prompt()), user]
+        text, sql_only = _ask(endpoint, messages, structured=True)
+        if sql_only:
+            log.warning("Translation of %s.%s truncated — retrying as bare SQL",
+                        obj.schema_name, obj.object_name)
+            messages = [ChatMessage(role=ChatMessageRole.SYSTEM,
+                                    content=_system_prompt(sql_only=True)), user]
+            text = _ask_sql(endpoint, messages)
+            if text is None:
+                return _failed(obj, _TOKEN_LIMIT_NOTE)
+        payload = _to_payload(text, sql_only)
+        problems = _problems(payload)
+        if problems:
+            # Shown its own output and what is wrong with it; a plain re-run at
+            # temperature 0 would likely repeat the same reply.
+            log.warning("Translation of %s.%s failed validation (%s) — retrying",
+                        obj.schema_name, obj.object_name, "; ".join(problems))
+            messages = [
+                *messages,
+                ChatMessage(role=ChatMessageRole.ASSISTANT, content=text),
+                ChatMessage(role=ChatMessageRole.USER,
+                            content=_FIX.format(problems="; ".join(problems))),
+            ]
+            if sql_only:
+                text = _ask_sql(endpoint, messages)
+            else:
+                text, truncated = _ask(endpoint, messages, structured=True)
+                text = None if truncated else text
+            if text is None:
+                return _failed(obj, _TOKEN_LIMIT_NOTE)
+            payload = _to_payload(text, sql_only)
+            problems = _problems(payload)
         if payload is None:
-            return Translation(
-                object_name=name, object_type=obj.object_type, original=obj.definition,
-                translated="", reasoning="",
-                notes="The model returned malformed JSON instead of a translation — "
-                      "re-run the translation.",
-                success=False,
-            )
+            return _failed(obj, _MALFORMED_NOTE)
         translated = payload["translated"]
         # Deterministic guardrail at translation time; also re-applied when the
         # SQL is actually applied (executor / post-load notebook), so a stale or
@@ -254,26 +388,22 @@ def translate_object(
         ):
             if regression:
                 notes = f"{notes.rstrip()}\n\n{regression}" if notes.strip() else regression
+        if problems:
+            # Kept so the reviewer can fix it in the plan, but not marked a success.
+            failed = "Failed validation after a retry: " + "; ".join(problems) + "."
+            notes = f"{failed}\n\n{notes}" if notes.strip() else failed
         return Translation(
-            object_name=name,
+            object_name=f"{obj.schema_name}.{obj.object_name}",
             object_type=obj.object_type,
             original=obj.definition,
             translated=translated,
             reasoning=payload["reasoning"],
             notes=notes,
-            success=True,
+            success=not problems,
         )
     except Exception as exc:  # one bad object shouldn't fail the batch
         log.exception("Translation failed for %s.%s", obj.schema_name, obj.object_name)
-        return Translation(
-            object_name=f"{obj.schema_name}.{obj.object_name}",
-            object_type=obj.object_type,
-            original=obj.definition,
-            translated="",
-            reasoning="",
-            notes=f"Translation error: {exc}",
-            success=False,
-        )
+        return _failed(obj, f"Translation error: {exc}")
 
 
 # Objects are translated concurrently — each translate_object is an independent
