@@ -1,0 +1,63 @@
+---
+sidebar_position: 9
+title: Migration Report
+---
+
+# Migration Report
+
+The Migration Report closes the audit cycle: assessment, plan, what the run actually
+copied, validation and query parity, as **one self-contained HTML page** to hand to the
+client. `GET /api/projects/{id}/report` serves it; `GET /api/projects/{id}/report-data` is
+the same report as JSON.
+
+## The file
+
+- **No external stylesheet, font or script** — it can be emailed, committed, or opened
+  offline years later.
+- **The PDF is the browser's own print output.** The page has a *Save as PDF* button and a
+  print stylesheet (A4, repeating table headers, page breaks that never split a finding).
+- It is derived entirely from what the phases stored: no source or target connection is
+  opened and no model is called, so it costs nothing to produce and is reproducible.
+
+## What it says
+
+- Sections run in the order the work happened, and **every one is rendered even when its
+  phase never ran** — a missing heading reads as a phase that passed. A score whose phase
+  never ran prints *Not run*, not `0`.
+- It opens with **what it cannot vouch for**: validation not run, row counts taken from
+  planner estimates, run history held in memory, and the fact that applying the plan is not
+  recorded anywhere, so Validation is the only evidence of what reached the target.
+- Rows are counted as they landed: a failed table committed nothing, so it is not counted,
+  and a run that resumed another is counted once.
+- Long enumerations are capped, always report their true size, and say the project holds
+  the rest.
+- Unlike the [App Migration Skill](./app_migration_skill.mdx), it **does** carry the AI
+  assessment, labelled with the endpoint that wrote it.
+
+## What it leaves out
+
+The report is built to be emailed and committed, so it is a summary, not a dump:
+
+- no password, secret reference or connecting identity (no source login, no Lakebase role);
+- no SQL — no source T-SQL, translated PL/pgSQL, validation fix or parity query;
+- **no row data** — query parity compares real rows, but only *which columns* disagreed is
+  reported;
+- database error text cut to its primary message, since a Postgres `DETAIL` line can name
+  key values.
+
+It does carry the source and target **host and database name** and the target schema —
+the audit trail of what moved where, and the reason to treat the file as internal to the
+customer that owns that infrastructure.
+
+## Assessment-only export
+
+`?scope=assessment` narrows either route to the source scan alone — what the download icon
+in the Assessment module's AI analysis panel produces. It covers readiness, what was
+scanned, every finding and the AI analysis, and its caveats are about the scan: its age,
+and that source row counts come from partition statistics, so they are approximate.
+
+## Previewing the layout
+
+`scripts/preview_report.py` renders a fully populated example without a workspace or a
+database, for iterating on the print layout (`--serve` seeds it into a throwaway store and
+runs the app).

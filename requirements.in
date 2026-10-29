@@ -1,6 +1,6 @@
 # Direct runtime dependencies. Edit pins here, never in requirements.txt: that file
 # is generated from this one with every transitive package pinned and hashed, and
-# it is what the app installs (see "Dependency locks" in docs/devops.md).
+# it is what the app installs (see "Dependency locks" in docs/lakebase-express/docs/dev/ci_cd.mdx).
 
 # --- Web service ---
 fastapi==0.141.1

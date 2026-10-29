@@ -1,0 +1,119 @@
+---
+sidebar_position: 1
+title: Developer onboarding
+---
+
+# Developer onboarding
+
+Everything needed to change Lakebase Express and see the change working.
+
+## Project layout
+
+```text
+backend/               FastAPI app + all migration logic (framework-free, unit-testable)
+  main.py              entrypoint: mounts /api/* routers, serves frontend/dist
+  config.py            env settings and the single bound WorkspaceClient
+  api/                 one router per phase
+  assessment/          source scan, compatibility rules, readiness, AI analysis
+  sizing/              CU / cost calculator + pricing.yaml
+  schema_migration/    type, collation, expression and name mapping; AI translation
+  migration/           plan, apply, in-app data load, job offload, async mode, runs
+  data_migration/      PySpark snapshot notebook generator
+  validation/          comparator, one-shot fixer, repair agent
+  query_parity/        query generator, read-only runner, comparator
+  context_bundle/      App Migration Skill (SKILL.md) and its JSON bundle
+  report/              Migration Report builder and HTML renderer
+  connectors/          source drivers, Lakebase target, credentials
+  projects/            project model and stores
+  run_registry.py      in-memory run state, written through to run_store.py
+  retry.py             shared transient-retry policy
+  fm_params.py         per-model Foundation Model parameter policy
+frontend/              React + Vite + TypeScript SPA (built to frontend/dist/)
+  src/tabs/            one component per module (Assessment, Schema & Code, …)
+  src/api.ts           typed API client — mirrors the backend models 1:1
+  src/connectors.ts    the source connector catalog
+tests/                 pytest suite (pure Python, no workspace needed)
+scripts/               SQL helpers, connection probe, report preview
+docs/lakebase-express/ this documentation site (Docusaurus)
+databricks.yml         bundle: the app resource, its runtime command and env
+target.yml.sample      per-user deploy targets (copy to target.yml, gitignored)
+deploy.sh              build the SPA, render app.yaml, deploy and start the app
+run_local.sh           run backend + frontend locally
+```
+
+The architecture behind it is in [Architecture](../architecture/index.mdx).
+
+## Local development
+
+Run the backend and the frontend together:
+
+```bash
+DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
+```
+
+`run_local.sh` activates `.venv` if present, installs both sides' dependencies (skip with
+`--no-install`), and starts:
+
+| Process | URL | |
+|---------|-----|---|
+| Backend (uvicorn) | `http://127.0.0.1:8000` | serves `/api/*` |
+| Frontend (Vite) | `http://127.0.0.1:5173` | proxies `/api` to `:8000` — open this one |
+
+Backend logs always go to `/tmp/lbx-backend.log`; `--verbose` also streams them to the
+terminal at `DEBUG`, so you can watch each `/api` call arrive. Ctrl-C stops both.
+`BACKEND_PORT` and `FRONTEND_PORT` override the ports.
+
+Or run the two processes by hand:
+
+```bash
+# Backend — from the repo root
+pip install -r requirements.txt
+DATABRICKS_CONFIG_PROFILE=<your-profile> uvicorn backend.main:app --reload --port 8000
+
+# Frontend — separate shell
+cd frontend && npm install && npm run dev
+```
+
+`DATABRICKS_CONFIG_PROFILE` is a profile from `~/.databrickscfg` and binds the workspace
+for the whole session (Settings shows which one is connected). Without a profile the scan
+and assessment still work; the AI features and the job paths need a workspace and the
+[`system.ai` grants](../installation.mdx#foundation-model-access) for your user.
+
+Locally, projects default to JSON files in `~/.lakebase-express/projects` and run state
+to memory. To exercise the Lakebase stores, export `LBX_PROJECTS_BACKEND=postgres` and the
+`LBX_PROJECTS_PG_*` variables (`LBX_PROJECTS_PG_PASSWORD` avoids needing the secret
+scope) — see [Configuration](../reference/configuration.mdx#project-store).
+
+## Debugging in VS Code
+
+Copy the launch configurations first — the real `launch.json` is gitignored, since it
+holds your own workspace's profile and Lakebase coordinates:
+
+```bash
+cp .vscode/launch.json.sample .vscode/launch.json   # fill in the <placeholders>
+```
+
+That gives four configurations: the FastAPI backend under `debugpy`, Chrome against the
+Vite dev server, `pytest` on the current file, and **Azure SQL probe (env file)**, which
+reads `.vscode/azure_sql.env` and pins the interpreter that has `pymssql` installed.
+
+## Conventions
+
+- **Engine code stays framework-free.** FastAPI lives in `backend/api/` only; everything
+  else is plain Python with Pydantic models, so it is testable without Databricks.
+- **Frontend types mirror backend models 1:1.** When a model in a `models.py` changes,
+  change `frontend/src/api.ts` with it.
+- **Long work goes on a background thread** with a `RunRegistry`, never in a request —
+  the Apps proxy times out at ~120 seconds.
+- **AI helpers are fail-soft** (`success` + `error`, never raise), and their system prompts
+  are Jinja templates in the package's `prompts/` directory.
+- **Unknown SQL passes through verbatim** so it fails visibly at apply time.
+- **Keep comments short** — one line on *why*, not a paragraph on *what*.
+
+## Next steps
+
+- [Testing](./testing.mdx) — running the suite and the lint gate.
+- [CI/CD](./ci_cd.mdx) — what every pull request is checked against, and the dependency
+  locks.
+- [Adding a source connector](./adding_a_connector.mdx).
+- [Authoring the docs](./docs_authoring.mdx).

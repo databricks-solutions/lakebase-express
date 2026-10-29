@@ -1,0 +1,69 @@
+name: Docs
+
+# Builds the Docusaurus site in docs/lakebase-express on pull requests, and publishes
+# it to GitHub Pages on pushes to main. Pages must be set to "GitHub Actions" as its
+# source (Settings → Pages) for the deploy job to succeed.
+on:
+  pull_request:
+    paths:
+      - docs/lakebase-express/**
+      - frontend/scripts/normalize-lockfile.mjs
+      - .github/workflows/docs.yml
+  push:
+    branches: [main]
+    paths:
+      - docs/lakebase-express/**
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede an in-flight PR build; never cancel a deploy from main.
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs/lakebase-express
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Docusaurus 3.10 needs Node >= 20.
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: docs/lakebase-express/package-lock.json
+      - name: Lockfile only pulls from registry.npmjs.org
+        # Before npm ci, whose postinstall would rewrite mirror URLs first.
+        run: npm run lockfile:check
+      - name: npm ci
+        run: npm ci
+      - name: Build (fails on broken links and anchors)
+        run: npm run build
+      - name: Upload the Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/lakebase-express/build
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # publish the site
+      id-token: write # prove the deployment comes from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

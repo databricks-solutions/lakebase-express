@@ -1,0 +1,60 @@
+---
+sidebar_position: 2
+title: Testing
+---
+
+# Testing
+
+## Run the suite
+
+```bash
+pip install --require-hashes --no-deps -r requirements-dev.lock   # exactly what CI installs
+pytest tests/
+ruff check .                                                      # everything CI's lint job reports
+```
+
+`pip install -r requirements-dev.txt` also works and resolves fresh versions; the lock is
+there when you want CI's exact set. `pytest.ini` puts the repo root on `sys.path`, so
+`pytest tests/` imports `backend` directly.
+
+## What the tests need
+
+Nothing live. The suite is pure Python and runs with **no Databricks credentials and no
+database**:
+
+- `tests/conftest.py` stubs the one live lookup — resolving the Lakebase endpoint — for
+  every test; the resolver's own tests opt back in through the `lakebase_endpoint`
+  fixture.
+- Connectors, the workspace client and Foundation Model calls are faked per test.
+- Generated DDL is checked by parsing it with `pglast` (`tests/test_collations.py`), which
+  validates syntax without a Postgres server.
+- API tests use FastAPI's `TestClient` (backed by `httpx`).
+
+Tests mirror the backend's modules: `test_<area>.py` next to the behavior it pins, for
+example `test_collations.py`, `test_resume.py`, `test_async_resume.py`,
+`test_migration_report.py`, `test_context_skill.py`.
+
+## Writing a test
+
+- Test the pure function where there is one (the comparators, mappers and builders are
+  kept pure on purpose) rather than going through a route.
+- Never point a test at a real source or target. Local fixtures that write to a real
+  database (`scripts/*_demo_source.py`) are gitignored so nobody runs them by accident.
+- If you add a model or field the SPA reads, the frontend build (`npm run build` in
+  `frontend/`, which runs `tsc -b`) is the type check for the other side.
+
+## Lint
+
+`ruff.toml` enables `E4`, `E7`, `E9`, `F` and `W`. Only syntax errors and undefined names
+fail CI; everything else is reported as a warning — see [Lint scope](./ci_cd.mdx#lint-scope).
+
+## Trying a change in the real app
+
+Unit tests don't cover the SPA or a live migration. Run the app locally against a
+throwaway source and Lakebase target ([Local development](./index.mdx#local-development)),
+or preview the report layout without any database:
+
+```bash
+PYTHONPATH=. python3 scripts/preview_report.py [out.html]   # write a fully populated example report
+PYTHONPATH=. python3 scripts/preview_report.py --serve       # seed it into a throwaway store and run the app on :8000
+```

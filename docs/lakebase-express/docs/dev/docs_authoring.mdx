@@ -1,0 +1,62 @@
+---
+sidebar_position: 5
+title: Authoring the docs
+---
+
+# Authoring the docs
+
+This site is built with [Docusaurus](https://docusaurus.io/) — the same approach the
+[DQX](https://databrickslabs.github.io/dqx/) project uses — and published to GitHub Pages.
+
+## Layout
+
+```text
+docs/lakebase-express/
+  docusaurus.config.ts   site config: URL, navbar, footer, plugins
+  sidebars.ts            one sidebar, generated from the folder layout
+  docs/                  the pages (.mdx)
+    motivation.mdx, installation.mdx
+    guide/  architecture/  reference/  dev/
+  src/pages/index.tsx    the landing page
+  src/css/custom.css     palette, fonts, landing-page styles
+  static/img/            logo and screenshots
+```
+
+Each folder's `_category_.json` sets its sidebar label and position; each page's
+`sidebar_position` front matter sets its order. Pages are [MDX](https://mdxjs.com/):
+Markdown plus JSX, so admonitions (`:::note`, `:::warning`), tabs and
+[Mermaid](https://mermaid.js.org/) diagrams (` ```mermaid ` blocks) work inline.
+
+## Run it locally
+
+Needs Node.js 20 or later.
+
+```bash
+cd docs/lakebase-express
+npm install
+npm start          # dev server with hot reload at http://localhost:3000/lakebase-express/
+```
+
+Search is built at build time, so it only works on a production build:
+
+```bash
+npm run build      # fails on any broken link or anchor
+npm run serve      # serve the build at http://localhost:3000/lakebase-express/
+```
+
+## Writing
+
+- **Link to pages by file path** (`../guide/assessment.mdx`), not by URL — Docusaurus
+  checks file links at build time and fails the build on a broken one.
+- **Keep one source of truth.** The README is a short entry point; the detail lives here.
+  When a behavior changes, update the page that owns it rather than adding a second copy.
+- Put screenshots in `static/img/` and reference them as `/img/<file>.png`.
+- Write for the reader of that section: the User guide for someone running a migration,
+  Architecture and Development for someone changing the code.
+
+## Publishing
+
+`.github/workflows/docs.yml` builds the site on pull requests that touch
+`docs/lakebase-express/` and deploys it to GitHub Pages on every push to `main` (it can also
+be run by hand from the Actions tab). The repository's **Settings → Pages → Source** must be
+set to **GitHub Actions** once, by an admin.

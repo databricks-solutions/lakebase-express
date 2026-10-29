@@ -1,0 +1,41 @@
+---
+sidebar_position: 7
+title: Query Parity
+---
+
+# Query Parity
+
+Query Parity checks that the migrated database **answers the same questions** as the
+source. It is independent of the other modules.
+
+## How it works
+
+1. Choose **how many queries** to generate. One Foundation Model call writes that many
+   synthetic, **read-only** queries over the migrated schema, each twice: in T-SQL for the
+   source and in the equivalent PostgreSQL for Lakebase. The model sees a summary of the
+   scanned tables with names already mapped through the migration's naming rules, so the
+   SQL references real objects on both sides.
+2. Review the queries, then run them. Each pair runs against the source and the target in
+   the background.
+3. Every pair is compared on three axes:
+
+| Axis | Compares |
+|------|----------|
+| **Count** | Same number of rows returned |
+| **Format** | Same column count, the same ordered column names (case-insensitively — Postgres folds unquoted names to lower case), and the same ordered values over a sampled prefix, normalized so numeric and date formatting don't read as a difference |
+| **Performance** | The ratio of the two execution times |
+
+On a mismatch, expand the row for a side-by-side **result preview** that highlights the
+columns and rows that differ.
+
+## Safety
+
+Every query is guarded before it runs on either side: anything that is not a lone
+`SELECT` or `WITH` is rejected without touching a database. The model is told to write
+only reads, but the runner never trusts that.
+
+## Expected mismatches
+
+Some mismatches are real differences between the engines, not migration defects — for
+example division over `money` columns, where T-SQL truncates and Postgres rounds. See
+[`money` and fixed-scale arithmetic](../reference/limitations.mdx#money-and-fixed-scale-arithmetic).

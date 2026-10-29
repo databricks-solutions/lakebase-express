@@ -1,0 +1,67 @@
+---
+sidebar_position: 3
+title: Assessment
+---
+
+# Assessment
+
+The Assessment module scans the source, scores how much of the migration is automatable,
+and sizes the Lakebase target.
+
+## Source scan
+
+The scan reads only the source's system catalog views, so it works on any database with no
+prior knowledge of its schema, and pulls only small result sets:
+
+- `INFORMATION_SCHEMA.TABLES` / `.COLUMNS` — structure;
+- `sys.dm_db_partition_stats` — approximate row counts (cheap; not `COUNT(*)`);
+- `sys.sql_modules` + `sys.objects` — definitions of procedures, functions, views and
+  triggers.
+
+It also inventories keys, indexes, constraints, defaults and collations.
+
+## Compatibility findings
+
+A rule engine runs over the scan and produces findings with a severity:
+
+| Severity | Meaning | Readiness penalty |
+|----------|---------|-------------------|
+| `info` | Handled automatically | 0 |
+| `low` | Minor | 1 |
+| `medium` | Needs review, likely scripted | 4 |
+| `high` | Manual rewrite required (cursors, dynamic SQL, …) | 10 |
+
+The **readiness score** starts at 100 and subtracts each finding's penalty (floored at 0).
+Rule families:
+
+- **Types** — SQL Server types that don't map 1:1 (most are handled and reported as
+  `info`).
+- **Collations** — case- or accent-insensitive collations (`COLLATION_INSENSITIVE`), and
+  CHECKs or filtered indexes that pattern-match such a column (`COLLATION_PATTERN_MATCH`,
+  which will fail to apply). See [Collations](../reference/collations.mdx).
+- **Code** — T-SQL constructs that drive manual effort in procedures, views, functions and
+  triggers.
+- **Temp objects** — whether each `#temp` table or `@t TABLE` should become a CTE, a
+  PL/pgSQL variable or a real working table. Lakebase's pooled endpoint has no session
+  temp tables, so a mechanical `CREATE TEMP TABLE` is a trap.
+
+## AI migration analysis
+
+A Foundation Model reasons over the same scan and adds the risks a rule cannot see —
+transaction and isolation semantics, identity behavior, collation, datetime precision,
+implicit conversions, cross-object dependencies — with a complexity, an effort estimate,
+key risks and recommendations. It **augments, never replaces**, the deterministic findings:
+if the call fails, the scan and score are returned intact.
+
+The download icon at the right of the AI analysis footer exports the assessment as a
+printable report (*Save as PDF*). See [Migration Report](./migration_report.mdx#assessment-only-export).
+
+## Sizing & Cost
+
+Enter the source capacity — purchase model (DTU or vCore), environment (dev, test, prod)
+and storage — and the module recommends a Lakebase CU size, an autoscale range,
+scale-to-zero, and a monthly compute and storage cost.
+
+These are **planning estimates, not a quote**. Every ratio and price comes from
+`backend/sizing/pricing.yaml` and every result lists the assumptions it used; edit that
+file to your region or contract.

@@ -1,0 +1,55 @@
+---
+sidebar_position: 3
+title: Foundation Models
+---
+
+# Foundation Models
+
+The AI features — code translation, the assessment's AI analysis, validation fixes and the
+repair agent, query generation, and the skill's model notes — call a Databricks Foundation
+Model. They need the [`system.ai` grants](../installation.mdx#foundation-model-access).
+
+## Choosing the model
+
+Pick the model per session in **Settings → Foundation Model endpoint**, or change the
+default with `LBX_FM_ENDPOINT` (deployed: `fm_endpoint` in `target.yml`):
+
+```bash
+LBX_FM_ENDPOINT=databricks-claude-sonnet-4-5 \
+DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
+```
+
+Each module that uses a model shows which endpoint it will call. Endpoints don't all accept
+the same parameters; the app sends only what each one accepts, so any chat-capable
+endpoint in the Settings list works.
+
+## Choosing the API
+
+`LBX_FM_API` selects which API carries the calls. Both reach the same model and differ only
+in how it is named:
+
+| `LBX_FM_API` | Request | Accepted names |
+| --- | --- | --- |
+| `serving` | `POST /serving-endpoints/{name}/invocations` | endpoint name: `databricks-claude-opus-4-8` |
+| `gateway` (default) | `POST /ai-gateway/mlflow/v1/chat/completions` | endpoint name **or** the gateway model id: `system.ai.claude-opus-4-8` |
+
+`gateway` is the default and the route the AI Gateway console's sample request uses, so the
+`system.ai.*` ids copied from there work as-is:
+
+```bash
+LBX_FM_API=gateway LBX_FM_ENDPOINT=system.ai.claude-opus-4-8 \
+DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
+```
+
+In gateway mode Settings lists both forms for each pay-per-token endpoint.
+
+:::note
+
+The `system.ai.<model>` id drops the endpoint's `databricks-` prefix, and it is *not* a
+Unity Catalog path — the registered model is `system.ai.databricks-claude-opus-4-8`.
+Passing a `system.ai.*` id in `serving` mode fails with `ENDPOINT_NOT_FOUND`, since that
+route takes the name from the URL path.
+
+:::
+
+Deployed, set both through the bundle: `fm_endpoint` and `fm_api` in `target.yml`.

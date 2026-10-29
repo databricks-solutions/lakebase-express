@@ -1,6 +1,7 @@
 # Lakebase Express
 
 [![CI](https://github.com/databricks-solutions/lakebase-express/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/databricks-solutions/lakebase-express/actions/workflows/ci.yml)
+[![Docs](https://github.com/databricks-solutions/lakebase-express/actions/workflows/docs.yml/badge.svg?branch=main)](https://databricks-solutions.github.io/lakebase-express/)
 
 A Databricks App that guides you through migrating a transactional database to
 **Databricks Lakebase** (managed serverless Postgres), through a connector
@@ -10,6 +11,8 @@ Lakebase itself, with live progress.
 
 Enabled sources today: **Azure SQL** and **SQL Server**. More (Oracle,
 PostgreSQL, MySQL, …) "Coming soon".
+
+**Documentation: [databricks-solutions.github.io/lakebase-express](https://databricks-solutions.github.io/lakebase-express/)**
 
 ![The Lakebase Express migrations list: each saved project with its source, its Lakebase target, and per-stage progress across Assess, Size, Schema and Data.](images/lakebase-express-image-01.png)
 
@@ -46,8 +49,8 @@ PostgreSQL, MySQL, …) "Coming soon".
 
 The scan and assessment run without a Databricks workspace; the Foundation Model
 features and the Job-offload/Async data paths require one, plus
-[grants on `system.ai`](#foundation-model-access-unity-catalog-grants). The source
-login needs [three grants](#source-database-grants) to be assessable.
+[grants on `system.ai`](https://databricks-solutions.github.io/lakebase-express/docs/installation/#foundation-model-access). The source
+login needs [read-only grants](https://databricks-solutions.github.io/lakebase-express/docs/installation/#source-database-grants) to be assessable.
 
 ## Quick Start
 
@@ -89,645 +92,55 @@ it finishes it prints the app URL — open it and:
 4. After migrating, use the **Post-migration** modules — **Validation** and
    **Query Parity** — to confirm the target matches the source.
 
-Deployment knobs and the permissions the app's service principal needs are in
-[Deploy as a Databricks App](#deploy-as-a-databricks-app). To iterate on the code
-without redeploying, see [Local development](#local-development).
+Deployment options, the permissions the app's service principal needs, and the
+Lakebase role async runs use are in [Installation](https://databricks-solutions.github.io/lakebase-express/docs/installation/).
 
 ## What it does
 
 Work is organized into **migration projects** — a saved unit (source/target
 config, object selection, assessment, plan, run history) you create, leave, and
-resume. Passwords are never stored; optional workspace-bound secret scope/key
-references are. Projects persist to a local dir (dev) or a UC volume
-(`LBX_PROJECTS_BACKEND=volume`) or Lakebase (`=postgres`).
-
-Every store falls back rather than fail — projects to the app's own filesystem,
-credentials and run state to process memory — and a Databricks App gets a fresh
-container on each restart, so a deployment that never received
-`LBX_PROJECTS_BACKEND=postgres` loses its projects and looks like a new install.
-The app now says which stores are in use: a line in the startup log
-(`databricks apps logs`), a **Storage** panel under Settings, and a warning on the
-migrations list when anything is held in the process or container only.
-
-Modules are **independent and always enabled** — no forced sequence. Connections
-are configured once and reused; other modules show a soft hint if something is
-missing.
+resume. Modules are **independent and always enabled** — no forced sequence.
 
 | Module | What it does |
 |--------|--------------|
-| **Connection & Assessment** | Deterministic scan (schema, data types, T-SQL objects) + rule-based compatibility report, augmented by an AI migration analysis (complexity, effort, deeper risks) |
-| **Sizing & Cost** | Map source capacity → Lakebase CUs + cost |
+| **Connections & Target** | Configure and test the source and the Lakebase target once; every other module reuses them |
+| **Assessment** | Deterministic scan and rule-based compatibility report, augmented by an AI migration analysis; maps source capacity to Lakebase CUs and cost |
 | **Schema & Code** | Build an editable plan (DDL + AI-translated code) and apply it to Lakebase |
-| **Data Migration** | Stream data into Lakebase (batched `COPY`) with live per-table progress |
-| **Create Sync** | Sync now (in-app) or offload a re-runnable PySpark snapshot to a Databricks Job (run now, create unstarted, or schedule) |
-| **Validation** *(post-migration)* | Re-scan both sides and match every object — existence, structure, column collations, exact row counts, plus constraints, indexes, and foreign keys — then remediate with an autonomous AI repair agent, one-shot AI fixes, or manual SQL |
-| **Query Parity** *(post-migration)* | Generate N synthetic read-only queries, run each against both sides, and compare row count, result format, and performance — with a side-by-side result preview on any mismatch |
-| **App Migration Skill** *(post-migration)* | Export a drop-in `SKILL.md` describing how the database's contract with *application* code changed, for whoever migrates the app — an engineer or another AI agent |
-| **Migration Report** *(post-migration)* | Export the whole audit cycle — assessment, plan, what the run copied, validation, query parity — as one printable HTML/PDF report to hand to the client (the Assessment module exports the scan on its own) |
+| **Data Migration** / **Create Sync** | Stream data into Lakebase in-app (batched `COPY`) with live progress, or offload a re-runnable PySpark snapshot to a Databricks Job; failed runs resume |
+| **Validation** *(post-migration)* | Re-scan both sides and match every object — structure, collations, exact row counts, constraints, indexes, FKs — then remediate with an AI repair agent, one-shot AI fixes, or manual SQL |
+| **Query Parity** *(post-migration)* | Run generated read-only queries on both sides and compare row count, result format, and performance |
+| **App Migration Skill** *(post-migration)* | Export a `SKILL.md` describing how the database's contract with application code changed |
+| **Migration Report** *(post-migration)* | Export the whole audit cycle as one printable HTML/PDF report |
 
-Target identifiers are lower-cased by default (PostgreSQL convention); a project
-can instead **preserve source casing** (double-quoted, case-sensitive). System
-objects (`sys`, `INFORMATION_SCHEMA`, `is_ms_shipped`, …) are never migrated.
+## Documentation
 
-### App migration skill
+| | |
+|---|---|
+| [Motivation](https://databricks-solutions.github.io/lakebase-express/docs/motivation/) | What it is, what it is not, and the disclaimer |
+| [Installation](https://databricks-solutions.github.io/lakebase-express/docs/installation/) | Deploy as a Databricks App: bundle target, secret scope, grants, network |
+| [User guide](https://databricks-solutions.github.io/lakebase-express/docs/guide/) | The migration workflow, module by module — including sync and async loads |
+| [Architecture](https://databricks-solutions.github.io/lakebase-express/docs/architecture/) | Engine, connectors, persistence, and the REST API |
+| [Reference](https://databricks-solutions.github.io/lakebase-express/docs/reference/) | Configuration, Foundation Models, collations, limitations, troubleshooting |
+| [Development](https://databricks-solutions.github.io/lakebase-express/docs/dev/) | Project layout, local development, tests, CI/CD, adding a connector |
 
-Migrating the database is only half the work: the application that talks to it
-has to move too. `GET /api/projects/{id}/context-skill` renders everything this
-tool learned into a **self-contained `SKILL.md`** — download it from the *App
-Migration Skill* module and drop it into another AI agent's skills directory
-(the module shows the path for Claude Code, Codex, Cursor, or anything else). No
-glue required.
-
-It carries what application code has to follow: the schema and identifier-casing
-rules every call site depends on, the columns whose value semantics changed, the
-columns where Postgres now rejects `LIKE`, how procedure and trigger call sites
-change, the T-SQL rewrite table applied to this database, what did not come
-across, and the deliberate trades a reader must *not* "fix". It deliberately says
-nothing about how to *connect* — how this tool reached Lakebase says nothing about
-how your application should — and carries no coordinates and no secret values, so
-it is safe to commit next to the code it describes.
-
-It is a **delta**, so anything absent round-trips unchanged, and changes are
-**grouped** ("these 45 columns reject `LIKE`") rather than listed per row, so a
-200-table database still produces a skill an agent reads in one pass. Long groups
-are capped and defer to `GET /api/projects/{id}/context-bundle`, the same context
-as JSON for scripts. Both render from stored state alone, so they can be exported
-at any phase and say up front what they cannot yet vouch for.
-
-Everything above is derived deterministically — no model writes it, which is what
-makes it safe to act on. One optional section is the exception: **model notes**
-(`POST /api/projects/{id}/context-notes`) hand each translated procedure, function,
-view and trigger to the configured Foundation Model together with its original
-T-SQL, and ask what changes for the code that *calls* it. That catches what no rule
-can — on a test database it found a function parameter shadowed by a column (so the
-filter silently matched every row) and an `UPDATE` setting a column to itself. The
-section names the endpoint that wrote it, says it is advisory, and says how many
-objects the model actually read. The pass takes minutes, so it runs in the
-background and the UI polls; once a run succeeds both exports carry its result, and
-a failure leaves the deterministic export intact.
-
-The AI migration *analysis* from the Assessment module is deliberately **not**
-included: it is produced before the plan exists, so it warns about risks the
-migration then handled and suggests approaches the migration deliberately rejected
-(citext, deterministic collations). In an artifact whose purpose is to stop a
-downstream agent contradicting those decisions, carrying it would do the opposite.
-
-### Migration report
-
-The audit deliverable: `GET /api/projects/{id}/report` renders the whole cycle —
-assessment, plan, what the run actually copied, validation, query parity — as **one
-self-contained HTML page**, downloadable from the *Migration Report* module. There
-is no external stylesheet, font, or script, so it can be emailed, committed, or
-opened offline years later.
-
-**The PDF is the browser's own print output** (the page carries a *Save as PDF*
-button, and a print stylesheet with A4 page setup, repeating table headers, and
-page breaks that never split a finding in half). Rendering it server-side would mean
-WeasyPrint or wkhtmltopdf — system libraries the Databricks Apps container does not
-carry — for a worse result than the print engine already in the reader's browser.
-
-Sections run in the order the work happened, and **every one is rendered even when
-its phase never ran**, because a missing heading reads as a phase that passed. For
-the same reason a score whose phase never ran prints *Not run* rather than `0`, and
-the report opens with **what it cannot vouch for** — validation not run, row counts
-taken by planner estimate, run history held in memory, and the fact that applying
-the plan is not recorded anywhere, so Validation is the only evidence of what
-reached the target.
-
-**What it deliberately leaves out.** The report is built to be emailed and committed, so
-it is a summary, not a dump of the project row. It carries no password and no secret
-scope/key reference, and no connecting identity — not the source username, not the
-Lakebase role. It carries no SQL: not a source object's T-SQL, not the translated
-PL/pgSQL, not a validation fix, not a generated parity query. Above all it carries **no
-row data**: query parity samples real rows from both databases to compare them, and
-neither the previews nor the differing cells are read — only which *columns* disagreed.
-Database error text is cut to its primary message, because Postgres appends a `DETAIL`
-line to a constraint violation that names the offending key values, or prints the whole
-failing row; the full text stays in the app. What it does carry, by design, is the source
-and target **host and database name** plus the target schema — that is the audit trail of
-what moved where, and it is the one reason to treat the file as internal to the customer
-who owns that infrastructure.
-
-It is derived entirely from what the phases stored: no source or target connection
-is opened and no model is called, so a report costs nothing to produce and is
-reproducible from the project row plus its run history. Rows are counted as they
-landed — a table that failed was copied in one transaction and committed nothing, so
-its progress is not counted, and a run that resumed another is counted once.
-Unlike the app-migration skill, this one *does* carry the AI assessment (labelled
-with the endpoint that wrote it, and as written before the plan existed): the report
-is a record of what each phase produced, not instructions for an agent to follow.
-
-Long enumerations are capped, always report their true size, and say that the project
-itself — not the JSON export, which carries the same caps — holds the rest. A 1.6 MB
-project row with 250 tables and 900 findings renders a 172 KB report.
-`GET /api/projects/{id}/report-data` is the same report as JSON, for machine consumers.
-
-**`?scope=assessment` narrows either route to the source scan alone**, which is what the
-Assessment module's download icon produces — readiness, what was scanned, every finding,
-and the AI analysis, for the stage where there is no plan, no load and nothing compared
-yet. The icon sits at the right of the AI analysis panel's footer and goes straight to
-the print dialog (the report is loaded into an offscreen frame and printed), so the one
-step is *Save as PDF*; the document title becomes the suggested filename. A section outside the scope is `null` rather than empty,
-so "not part of this artifact" cannot read as "nothing found"; the sole section is
-unnumbered, since `1.` implies a sequence; no phase the scope excludes gets a *Not run*
-tile, which would answer a question the artifact never asked; and the caveats are about
-the scan — its age, and that **source row counts come from the source's partition
-statistics rather than `COUNT(*)`, so they are approximate**. It reads no run history, so
-it costs a single project read. Anything else is a 422 rather than a silent full export.
-
-`scripts/preview_report.py` renders a fully-populated example without a workspace or
-a database, for iterating on the print layout (`--serve` seeds it into a throwaway
-store and runs the app).
-
-### Collations
-
-Column collations are **translated, not dropped**. SQL Server's usual collations
-are case-insensitive (`SQL_Latin1_General_CP1_CI_AS`, the Azure SQL default) and
-PostgreSQL's default is case-sensitive, so ignoring them silently changes results —
-`'ana' = 'ANA'`, sort order, `GROUP BY`, unique indexes — without raising an error.
-
-Each source collation becomes an ICU collation created before the tables using it,
-and every character column carries a `COLLATE` clause. Strength maps to an ICU
-level (`CI_AS` → `level2`, `CI_AI` → `level1`, `CS_AS` → `level3`), the locale to
-the closest ICU tag, and `_BIN`/`_BIN2` to the built-in `C`.
-
-Case- or accent-insensitive collations must be **nondeterministic** — otherwise
-equality stays byte-wise and only sorting changes. The assessment flags every
-affected column (`COLLATION_INSENSITIVE`) and any CHECK or filtered index that
-pattern-matches one (`COLLATION_PATTERN_MATCH`, which will fail to apply);
-Validation compares each target column's collation and reports drift with a fix.
-
-**Queries that `LIKE` those columns must be rewritten.** PostgreSQL rejects
-pattern matching on a nondeterministic collation, so put a deterministic
-collation on the operand and use `ILIKE` to keep the case-insensitive result:
-
-```sql
-WHERE email LIKE '%gmail%'                  -- ERROR: not supported for LIKE
-WHERE email COLLATE "C" ILIKE '%gmail%'     -- same rows as the source
-```
-
-Two traps: plain `LIKE` after `COLLATE "C"` is case-**sensitive** (fewer rows than
-the source), and `lower(email) LIKE lower(?)` is rejected too — `lower()`'s result
-keeps the column's collation. For an accent-*insensitive* source collation
-(`..._CI_AI`), `ILIKE` alone still under-matches; wrap both sides in `unaccent()`
-(available on Lakebase via `CREATE EXTENSION unaccent`).
-
-## How it works
-
-- **Backend** (`backend/`) is pure Python with no web framework in the migration
-  logic, so it's reusable from notebooks and unit-testable without Databricks.
-  The source scan uses `pymssql` (no Spark, no system ODBC driver) and reads only
-  small catalog result sets.
-- **Schema & code** — the assessment becomes editable `PlanItem`s applied to
-  Lakebase in dependency order, each in its own transaction so a failure is
-  isolated and reported.
-- **Data** — tables stream via `fetchmany` + bulk `COPY` on a background thread
-  the UI polls; large tables can be offloaded to a Databricks Job or a PySpark
-  **snapshot** (range-partitioned reads → per-partition `COPY`, tables loaded
-  concurrently, idempotent re-runs).
-- **Collations** are mirrored as ICU collations created before the tables whose
-  columns reference them, so string comparison keeps the source's case/accent
-  semantics (see [Collations](#collations)).
-- **Constraints, indexes, FKs, and triggers** are created **after** the data
-  load, so the bulk copy pays no per-row maintenance and identity sequences sync
-  to `MAX+1` once rows exist.
-- **Post-migration** — Validation re-inventories both sides and diffs them
-  through the naming rules; Query Parity runs generated read-only queries on both
-  sides and compares the results. Both run on background threads with polled
-  progress. Constraints, indexes, and foreign keys are compared as one row per
-  table per kind ("5 of 5 present") rather than one row per object — a real
-  database has hundreds — and an expanded row names exactly what differs.
-
-## Architecture
-
-```
-databricks.yml Bundle: the app resource, its runtime command and its env
-app.yaml       Apps runtime spec — GENERATED by deploy.sh from databricks.yml
-backend/       FastAPI + all migration logic (framework-free, unit-testable)
-frontend/      React + Vite + TypeScript SPA (built to frontend/dist/)
-docs/          CI/CD and dependency-lock docs (devops.md)
-tests/         Pure-Python unit tests
-```
-
-In production the SPA is built and served by the same FastAPI process. Database
-passwords are typed per session or referenced by a workspace-bound Databricks
-secret scope/key (including Key Vault-backed scopes on Azure).
-
-Everything that crosses a network retries transient failures under a shared policy
-in `backend/retry.py` — the source scan, plan executor, data loader and
-foundation-model calls. A resuming serverless database or a rate-limited endpoint
-is retried; a bad password or a syntax error still fails on the first attempt.
-
-Run state (sync and async data loads, plan builds, validation, repair, query
-parity) is held in memory and written through to a Lakebase table when the
-project store is Postgres
-— so runs survive a restart, are visible to other workers, and leave a history at
-`GET /api/runs`, filterable by `kind` and `project_id`. Each run's `run_id` is a
-`uuid` and carries the `lbx_projects` row it belongs to.
-`LBX_RUNS_BACKEND=memory|postgres` overrides.
-
-Because that per-table state is durable, a **sync run can be resumed instead of
-restarted**. A run whose loader is gone — it failed, or the app restarted mid-load —
-is offered on Create Sync as *Resume last run*; the tables it already loaded are
-marked `skipped` (their row counts carried over) and only the rest are streamed.
-Each table is copied in one transaction, so "already loaded" is exact rather than a
-guess: a table either committed in full or left nothing behind. A run only counts as
-resumable once its loader is gone, which the run's own heartbeat decides — a run
-working through a slow table reports no progress for minutes, and resuming a live one
-would put two loaders on the same `TRUNCATE`.
-
-The foreign keys dropped for the load are persisted with the run, so an interrupted
-one no longer takes the only copy of their definitions with it; the resume restores
-what it left dropped.
-
-**Async (job) runs resume the same way.** The generated loader notebook checkpoints
-each table into its own run-state row as that table settles, and reads that
-checkpoint back before it copies anything: the tables already loaded are kept, only
-the rest are copied, and the foreign keys the interrupted attempt left dropped are
-restored with this run's.
-
-Which run it continues depends on how it was started. **Repair run** (or a task retry)
-re-runs inside the same run, so the notebook reads *its own* row and carries on from
-where the failed attempt stopped — no parameter needed. Continuing a *different* run
-takes the `resume_from` job parameter, which is what *Resume last run* passes in async
-mode; it defaults to empty, so a scheduled refresh — or a plain `Run now` on a fresh
-run, whose row holds no checkpoint yet — is still a full snapshot. A run is offered in
-the app only once its Databricks run is over (the Jobs API is asked) and only when
-resuming would skip work, so it never competes with a live job for the same
-`TRUNCATE`. Resuming stays table-level in both modes: a single table that failed
-restarts from row zero.
-
-Async (Databricks job) migrations are recorded as two kinds, because provisioning
-a job and running one are different events: `async_job` is what a setup produced
-(`created` or `scheduled`, one row, terminal), and `async_run` is one execution
-(`running` → `success`/`failed`). Executions record themselves from inside the
-generated notebooks, since they run outside the app — so a job created to run
-later, a re-run triggered from the Jobs UI and a scheduled refresh each get their
-own row, under an id derived from the job run so every task of the chain updates
-one row. Each task records itself under `tasks` (keyed by the Databricks job task
-key) with its own `status`, `started_at` and `finished_at`, and the run is only
-`success` once its **last** task succeeds — a copy finishing while post-load tasks
-still have to run stays `running`. Sync runs stamp the same timestamps on the run
-and on each table.
-
-The notebooks authenticate with a short-lived Lakebase **OAuth** credential minted
-from the job's own identity, so no password is embedded; the app owns the table and
-grants that identity `INSERT`/`UPDATE` when it provisions the job.
-
-That identity needs a Lakebase Postgres role to authenticate against, and Lakebase
-creates one only for the project owner — so a job running as anything else (a
-deployed app's service principal, typically) has none, and the app cannot create it
-on their behalf: `databricks_create_role` requires a session authenticated as a
-Databricks identity, while the app connects with a password. Provisioning detects
-that case and returns the SQL to run, alongside the warning; a **Re-validate
-permission** button re-checks it afterwards, so confirming the fix does not mean
-provisioning the job again. Minting that
-credential needs the Lakebase **endpoint resource path**
-(`projects/<id>/branches/<branch>/endpoints/<endpoint>`), which the hostname does
-not contain — it is resolved by matching `LBX_PROJECTS_PG_HOST` against the
-workspace's Lakebase endpoints, so there is nothing to configure. Set
-`LBX_PROJECTS_PG_ENDPOINT` only to override that lookup, e.g. when the identity
-cannot list Lakebase projects. The coordinates are baked in when the notebooks are
-generated, so a job provisioned without them reports nothing however often it is
-run later — provisioning says so rather than failing silently.
-
-Each migration project gets its own snapshot job and its own notebook folder
-(`<workspace folder>/<project id>`). The job is titled
-`lakebase-express-snapshot · <project name>` and tagged `lbx_project_id` /
-`lbx_project`, so it is recognisable and filterable in the Jobs UI. The **tag** is
-what identifies it, not the title: two projects may share a name, and renaming a
-project retitles its job rather than creating a second one. Requests that carry no
-project id keep using the shared job and folder.
-
-The app is bound to exactly **one** Databricks workspace, not selectable in the
-UI: locally the CLI profile it was started with, and when deployed the workspace
-the App is published in. Restart with a different profile to switch.
+The site's source is [`docs/lakebase-express/`](docs/lakebase-express/) — see
+[Authoring the docs](https://databricks-solutions.github.io/lakebase-express/docs/dev/docs_authoring/).
 
 ## Local development
 
-To iterate on the code without redeploying, run the two processes locally:
+```bash
+DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh   # backend :8000 + Vite :5173
+```
+
+Run the tests exactly as CI does:
 
 ```bash
-# Backend (FastAPI) — from the repo root
-pip install -r requirements.txt
-DATABRICKS_CONFIG_PROFILE=<your-profile> uvicorn backend.main:app --reload --port 8000
-
-# Frontend (React + Vite) — separate shell; proxies /api -> :8000
-cd frontend && npm install && npm run dev
-```
-
-Open the printed Vite URL (default http://localhost:5173).
-
-`DATABRICKS_CONFIG_PROFILE` is a profile from `~/.databrickscfg` and picks the
-workspace for the whole session. Settings shows which one is connected.
-
-### Foundation Model access (Unity Catalog grants)
-
-The AI features need both grants on `system.ai` for your user (locally) or the app's
-service principal (deployed):
-
-```sql
-GRANT USE SCHEMA ON SCHEMA system.ai TO `<principal>`;
-GRANT EXECUTE    ON SCHEMA system.ai TO `<principal>`;
-```
-
-Verify:
-
-```bash
-databricks serving-endpoints query databricks-claude-opus-4-8 \
-  --json '{"messages":[{"role":"user","content":"ping"}],"max_tokens":16}' \
-  --profile <your-profile>
-```
-
-### Run-state role (Lakebase)
-
-Async migrations record their progress from inside the generated notebooks, over a
-Lakebase **OAuth** credential — which authenticates against a Postgres role. Lakebase
-creates one only for the project owner, so the identity your jobs run as needs one
-created once per Lakebase branch: your own user locally, the app's service principal
-when deployed. The app grants the privileges itself at provisioning; only the role
-has to exist first.
-
-Find the identity (deployed, it is the app's service principal):
-
-```bash
-databricks apps get <app-name> --profile <your-profile> -o json \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['service_principal_client_id'])"
-```
-
-Create the role. This must run from a session authenticated as a Databricks
-identity — `databricks psql` gives you one, a native password login does **not**,
-which is why the app cannot do it for you:
-
-```bash
-databricks psql --project <lakebase-project> --profile <your-profile>
-```
-
-```sql
-CREATE EXTENSION IF NOT EXISTS databricks_auth;
--- 'SERVICE_PRINCIPAL' for a deployed app, 'USER' for your own identity
-SELECT databricks_create_role('<identity>', 'SERVICE_PRINCIPAL');
-```
-
-Verify — the new role should appear with `LAKEBASE_OAUTH_V1`:
-
-```bash
-databricks postgres list-roles projects/<project>/branches/<branch> \
-  --profile <your-profile> -o json
-```
-
-Creating roles needs an identity allowed to (the Lakebase project owner, or a member
-of `databricks_superuser`). Skipping this breaks nothing: migrations still run, and
-provisioning shows the same SQL with a **Re-validate** button to confirm the fix
-without provisioning again.
-
-### Choosing the model and the API
-
-Pick the model per session in **Settings → Foundation Model endpoint**, or change
-the default with `LBX_FM_ENDPOINT`:
-
-```bash
-LBX_FM_ENDPOINT=databricks-claude-sonnet-4-5 \
-DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
-```
-
-`LBX_FM_API` selects which API carries the chat calls. Both reach the same model
-and differ only in how it is named:
-
-| `LBX_FM_API` | Request | Accepted names |
-| --- | --- | --- |
-| `serving` | `POST /serving-endpoints/{name}/invocations` | endpoint name: `databricks-claude-opus-4-8` |
-| `gateway` (default) | `POST /ai-gateway/mlflow/v1/chat/completions` | endpoint name **or** the gateway model id: `system.ai.claude-opus-4-8` |
-
-`gateway` is the default and the route the AI Gateway console's sample request
-uses, so the `system.ai.*` ids copied from there work as-is:
-
-```bash
-LBX_FM_API=gateway LBX_FM_ENDPOINT=system.ai.claude-opus-4-8 \
-DATABRICKS_CONFIG_PROFILE=<your-profile> ./run_local.sh
-```
-
-In gateway mode Settings lists both forms for each pay-per-token endpoint. Note
-the `system.ai.<model>` id drops the endpoint's `databricks-` prefix, and that it
-is *not* a Unity Catalog path — the registered model is
-`system.ai.databricks-claude-opus-4-8`. Passing a `system.ai.*` id in `serving`
-mode fails with `ENDPOINT_NOT_FOUND`, since that route takes the name from the
-URL path.
-
-Deployed, set these through the bundle: `fm_endpoint` and `fm_api` in
-`target.yml` (see `target.yml.sample`).
-
-## Run tests
-
-```bash
-pip install --require-hashes --no-deps -r requirements-dev.lock   # exactly what CI installs
+pip install --require-hashes --no-deps -r requirements-dev.lock
 pytest tests/
-ruff check .                                                      # everything CI's lint job reports
+ruff check .
 ```
 
-How the locks are built and kept in step with the app: see
-[Dependency locks](docs/devops.md#dependency-locks).
-
-## Deploy as a Databricks App
-
-Deployment is an Asset Bundle (`databricks.yml`) orchestrated by `deploy.sh` (see
-the [Quick Start](#quick-start) for the end-to-end steps). It builds the SPA,
-renders `app.yaml`, runs `databricks bundle deploy`, grants the app's service
-principal access to the secret scope, then `databricks bundle run` to start the app.
-
-**`app.yaml` is generated, not committed.** The runtime spec — the uvicorn command
-and every `LBX_*` variable — is declared once in `databricks.yml`
-(`resources.apps.*.config`, values from `target.yml`), and `deploy.sh` renders
-`app.yaml` from that resolved config before the deploy. It has to be a real file in
-the deployed source: `bundle deploy` does send the command and env in the deployment
-request, but `databricks apps stop && start` builds a **new deployment from the
-source path** that inherits neither. Tested both ways — with no `app.yaml` the
-restart fails outright (`No command to run and no Python file found`), and with the
-command alone it comes back with no `LBX_*` variable set, silently falling back to
-the ephemeral local stores and losing every project. `app.yaml` is gitignored
-(workspace-specific values) and re-included in the bundle's `sync` block, since
-bundle sync honors `.gitignore`. Keep `app.yaml.sample` as the documented shape;
-never edit `app.yaml` by hand.
-
-**Deploy targets** live in `target.yml`, a per-user file that is **gitignored** so
-no workspace-specific config is committed. Copy `target.yml.sample` to `target.yml`
-and set your target name; `databricks.yml` pulls it in via its `include:` list. No
-workspace host is committed — auth comes from the CLI profile named after the
-target (deploy.sh default), an explicit `DATABRICKS_PROFILE`, or a `workspace.host`
-you add in `target.yml`.
-
-Knobs (see the header of `deploy.sh`): `--skip-build` reuses `frontend/dist`;
-`BUNDLE_TARGET=<target>` picks a target from `target.yml`;
-`DATABRICKS_PROFILE=<profile>` pins a CLI profile; `APP_NAME=<name>` overrides the
-app name; `LBX_SECRET_ACL=READ` and `LBX_SKIP_ACL=1` control the secret-scope grant.
-To deploy to another workspace, add a target to `target.yml` and run
-`BUNDLE_TARGET=<target> ./deploy.sh`.
-
-> **Permissions.** `deploy.sh` grants the app's service principal access to the
-> secret scope; doing so needs **MANAGE** on that scope. You must still give the app
-> network access to the source DB endpoint (firewall rule for its egress IP, or
-> private link). Async-mode runtime scopes need scope create/write. Passwords are
-> never stored in clear text. For run history, the app's service principal also needs
-> a Lakebase Postgres role — see [Run-state role](#run-state-role-lakebase).
-
-## CI/CD
-
-Every pull request and every push to `main` runs lint, the tests on Python 3.10-3.13,
-the SPA build and an offline check of the deploy config — no workspace or secret
-involved. What each job checks, how the dependency locks work and which lint rules
-fail the build are in [docs/devops.md](docs/devops.md).
-
-## Adding a source connector
-
-1. **Frontend** — set `enabled: true` and add connection-form hints in
-   `frontend/src/connectors.ts`. Optionally drop a logo at
-   `frontend/public/logos/<id>.svg`.
-2. **Backend** — register the connector's `source_type` in
-   `backend/connectors/factory.py`. For a non-T-SQL dialect, add a connector
-   exposing `database`, `query(sql) -> list[dict]`, and `test_connection()`; the
-   scanner is connector-agnostic.
-
-## Limitations
-
-- Data-type coercion is light: `bit`→`boolean` is handled; other edge types rely
-  on psycopg adapters and surface as a per-table error rather than dropping rows.
-- System-versioned (temporal) source tables copy as plain tables: their `ValidFrom`/
-  `ValidTo` values come across as data — those columns are `HIDDEN`, so the in-app
-  loader names them explicitly and the job's read projects them through an expression
-  (SQL Server keeps the flag even through a subquery) — but Postgres has no system
-  versioning, so history is not maintained on the target.
-- Check constraints, defaults, and filtered-index predicates are translated
-  mechanically; anything unrecognized passes through verbatim and fails visibly
-  at apply time for review.
-- Run state persists to a Lakebase table only when the project store is Postgres;
-  otherwise it is process memory, and a restart loses the history (and with it the
-  ability to resume).
-- Resume is table-level: a table that failed part-way is re-copied from row zero.
-  An async run can only be resumed if it recorded its checkpoints, which needs the
-  Lakebase run store and a job identity allowed to write to it.
-- **Lakebase auth in lakebase-express is native Postgres roles only** — a role name
-  and password over the Postgres wire protocol. Databricks identity auth
-  (OAuth/OIDC for users, service principals, or groups) is **not** supported yet,
-  so target access isn't governed by workspace RBAC and doesn't inherit SSO/MFA or
-  short-lived credentials. TLS is always required and passwords are never stored in
-  clear text, but a long-lived role password is a shared secret you must rotate
-  yourself: use a dedicated least-privilege role, and prefer a **private network
-  path** (Private Link / private endpoints) over a public endpoint with an IP
-  allowlist. OAuth support is on the [Roadmap](#roadmap).
-- Job-offload and Async-mode paths require a live workspace and expect the schema
-  plan to have created the target tables. Key Vault-backed runtime scopes work
-  only when the keys already exist (Databricks can't write through to them).
-- `money`/`smallmoney` arithmetic differs between the two engines even though the
-  type mapping itself is lossless — see
-  [`money` and fixed-scale arithmetic](#money-and-fixed-scale-arithmetic).
-
-### `money` and fixed-scale arithmetic
-
-`money`/`smallmoney` map to `numeric(19,4)`/`numeric(10,4)` — lossless: same scale,
-full range, no stored value changes. The **arithmetic** differs. T-SQL `AVG()` over a
-`money` column [returns `money`][avg], truncating the division to four decimals inside
-the aggregate; Postgres `avg(numeric)` rounds at the end instead. Same data, same
-query, one digit apart (for example, `254759.0624` vs `254759.0625`).
-
-According to the Microsoft documentation:
-
-> You can experience rounding errors through truncation, when storing monetary values
-> as **money** and **smallmoney**. Avoid using this data type if your money or
-> currency values are used in calculations. Instead, use the **decimal** data type
-> with at least four decimal places.
-> — [money and smallmoney (Transact-SQL)][money]
-
-Only division is exposed — `SUM`, `COUNT`, `MIN`, `MAX` are exact on both sides. Worth
-reviewing where a divided `money` value is written back to a column and feeds later
-calculations, since truncation always biases the same way and accumulates. Converting
-`MONEY` → `DECIMAL(19,4)` on the source before migrating avoids it entirely.
-
-Query Parity reports these as mismatches, correctly — the two sides really do return
-different values. Expand the row to see the side-by-side preview: matching counts and
-sums with a difference confined to the last decimal point to this behaviour rather
-than to missing or altered data.
-
-[money]: https://learn.microsoft.com/en-us/sql/t-sql/data-types/money-and-smallmoney-transact-sql
-[avg]: https://learn.microsoft.com/en-us/sql/t-sql/functions/avg-transact-sql
-
-## Troubleshooting
-
-### `npm install` fails with `ENOTFOUND` on every package
-
-The lockfile pins a private npm mirror that your network can't reach, and its
-host wins over your configured registry. `frontend/package-lock.json` is kept on
-the public registry to prevent this — npm still downloads from a mirror in your
-`~/.npmrc` if you have one.
-
-If you commit from behind a mirror, run `npm run lockfile:check` in `frontend/`
-first (`lockfile:normalize` fixes it).
-
-### Source database grants
-
-The source user needs some read only grants:
-
-```sql
-GRANT CONNECT             TO [<login>];
-GRANT VIEW DEFINITION     TO [<login>];  -- object definitions to translate
-GRANT VIEW DATABASE STATE TO [<login>];  -- row counts
-ALTER ROLE db_datareader ADD MEMBER [<login>];
-```
-
-Nothing ever writes to the source — no `db_datawriter`, `db_ddladmin`, or
-`db_owner` is required.
-
-Run `scripts/source_grants.sql` to apply all of the above (idempotent, one run per
-database); it ends with a verification query. If a scan still fails or comes back
-short, `scripts/assessment_scan_queries.sql` runs the scanner's queries
-individually to show which one is the problem.
-
-### Testing and debugging the source connection
-
-`scripts/azure_sql_connect.py` reproduces a failing **Test connection** from a
-terminal. It drives the same code path as the app (`build_connector` →
-`AzureSqlConnection`) outside FastAPI — same `pymssql` driver, login/query
-timeouts, and transient-error retry (serverless auto-pause resume, `40613`) — then
-runs two cheap catalog queries, so it's safe against production.
-
-```bash
-# Coordinates come from the environment (nothing workspace-specific committed)
-export LBX_SRC_HOST="<server>.database.windows.net"
-export LBX_SRC_DATABASE="<db>"
-export LBX_SRC_USER="<login>"
-export LBX_SRC_PASSWORD="<password>"
-PYTHONPATH=. python3 scripts/azure_sql_connect.py
-
-# Or keep them in a file the probe parses itself
-cp .vscode/azure_sql.env.sample .vscode/azure_sql.env   # gitignored — fill it in
-PYTHONPATH=. python3 scripts/azure_sql_connect.py --env-file .vscode/azure_sql.env
-```
-
-To step through it in VS Code, copy the launch configurations first — the real
-`launch.json` is gitignored, since it holds your own workspace's profile and
-Lakebase coordinates:
-
-```bash
-cp .vscode/launch.json.sample .vscode/launch.json   # gitignored — fill in the <placeholders>
-```
-
-That gives you four configurations: the FastAPI backend under `debugpy`, Chrome
-against the Vite dev server, `pytest` on the current file, and **Azure SQL probe
-(env file)**, which reads `.vscode/azure_sql.env` and pins the interpreter that
-has `pymssql` installed.
-
-## Roadmap
-
-Not commitments — the gaps we'd close next, in rough priority order.
-
-- **Databricks identity auth for Lakebase (OAuth/OIDC).** Connect as a Databricks
-  user, service principal, or group with short-lived tokens instead of a native
-  Postgres role password, so target access is governed by workspace identity and
-  inherits SSO/MFA and credential rotation.
-- **More source connectors** — Oracle, PostgreSQL, MySQL. The scanner is
-  connector-agnostic; see [Adding a source connector](#adding-a-source-connector).
-- **Mid-table checkpoints.** A resumed run skips whole tables; a single very large
-  table still restarts from row zero. Chunked commits keyed on a sortable primary key
-  would let one table resume mid-copy, at the cost of its all-or-nothing load.
+More in [Developer onboarding](https://databricks-solutions.github.io/lakebase-express/docs/dev/).
 
 ## How to get help
 

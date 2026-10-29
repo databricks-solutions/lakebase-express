@@ -1,0 +1,76 @@
+---
+sidebar_position: 6
+title: Troubleshooting
+---
+
+# Troubleshooting
+
+## Projects disappear after a restart
+
+The app is falling back to the container's filesystem and process memory. Check
+**Settings → Storage** or the startup line in `databricks apps logs <app-name>`. The fix is
+to deploy through `./deploy.sh`, which renders `app.yaml` with
+`LBX_PROJECTS_BACKEND=postgres` — see
+[Why `app.yaml` is generated](../installation.mdx#why-appyaml-is-generated).
+
+## Every request errors right after deploying
+
+With the default Lakebase project store the app reads the role password from the secret
+scope on first use. Check that the scope holds `lakebase-password` and that the app's
+service principal has an ACL on it (`deploy.sh` warns about both):
+
+```bash
+databricks secrets list-secrets lakebase-express --profile <your-profile>
+databricks secrets list-acls lakebase-express --profile <your-profile>
+```
+
+## A source scan fails or comes back short
+
+Check the [source grants](../installation.mdx#source-database-grants) —
+`scripts/source_grants.sql` applies them and ends with a verification query. If the scan
+still fails, `scripts/assessment_scan_queries.sql` runs the scanner's queries one by one,
+so you can see which one is the problem.
+
+## Testing the source connection
+
+`scripts/azure_sql_connect.py` reproduces a failing **Test connection** from a terminal. It
+drives the same code path as the app (`build_connector` → `AzureSqlConnection`) outside
+FastAPI — same `pymssql` driver, login and query timeouts, and transient-error retry
+(serverless auto-pause resume, `40613`) — then runs two cheap catalog queries, so it's safe
+against production.
+
+```bash
+# Coordinates come from the environment (nothing workspace-specific committed)
+export LBX_SRC_HOST="<server>.database.windows.net"
+export LBX_SRC_DATABASE="<db>"
+export LBX_SRC_USER="<login>"
+export LBX_SRC_PASSWORD="<password>"
+PYTHONPATH=. python3 scripts/azure_sql_connect.py
+
+# Or keep them in a file the probe parses itself
+cp .vscode/azure_sql.env.sample .vscode/azure_sql.env   # gitignored — fill it in
+PYTHONPATH=. python3 scripts/azure_sql_connect.py --env-file .vscode/azure_sql.env
+```
+
+To step through it in VS Code, see [Debugging in VS Code](../dev/index.mdx#debugging-in-vs-code).
+
+A timeout usually means no network path: allowlist the app's egress IP on the source
+firewall (set `egress_probe: "true"` to log it at startup), or use a private link.
+
+## Async runs don't appear in the run history
+
+The job's identity has no Lakebase Postgres role, so the notebooks cannot record their
+progress. Create it as described in
+[Run-state role](../installation.mdx#run-state-role-lakebase), then press **Re-validate
+permission** on Create Sync.
+
+## `npm install` fails with `ENOTFOUND` on every package
+
+The lockfile pins a private npm mirror your network can't reach, and its host wins over
+your configured registry. `frontend/package-lock.json` (and the docs site's) is kept on the
+public registry to prevent this — npm still downloads from a mirror in your `~/.npmrc` if
+you have one.
+
+If you commit from behind a mirror, run `npm run lockfile:check` first
+(`npm run lockfile:normalize` fixes it). The `postinstall` hook normalizes it on every
+install.
