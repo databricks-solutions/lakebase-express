@@ -83,6 +83,12 @@ def full_globe_note(counts: dict[str, int]) -> str | None:
     return f"FULLGLOBE has no PostGIS form; stored as NULL: {cols}."
 
 
-def full_globe_error(table: str, not_null: list[str]) -> str:
-    return (f"{table}: FULLGLOBE values in NOT NULL column(s) {', '.join(not_null)} "
+class TableWarning(ValueError):
+    """A table that can't load by design: it is reported as a warning, and the run
+    carries on without failing."""
+
+
+def full_globe_error(not_null: list[str]) -> str:
+    # No table name: both loaders already report the error against its table.
+    return (f"FULLGLOBE values in NOT NULL column(s) {', '.join(not_null)} "
             "have no PostGIS form. Make the column nullable or change those rows.")

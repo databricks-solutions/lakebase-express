@@ -299,7 +299,7 @@ export interface RepairState {
 export interface TableProgress {
   name: string;
   target: string;
-  status: string; // pending|running|success|failed|skipped
+  status: string; // pending|running|success|failed|skipped|warning
   rows_copied: number;
   total_rows: number;
   error?: string | null;

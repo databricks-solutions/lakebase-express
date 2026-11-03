@@ -39,6 +39,7 @@ from backend.data_migration.tuning import recommend
 from backend.migration.source_casts import (
     CLR_CAST,
     SOURCE_CASTS,
+    TableWarning,
     full_globe_error,
     full_globe_note,
     full_globe_sql,
@@ -419,7 +420,7 @@ __FULL_GLOBE_HELPERS__
 
 def _full_globes(src_schema: str, src_table: str):
     """The note on FULLGLOBE values the geography cast stores as NULL; a NOT NULL
-    column holding any fails the table before it is truncated."""
+    column holding any skips the table, before it is truncated, with a TableWarning."""
     s, t = src_schema.replace("'", "''"), src_table.replace("'", "''")
     geo = (
         _reader()
@@ -436,7 +437,7 @@ def _full_globes(src_schema: str, src_table: str):
     counts = {n: int(row[n] or 0) for n in names}
     not_null = [r["COLUMN_NAME"] for r in geo if counts[r["COLUMN_NAME"]] and r["IS_NULLABLE"] == "NO"]
     if not_null:
-        raise ValueError(full_globe_error(f"{src_schema}.{src_table}", not_null))
+        raise TableWarning(full_globe_error(not_null))
     return full_globe_note(counts)
 
 
@@ -744,6 +745,7 @@ if dropped_fks:
 _checkpoint(tables_total=len(TABLES), dropped_fks=dropped_fks)
 
 failures: dict[str, Exception] = {}
+warned: dict[str, str] = {}
 total_rows = 0
 budget = _StreamBudget(MAX_STREAMS)
 with ThreadPoolExecutor(max_workers=MAX_PARALLEL_TABLES) as pool:
@@ -757,6 +759,11 @@ with ThreadPoolExecutor(max_workers=MAX_PARALLEL_TABLES) as pool:
                               "started_at": started_at, "finished_at": finished_at}
             if note:
                 progress[name]["warning"] = note
+        except TableWarning as warn:
+            # Can't load by design (e.g. FULLGLOBE in a NOT NULL column): warn, don't fail the job.
+            warned[name] = str(warn)
+            progress[name] = {"status": "warning", "warning": str(warn), "finished_at": _utcnow()}
+            print(f"   WARNING {name} not loaded: {warn}")
         except Exception as exc:
             failures[name] = exc
             progress[name] = {"status": "failed", "error": str(exc), "finished_at": _utcnow()}
@@ -771,8 +778,9 @@ restore_failures = restore_target_fks(dropped_fks)
 # Restored, or reported below — either way a resume of this run must not try again.
 _checkpoint(dropped_fks=[])
 
-print(f"Done: {len(todo) - len(failures)}/{len(todo)} table(s), {total_rows:,} rows copied"
-      + (f", {len(loaded)} already loaded." if loaded else "."))
+print(f"Done: {len(todo) - len(failures) - len(warned)}/{len(todo)} table(s), {total_rows:,} rows copied"
+      + (f", {len(loaded)} already loaded" if loaded else "")
+      + (f", {len(warned)} not loaded (warning): {', '.join(sorted(warned))}." if warned else "."))
 if failures or restore_failures:
     _report_run_state(
         "failed",
@@ -936,9 +944,9 @@ def _render_header(req: DataGenRequest) -> str:
     )
 
 
-# The FULLGLOBE helpers, copied in so both loaders count and word it the same way.
+# The FULLGLOBE helpers, copied in so both loaders count, word and settle it the same way.
 _FULL_GLOBE_HELPERS = "\n\n".join(
-    inspect.getsource(f) for f in (full_globe_sql, full_globe_note, full_globe_error)
+    inspect.getsource(f) for f in (TableWarning, full_globe_sql, full_globe_note, full_globe_error)
 ).rstrip()
 
 

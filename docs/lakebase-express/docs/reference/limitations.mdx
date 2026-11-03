@@ -11,8 +11,8 @@ title: Limitations and roadmap
   PostGIS, `ltree` and `jsonb`, so code that uses their T-SQL methods must be rewritten.
   `ltree` sorts sibling labels as text (`10` before `9`), unlike `hierarchyid`.
 - **`FULLGLOBE` loads as NULL.** PostGIS has no whole-Earth geography. The assessment counts
-  these values, and the run notes how many were stored as NULL; in a `NOT NULL` column they
-  fail the table instead.
+  these values, and the run notes how many were stored as NULL. In a `NOT NULL` column the
+  table is not loaded and gets a warning; the run (or Async job) still succeeds.
 - **Temporal tables copy as plain tables.** For system-versioned source tables the
   `ValidFrom` / `ValidTo` values come across as data (those columns are `HIDDEN`, so the
   in-app loader names them explicitly and the job's read projects them through an

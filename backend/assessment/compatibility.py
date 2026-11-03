@@ -117,7 +117,7 @@ def check_full_globes(tables: Iterable[TableInfo]) -> list[Finding]:
             else:
                 severity, detail = Severity.HIGH, (
                     f"{n:,} FULLGLOBE value(s) have no PostGIS form and the column is "
-                    "NOT NULL, so the table will fail to load.")
+                    "NOT NULL, so the table will not be loaded (the run warns, it doesn't fail).")
             findings.append(
                 Finding(
                     rule_id="GEOGRAPHY_FULLGLOBE",

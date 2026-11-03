@@ -197,7 +197,7 @@ class DataLoadRequest(BaseModel):
 class TableProgress(BaseModel):
     name: str
     target: str
-    status: ItemStatus | str = "pending"     # pending|running|success|failed|skipped
+    status: ItemStatus | str = "pending"     # pending|running|success|failed|skipped|warning
     rows_copied: int = 0
     total_rows: int = 0
     error: str | None = None

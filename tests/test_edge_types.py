@@ -13,6 +13,7 @@ from backend.migration.models import ObjectKind, TableLoadSpec
 from backend.migration.planner import build_plan
 from backend.migration.source_casts import (
     SOURCE_CASTS,
+    TableWarning,
     cast_template,
     full_globe_note,
     full_globe_sql,
@@ -171,8 +172,10 @@ def test_sync_load_notes_full_globes_stored_as_null():
 
 def test_sync_load_fails_up_front_for_a_not_null_column():
     # Otherwise COPY fails with a bare not-null violation that hides the reason.
-    with pytest.raises(ValueError, match="NOT NULL column\\(s\\) Pin"):
+    with pytest.raises(TableWarning) as err:
         _check_full_globes(_Source({"Pin": 1}), _spec(nullable=False))
+    # The loaders prefix the table already, so the message doesn't repeat it.
+    assert str(err.value).startswith("FULLGLOBE values in NOT NULL column(s) Pin ")
 
 
 def test_tables_without_geography_skip_the_count():
@@ -199,22 +202,37 @@ def _async_full_globes(meta, counts):
             return type("D", (), {"collect": lambda self: rows})()
 
     ns: dict = {"_reader": _Reader}
-    exec(code[code.index("def full_globe_sql"):code.index("def _source_relation")], ns)
-    return ns["_full_globes"]
+    exec(code[code.index("class TableWarning"):code.index("def _source_relation")], ns)
+    return ns["_full_globes"], ns["TableWarning"]
 
 
-def test_async_load_notes_and_fails_the_same_way():
+def test_async_load_notes_and_warns_the_same_way():
     meta = [{"COLUMN_NAME": "Pin", "IS_NULLABLE": "YES"}]
-    assert _async_full_globes(meta, {"Pin": 3})("dbo", "T") == (
-        "FULLGLOBE has no PostGIS form; stored as NULL: 3 in Pin."
-    )
+    full_globes, _ = _async_full_globes(meta, {"Pin": 3})
+    assert full_globes("dbo", "T") == "FULLGLOBE has no PostGIS form; stored as NULL: 3 in Pin."
     meta = [{"COLUMN_NAME": "Pin", "IS_NULLABLE": "NO"}]
-    with pytest.raises(ValueError, match="NOT NULL"):
-        _async_full_globes(meta, {"Pin": 3})("dbo", "T")
+    full_globes, table_warning = _async_full_globes(meta, {"Pin": 3})
+    with pytest.raises(table_warning, match="NOT NULL"):
+        full_globes("dbo", "T")
 
 
 def test_async_tables_without_geography_get_no_note():
-    assert _async_full_globes([], {})("dbo", "T") is None
+    full_globes, _ = _async_full_globes([], {})
+    assert full_globes("dbo", "T") is None
+
+
+def test_async_job_warns_instead_of_failing_on_a_table_warning():
+    """The job only raises for real failures; a TableWarning table is recorded as
+    a warning and left out of them."""
+    from backend.data_migration.etl_generator import generate
+    from tests.test_data_migration import _req
+
+    code = generate(_req())[0].code
+    loop = code[code.index("        except TableWarning as warn:"):code.index("# Restore the FKs the load dropped.")]
+    assert 'warned[name] = str(warn)' in loop
+    assert '"status": "warning", "warning": str(warn)' in loop
+    assert loop.index("except TableWarning") < loop.index("except Exception")
+    assert "failures[name]" not in loop.split("except Exception")[0]
 
 
 def test_assessment_counts_full_globes_and_flags_them():
@@ -234,7 +252,7 @@ def test_a_not_null_column_is_a_high_finding():
     t = _table(ColumnInfo(name="Pin", data_type="geography", is_nullable=False,
                           full_globe_count=1))
     (f,) = check_full_globes([t])
-    assert f.severity is Severity.HIGH and "fail to load" in f.detail
+    assert f.severity is Severity.HIGH and "will not be loaded" in f.detail
 
 
 def test_a_failed_count_does_not_break_the_assessment():
@@ -245,3 +263,34 @@ def test_a_failed_count_does_not_break_the_assessment():
     t = _table(_col("geography", "Pin"))
     scanner._count_full_globes(_Conn(), [t])
     assert t.columns[0].full_globe_count == 0
+
+
+def test_sync_run_records_a_warning_and_still_succeeds(monkeypatch):
+    """A TableWarning table is a warning row, not a failure: the run ends success,
+    not partial, and no resume is offered for it."""
+    from backend.migration import runs
+    from backend.migration.models import DataLoadRequest, LakebaseConnRequest
+
+    def fake_load(source, target, spec, *a, **k):
+        if spec.table_name == "GlobeStrict":
+            raise TableWarning("FULLGLOBE values in NOT NULL column(s) Pin have no PostGIS form.")
+        return 2
+
+    monkeypatch.setattr(runs, "build_connector", lambda *a, **k: object())
+    monkeypatch.setattr(runs, "LakebaseConnection", lambda **k: object())
+    monkeypatch.setattr(runs, "capture_and_drop_fks", lambda *a: [])
+    monkeypatch.setattr(runs, "restore_fks", lambda *a: [])
+    monkeypatch.setattr(runs, "load_table", fake_load)
+    monkeypatch.setattr(runs.audit, "spawn", lambda fn, *a: fn(*a))
+
+    req = DataLoadRequest(
+        host="h", database="d", username="u", password="p",
+        lakebase=LakebaseConnRequest(host="lb", database="db", user="u", password="p"),
+        tables=[TableLoadSpec(schema_name="dbo", table_name="GlobeEdge"),
+                TableLoadSpec(schema_name="dbo", table_name="GlobeStrict")],
+    )
+    state = runs.get_run(runs.start_run(req))
+    assert state.status == "success"
+    strict = state.tables[1]
+    assert strict.status == "warning" and strict.warning.startswith("FULLGLOBE values")
+    assert runs.tables_left(state) == 0

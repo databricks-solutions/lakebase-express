@@ -1040,6 +1040,8 @@ function DataProgress({ run }: { run: RunState }) {
   const ok = run.tables.filter((t) => t.status === "success").length;
   const failedTables = run.tables.filter((t) => t.status === "failed");
   const failed = failedTables.length;
+  // Not loaded by design (e.g. FULLGLOBE in a NOT NULL column): a warning, not a failure.
+  const warnedTables = run.tables.filter((t) => t.status === "warning");
   // Loaded by the run this one resumed, so not copied again.
   const skipped = run.tables.filter((t) => t.status === "skipped").length;
   const rowsCopied = run.tables.reduce((n, t) => n + t.rows_copied, 0);
@@ -1051,7 +1053,7 @@ function DataProgress({ run }: { run: RunState }) {
       <div className="prog__row">
         <span className="prog__name">
           Data · {done.toLocaleString()} / {total.toLocaleString()} tables
-          {ok > 0 ? ` · ${ok.toLocaleString()} ok` : ""}{skipped > 0 ? ` · ${skipped.toLocaleString()} already loaded` : ""}{failed > 0 ? ` · ${failed.toLocaleString()} failed` : ""}
+          {ok > 0 ? ` · ${ok.toLocaleString()} ok` : ""}{skipped > 0 ? ` · ${skipped.toLocaleString()} already loaded` : ""}{warnedTables.length > 0 ? ` · ${warnedTables.length.toLocaleString()} not loaded (warning)` : ""}{failed > 0 ? ` · ${failed.toLocaleString()} failed` : ""}
         </span>
         <span className="prog__count">{rowsCopied.toLocaleString()} rows</span>
         <span className={`sbadge sbadge--${statusCls}`}>{run.status}</span>
@@ -1061,9 +1063,9 @@ function DataProgress({ run }: { run: RunState }) {
       </div>
       {run.error && <div className="banner banner--err">{run.error}</div>}
       {/* Failures stay in view; the full per-table list is one click away. */}
-      {failedTables.length > 0 && (
+      {failedTables.length + warnedTables.length > 0 && (
         <div className="proglist" style={{ marginTop: 12 }}>
-          {failedTables.map((tp) => <TableProgress key={tp.name} tp={tp} />)}
+          {[...failedTables, ...warnedTables].map((tp) => <TableProgress key={tp.name} tp={tp} />)}
         </div>
       )}
       <details className="orig">
@@ -1077,13 +1079,14 @@ function DataProgress({ run }: { run: RunState }) {
 }
 
 function TableProgress({ tp }: { tp: RunState["tables"][number] }) {
-  const pct = tp.total_rows > 0 ? Math.min(100, (tp.rows_copied / tp.total_rows) * 100) : tp.status === "success" ? 100 : 0;
+  const pct = tp.status === "warning" ? 100
+    : tp.total_rows > 0 ? Math.min(100, (tp.rows_copied / tp.total_rows) * 100) : tp.status === "success" ? 100 : 0;
   return (
     <div className="prog">
       <div className="prog__row">
         <span className="prog__name">{tp.name} <span className="trow__target">{tp.target}</span></span>
         <span className="prog__count">{tp.rows_copied.toLocaleString()}{tp.total_rows ? ` / ${tp.total_rows.toLocaleString()}` : ""} rows</span>
-        <span className={`sbadge sbadge--${tp.status === "success" ? "ok" : tp.status === "failed" ? "err" : "skip"}`}>{tp.status}</span>
+        <span className={`sbadge sbadge--${tp.status === "success" ? "ok" : tp.status === "failed" ? "err" : tp.status === "warning" ? "warn" : "skip"}`}>{tp.status}</span>
       </div>
       <div className="bar"><div className={`bar__fill bar__fill--${tp.status}`} style={{ width: `${pct}%` }} /></div>
       {tp.error && <div className="banner banner--err">{tp.error}</div>}

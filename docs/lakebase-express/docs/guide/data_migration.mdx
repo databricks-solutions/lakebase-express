@@ -44,7 +44,8 @@ How the load works:
   `ltree` (`/1/2/` becomes `1.2`), `sql_variant` → `jsonb` `{"type", "value"}`, and CLR
   user-defined types → `text`. The plan creates the `postgis`/`ltree` extensions first.
   A geography `FULLGLOBE` has no PostGIS form: it loads as NULL and the table's progress
-  row says how many (a `NOT NULL` column fails the table instead). A
+  row says how many. In a `NOT NULL` column the table is not loaded and gets a warning
+  instead; the run, or the Async job, still succeeds. A
   table that hits a coercion edge fails with the database error — rows are never silently
   dropped.
 - Transient failures on either side (a resuming serverless database, a dropped connection)

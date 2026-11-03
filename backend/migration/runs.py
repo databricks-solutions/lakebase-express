@@ -20,6 +20,7 @@ from backend import audit
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
 from backend.migration.data_loader import capture_and_drop_fks, load_table, restore_fks
+from backend.migration.source_casts import TableWarning
 from backend.migration.models import (
     DataLoadRequest,
     RunState,
@@ -35,6 +36,8 @@ _REGISTRY: RunRegistry[RunState] = RunRegistry("sync_run", RunState)
 
 # Statuses that mean a table needs no further work.
 _DONE = frozenset({"success", "skipped"})
+# Not loaded by design (TableWarning): not left to do, but a resume still retries it.
+_SETTLED = _DONE | {"warning"}
 _TERMINAL = frozenset({"success", "failed", "partial"})
 
 HEARTBEAT_SECONDS = 30.0
@@ -54,7 +57,7 @@ def get_run(run_id: str) -> RunState | None:
 
 
 def tables_left(state: RunState) -> int:
-    return sum(t.status not in _DONE for t in state.tables)
+    return sum(t.status not in _SETTLED for t in state.tables)
 
 
 def is_resumable(state: RunState) -> bool:
@@ -211,6 +214,12 @@ def _copy_tables(run_id: str, req: DataLoadRequest) -> None:
                 _set(run_id, lambda s, i=i, total=total: (
                     setattr(s.tables[i], "rows_copied", total),
                     setattr(s.tables[i], "status", "success"),
+                    setattr(s.tables[i], "finished_at", _now()),
+                ))
+            except TableWarning as warn:
+                _set(run_id, lambda s, i=i, warn=warn: (
+                    setattr(s.tables[i], "status", "warning"),
+                    setattr(s.tables[i], "warning", str(warn)),
                     setattr(s.tables[i], "finished_at", _now()),
                 ))
             except Exception as exc:

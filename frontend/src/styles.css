@@ -707,6 +707,7 @@ a { color: var(--primary); }
 .bar__fill--running { background: var(--primary); }
 /* Loaded by an earlier run and skipped by a resume. */
 .bar__fill--skipped { background: var(--muted); }
+.bar__fill--warning { background: var(--warn); }
 
 /* Overall sync-now progress bar (spans schema + data phases) */
 .syncbar { margin-top: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); }

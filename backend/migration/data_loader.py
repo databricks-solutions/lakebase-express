@@ -30,6 +30,7 @@ from backend.connectors.lakebase import LakebaseConnection
 from backend.connectors.lakebase import transient_reason as target_transient
 from backend.migration.models import TableLoadSpec
 from backend.migration.source_casts import (
+    TableWarning,
     cast_template,
     full_globe_error,
     full_globe_note,
@@ -180,7 +181,7 @@ def _source_select(columns) -> str:
 
 def _check_full_globes(source: AzureSqlConnection, spec: TableLoadSpec) -> str | None:
     """Count the FULLGLOBE values the geography cast stores as NULL; a NOT NULL
-    column holding any fails the table up front, with the reason."""
+    column holding any skips the table up front with a TableWarning."""
     geo = [c for c in spec.columns if c.data_type.lower() == "geography"]
     if not geo:
         return None
@@ -188,7 +189,7 @@ def _check_full_globes(source: AzureSqlConnection, spec: TableLoadSpec) -> str |
     counts = {c.name: int((row[0] if row else {}).get(c.name) or 0) for c in geo}
     not_null = [c.name for c in geo if counts[c.name] and not c.is_nullable]
     if not_null:
-        raise ValueError(full_globe_error(f"{spec.schema_name}.{spec.table_name}", not_null))
+        raise TableWarning(full_globe_error(not_null))
     return full_globe_note(counts)
 
 
