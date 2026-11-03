@@ -8,6 +8,8 @@ without prior knowledge of the schema:
 """
 from __future__ import annotations
 
+import logging
+
 from backend.assessment import compatibility, report
 from backend.assessment.models import (
     AssessmentReport,
@@ -21,6 +23,9 @@ from backend.assessment.models import (
     TableInfo,
 )
 from backend.connectors.azure_sql import AzureSqlConnection
+from backend.migration.source_casts import full_globe_sql
+
+log = logging.getLogger("lakebase_express.scanner")
 
 # --- Catalog queries -------------------------------------------------------------
 #
@@ -45,10 +50,12 @@ _SCHEMA_EXCLUSION = ", ".join(_SYSTEM_SCHEMAS)
 _COLUMNS_SQL = f"""
 SELECT  c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE,
         c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE,
-        c.IS_NULLABLE, c.COLLATION_NAME
+        c.IS_NULLABLE, c.COLLATION_NAME, ty.is_assembly_type AS IS_CLR_TYPE
 FROM    INFORMATION_SCHEMA.COLUMNS c
 JOIN    sys.tables t      ON t.name = c.TABLE_NAME
 JOIN    sys.schemas s     ON s.schema_id = t.schema_id AND s.name = c.TABLE_SCHEMA
+JOIN    sys.columns sc    ON sc.object_id = t.object_id AND sc.name = c.COLUMN_NAME
+JOIN    sys.types ty      ON ty.user_type_id = sc.user_type_id
 WHERE   t.is_ms_shipped = 0
   AND   c.TABLE_SCHEMA NOT IN ({_SCHEMA_EXCLUSION})
 """
@@ -282,6 +289,7 @@ def scan_tables(conn: AzureSqlConnection) -> list[TableInfo]:
                 scale=r["NUMERIC_SCALE"],
                 is_nullable=(r["IS_NULLABLE"] == "YES"),
                 collation_name=r.get("COLLATION_NAME") or None,
+                is_clr_type=bool(r.get("IS_CLR_TYPE")),
             )
         )
 
@@ -321,6 +329,22 @@ def scan_objects(conn: AzureSqlConnection) -> list[ProgrammableObject]:
     return objects
 
 
+def _count_full_globes(conn: AzureSqlConnection, tables: list[TableInfo]) -> None:
+    """Fill ``full_globe_count`` on geography columns. A data scan, so only here,
+    not in scan_tables (which validation re-runs); a failed count is skipped."""
+    for t in tables:
+        geo = [c for c in t.columns if c.data_type.lower() == "geography"]
+        if not geo:
+            continue
+        try:
+            row = conn.query(full_globe_sql(t.schema_name, t.table_name, [c.name for c in geo]))
+        except Exception as exc:
+            log.warning("FULLGLOBE count failed for %s: %s", t.fqn, exc)
+            continue
+        for c in geo:
+            c.full_globe_count = int((row[0] if row else {}).get(c.name) or 0)
+
+
 def run_assessment(
     conn: AzureSqlConnection, *, use_ai: bool = True, endpoint: str | None = None
 ) -> AssessmentReport:
@@ -331,6 +355,7 @@ def run_assessment(
     breaks the scan).
     """
     tables = scan_tables(conn)
+    _count_full_globes(conn, tables)
     objects = scan_objects(conn)
     findings = compatibility.run_all_rules(tables, objects)
     rep = report.build_report(conn.database, tables, objects, findings)

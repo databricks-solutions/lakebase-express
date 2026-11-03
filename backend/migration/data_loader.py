@@ -6,8 +6,8 @@ rows copied so the UI can show live per-table progress.
 
 Type coercion is intentionally light: SQL Server ``bit`` -> Postgres ``boolean``
 is handled (driver returns 0/1), and driver-hostile types (``sql_variant``,
-``hierarchyid``, spatial) are converted to text server-side in the SELECT list;
-other types rely on psycopg's adapters. Tables that hit a coercion edge are
+``hierarchyid``, spatial, CLR UDTs) are converted server-side in the SELECT list
+to the input form of their target type; other types rely on psycopg's adapters. Tables that hit a coercion edge are
 reported as failed with the DB error, not silently skipped.
 
 Constraints created by the plan's post-data phase are handled around the load:
@@ -29,6 +29,12 @@ from backend.connectors.azure_sql import transient_reason as source_transient
 from backend.connectors.lakebase import LakebaseConnection
 from backend.connectors.lakebase import transient_reason as target_transient
 from backend.migration.models import TableLoadSpec
+from backend.migration.source_casts import (
+    cast_template,
+    full_globe_error,
+    full_globe_note,
+    full_globe_sql,
+)
 from backend.retry import DB_POLICY, LOAD_POLICY, call_with_retry
 from backend.schema_migration.naming import map_object, map_schema
 from backend.schema_migration.naming import IdentifierCase
@@ -36,6 +42,7 @@ from backend.schema_migration.naming import IdentifierCase
 log = logging.getLogger("lakebase_express.data_loader")
 
 ProgressFn = Callable[[int], None]
+NoteFn = Callable[[str], None]
 
 # (table regclass text, constraint name, full definition) of a dropped FK.
 DroppedFk = tuple[str, str, str]
@@ -153,20 +160,9 @@ def _bit_indices(columns, col_names: list[str]) -> set[int]:
     return {i for i, name in enumerate(col_names) if name.lower() in bit_names}
 
 
-# SQL Server types the extraction drivers can't fetch raw (pymssql here, Spark's
-# JDBC reader in async mode fails with UNRECOGNIZED_SQL_TYPE). Each is projected
-# through a server-side conversion to text — matching the ``text`` columns the
-# schema plan's type mapper creates for them.
-_CAST_SELECT: dict[str, str] = {
-    "sql_variant": "CAST({c} AS NVARCHAR(MAX)) AS {a}",
-    "hierarchyid": "{c}.ToString() AS {a}",
-    "geography": "{c}.STAsText() AS {a}",
-    "geometry": "{c}.STAsText() AS {a}",
-}
-
-
 def _source_select(columns) -> str:
-    """Explicit SELECT list for the source read, casting exotic types to text.
+    """Explicit SELECT list for the source read, projecting the types the driver
+    can't fetch raw (migration/source_casts).
 
     Aliases keep the original column names so ``cursor.description`` (and the
     COPY column list built from it) still matches the plan-created table.
@@ -177,9 +173,23 @@ def _source_select(columns) -> str:
     parts = []
     for c in columns:
         col = f"[{c.name}]"
-        tmpl = _CAST_SELECT.get(c.data_type.lower())
+        tmpl = cast_template(c.data_type, c.is_clr_type)
         parts.append(tmpl.format(c=col, a=col) if tmpl else col)
     return ", ".join(parts)
+
+
+def _check_full_globes(source: AzureSqlConnection, spec: TableLoadSpec) -> str | None:
+    """Count the FULLGLOBE values the geography cast stores as NULL; a NOT NULL
+    column holding any fails the table up front, with the reason."""
+    geo = [c for c in spec.columns if c.data_type.lower() == "geography"]
+    if not geo:
+        return None
+    row = source.query(full_globe_sql(spec.schema_name, spec.table_name, [c.name for c in geo]))
+    counts = {c.name: int((row[0] if row else {}).get(c.name) or 0) for c in geo}
+    not_null = [c.name for c in geo if counts[c.name] and not c.is_nullable]
+    if not_null:
+        raise ValueError(full_globe_error(f"{spec.schema_name}.{spec.table_name}", not_null))
+    return full_globe_note(counts)
 
 
 def load_table(
@@ -191,8 +201,10 @@ def load_table(
     batch_size: int,
     on_progress: ProgressFn,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    on_note: NoteFn | None = None,
 ) -> int:
     """Load one table; returns total rows copied. Raises on failure.
+    ``on_note`` gets a note on values the load had to change (FULLGLOBE -> NULL).
 
     ``target_schema`` is where the source ``dbo`` schema lands; each table is
     written to its own mapped schema so the source namespaces are preserved.
@@ -203,7 +215,7 @@ def load_table(
     return call_with_retry(
         lambda: _load_table_once(
             source, target, spec, target_schema, truncate_first, batch_size,
-            on_progress, identifier_case,
+            on_progress, identifier_case, on_note,
         ),
         policy=LOAD_POLICY,
         transient=_transient,
@@ -222,7 +234,9 @@ def _load_table_once(
     batch_size: int,
     on_progress: ProgressFn,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    on_note: NoteFn | None = None,
 ) -> int:
+    note = _check_full_globes(source, spec)
     target_table = map_object(spec.target_table or spec.table_name, identifier_case)
     dst_schema = map_schema(spec.schema_name, target_schema, identifier_case)
     src_sql = f'SELECT {_source_select(spec.columns)} FROM [{spec.schema_name}].[{spec.table_name}]'
@@ -272,6 +286,8 @@ def _load_table_once(
                 if has_triggers:
                     pgcur.execute(f"ALTER TABLE {fq_target} ENABLE TRIGGER USER")
         pg.commit()
+        if note and on_note:
+            on_note(note)
         return copied
     except Exception:
         pg.rollback()

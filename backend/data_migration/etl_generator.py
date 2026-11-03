@@ -8,9 +8,9 @@ it straight into the plan-created table with Postgres ``COPY .. FROM STDIN`` fro
 every partition — the same protocol (and type fidelity) Sync mode uses, with no
 staging table or ``INSERT .. SELECT CAST(..)`` double write. Tables load
 concurrently on a thread pool so a multi-node cluster stays busy end to end.
-Source columns Spark can't read raw (``sql_variant``, ``hierarchyid``, spatial —
-UNRECOGNIZED_SQL_TYPE) are converted to text by SQL Server inside the SELECT
-list, matching the ``text`` columns the plan creates for them.
+Source columns Spark can't read raw (``sql_variant``, ``hierarchyid``, spatial,
+CLR types — UNRECOGNIZED_SQL_TYPE) are converted by SQL Server inside the SELECT
+list (migration/source_casts), to the form the plan's column types parse.
 Running it on Databricks (serverless or classic job compute) lets the copy scale
 out beyond the in-app loader — there is no Delta landing, no synced table and no
 CDC.
@@ -25,6 +25,8 @@ generated Python can contain real f-strings/braces without escaping games.
 """
 from __future__ import annotations
 
+import inspect
+
 from backend.data_migration.models import (
     Artifact,
     DataGenRequest,
@@ -34,6 +36,13 @@ from backend.data_migration.models import (
     TuningPlan,
 )
 from backend.data_migration.tuning import recommend
+from backend.migration.source_casts import (
+    CLR_CAST,
+    SOURCE_CASTS,
+    full_globe_error,
+    full_globe_note,
+    full_globe_sql,
+)
 from backend.run_store import RUN_ID_PREFIX
 from backend.schema_migration.naming import map_object, map_schema
 from backend.schema_migration.routine_sql import with_kind_guard
@@ -280,9 +289,9 @@ _SNAPSHOT = '''\
 # MAGIC   nulls into the NOT NULL columns the plan created: SQL Server keeps that flag
 # MAGIC   even through a subquery, so they are wrapped in `ISNULL(c, c)` to come across
 # MAGIC   as ordinary columns. Columns Spark can't read (`sql_variant`, `hierarchyid`,
-# MAGIC   `geography`, `geometry` fail the whole table with `UNRECOGNIZED_SQL_TYPE`)
-# MAGIC   are cast to text by SQL Server in that same list, matching the `text`
-# MAGIC   columns the plan creates for them.
+# MAGIC   `geography`, `geometry` and CLR types fail the whole table with
+# MAGIC   `UNRECOGNIZED_SQL_TYPE`) are converted by SQL Server in that same list, to
+# MAGIC   the text form the plan's column types (jsonb, ltree, PostGIS) parse.
 # MAGIC * **Constraints & indexes after the data** — the plan's post-data DDL
 # MAGIC   (primary/foreign keys, indexes, defaults, identity, checks, triggers)
 # MAGIC   lives in the companion `02_post_load_*` notebooks (one per object type:
@@ -398,15 +407,37 @@ def _bounds(dbtable: str, part_col: str):
 
 
 # SQL Server types Spark's reader cannot map (it fails the whole table with
-# UNRECOGNIZED_SQL_TYPE, e.g. sql_variant id -156). Each is converted to text
-# by SQL Server itself inside the SELECT list — matching the text columns the
-# schema & code plan creates for them.
-UNREADABLE_TYPES = {
-    "sql_variant": "CAST({c} AS NVARCHAR(MAX)) AS {a}",
-    "hierarchyid": "{c}.ToString() AS {a}",
-    "geography": "{c}.STAsText() AS {a}",
-    "geometry": "{c}.STAsText() AS {a}",
-}
+# UNRECOGNIZED_SQL_TYPE, e.g. sql_variant id -156). SQL Server converts each one
+# inside the SELECT list to the input form of the column type the plan created.
+UNREADABLE_TYPES = __SOURCE_CASTS__
+# User CLR types, which the plan maps to text.
+CLR_CAST = __CLR_CAST__
+
+
+__FULL_GLOBE_HELPERS__
+
+
+def _full_globes(src_schema: str, src_table: str):
+    """The note on FULLGLOBE values the geography cast stores as NULL; a NOT NULL
+    column holding any fails the table before it is truncated."""
+    s, t = src_schema.replace("'", "''"), src_table.replace("'", "''")
+    geo = (
+        _reader()
+        .option("query", "SELECT COLUMN_NAME, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS "
+                         f"WHERE TABLE_SCHEMA = '{s}' AND TABLE_NAME = '{t}' "
+                         "AND DATA_TYPE = 'geography'")
+        .load()
+        .collect()
+    )
+    if not geo:
+        return None
+    names = [r["COLUMN_NAME"] for r in geo]
+    row = _reader().option("query", full_globe_sql(src_schema, src_table, names)).load().collect()[0]
+    counts = {n: int(row[n] or 0) for n in names}
+    not_null = [r["COLUMN_NAME"] for r in geo if counts[r["COLUMN_NAME"]] and r["IS_NULLABLE"] == "NO"]
+    if not_null:
+        raise ValueError(full_globe_error(f"{src_schema}.{src_table}", not_null))
+    return full_globe_note(counts)
 
 
 def _source_relation(src_schema: str, src_table: str) -> str:
@@ -425,17 +456,19 @@ def _source_relation(src_schema: str, src_table: str) -> str:
     target preserves), so bounds probes, partitioned reads and the COPY column list
     all keep working against the subquery."""
     s, t = src_schema.replace("'", "''"), src_table.replace("'", "''")
-    # is_hidden lives in sys.columns; the type names the casts key on come from
-    # INFORMATION_SCHEMA. No ORDER BY here: Spark wraps the "query" option in a
+    # is_hidden lives in sys.columns and is_assembly_type in sys.types; the type
+    # names the casts key on come from INFORMATION_SCHEMA. No ORDER BY here: Spark wraps the "query" option in a
     # derived table (SPARK_GEN_SUBQ) and SQL Server rejects ORDER BY inside one.
     meta = (
         _reader()
         .option(
             "query",
-            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.ORDINAL_POSITION, sc.is_hidden "
+            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.ORDINAL_POSITION, sc.is_hidden, "
+            "ty.is_assembly_type "
             "FROM INFORMATION_SCHEMA.COLUMNS c "
             f"JOIN sys.columns sc ON sc.object_id = OBJECT_ID('[{s}].[{t}]') "
             "AND sc.name = c.COLUMN_NAME "
+            "JOIN sys.types ty ON ty.user_type_id = sc.user_type_id "
             f"WHERE c.TABLE_SCHEMA = '{s}' AND c.TABLE_NAME = '{t}'",
         )
         .load()
@@ -448,7 +481,8 @@ def _source_relation(src_schema: str, src_table: str) -> str:
     parts = []
     for r in meta:
         col = f"[{r['COLUMN_NAME']}]"
-        tmpl = UNREADABLE_TYPES.get(r["DATA_TYPE"].lower())
+        tmpl = UNREADABLE_TYPES.get(r["DATA_TYPE"].lower()) or (
+            CLR_CAST if r["is_assembly_type"] else None)
         if tmpl:
             parts.append(tmpl.format(c=col, a=col))
         elif r["is_hidden"]:
@@ -537,12 +571,13 @@ def _copy_chunk(relation, part_col, edges, fetch_size, fq_target, col_list) -> i
 
 def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col,
                    chunks, streams, fetch_size) -> tuple:
-    """Copy one table; (rows, started_at, finished_at) — the timings ride along into
-    the run's per-table checkpoint."""
+    """Copy one table; (rows, started_at, finished_at, note) — the timings and the
+    FULLGLOBE note ride along into the run's per-table checkpoint."""
     started_at = _utcnow()
     label = f"{src_schema}.{src_table} -> {dst_schema}.{dst_table}"
     fq_target = f'"{dst_schema}"."{dst_table}"'
     relation = _source_relation(src_schema, src_table)
+    note = _full_globes(src_schema, src_table)
     bounds = _bounds(relation, part_col) if part_col and chunks > 1 else None
     edges = _chunk_edges(*bounds, chunks) if bounds else []
     ranges = list(zip([None, *edges], [*edges, None]))
@@ -594,7 +629,9 @@ def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col,
             with psycopg.connect(**PG_KWARGS) as pg, pg.cursor() as cur:
                 cur.execute(f"ALTER TABLE {fq_target} ENABLE TRIGGER USER")
     print(f"   ok {label}: {rows:,} rows")
-    return rows, started_at, _utcnow()
+    if note:
+        print(f"   NOTE {label}: {note}")
+    return rows, started_at, _utcnow(), note
 
 
 class _StreamBudget:
@@ -714,10 +751,12 @@ with ThreadPoolExecutor(max_workers=MAX_PARALLEL_TABLES) as pool:
     for fut, (src_schema, src_table, *_) in futures.items():
         name = f"{src_schema}.{src_table}"
         try:
-            rows, started_at, finished_at = fut.result()
+            rows, started_at, finished_at, note = fut.result()
             total_rows += rows
             progress[name] = {"status": "success", "rows_copied": rows,
                               "started_at": started_at, "finished_at": finished_at}
+            if note:
+                progress[name]["warning"] = note
         except Exception as exc:
             failures[name] = exc
             progress[name] = {"status": "failed", "error": str(exc), "finished_at": _utcnow()}
@@ -897,6 +936,18 @@ def _render_header(req: DataGenRequest) -> str:
     )
 
 
+# The FULLGLOBE helpers, copied in so both loaders count and word it the same way.
+_FULL_GLOBE_HELPERS = "\n\n".join(
+    inspect.getsource(f) for f in (full_globe_sql, full_globe_note, full_globe_error)
+).rstrip()
+
+
+def _render_casts() -> str:
+    """The shared casts as a dict literal, one entry per line."""
+    rows = "".join(f"    {k!r}: {v!r},\n" for k, v in SOURCE_CASTS.items())
+    return "{\n" + rows + "}"
+
+
 def _one_line(text: str) -> str:
     # A newline would end the comment and leave the rest as code.
     return " ".join(text.split())
@@ -978,6 +1029,9 @@ def _snapshot(req: DataGenRequest) -> Artifact:
     run_state, pip_extra = _render_run_state(req, LOADER_TASK_KEY)
     code = (
         _SNAPSHOT.replace("__HEADER__", _render_header(req))
+        .replace("__SOURCE_CASTS__", _render_casts())
+        .replace("__CLR_CAST__", repr(CLR_CAST))
+        .replace("__FULL_GLOBE_HELPERS__", _FULL_GLOBE_HELPERS)
         .replace("__TUNING_NOTES__", _tuning_notes(plan))
         .replace("__MAX_STREAMS__", str(plan.max_streams))
         .replace("__MAX_PARALLEL_TABLES__", str(plan.max_parallel_tables))

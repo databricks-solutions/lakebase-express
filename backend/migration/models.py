@@ -39,6 +39,8 @@ class LakebaseConnRequest(BaseModel):
 
 
 class ObjectKind(str, Enum):
+    # Provides target types some columns map to (PostGIS, ltree).
+    EXTENSION = "extension"
     SCHEMA = "schema"
     # Mirrored from the source, created before the tables whose columns use it.
     COLLATION = "collation"
@@ -55,21 +57,22 @@ class ObjectKind(str, Enum):
     FOREIGN_KEY = "foreign_key"
 
 
-# Apply order — schema, then tables, then code objects by dependency likelihood,
+# Apply order — extensions, schema, then tables, then code objects by dependency likelihood,
 # then the post-data phase: constraints → indexes → FKs (which need the
 # referenced PKs/unique indexes) → triggers (moved after data so they don't
 # fire during the bulk COPY).
 KIND_ORDER: dict[ObjectKind, int] = {
-    ObjectKind.SCHEMA: 0,
-    ObjectKind.COLLATION: 1,   # before the tables whose columns COLLATE them
-    ObjectKind.TABLE: 2,
-    ObjectKind.FUNCTION: 3,
-    ObjectKind.VIEW: 4,
-    ObjectKind.PROCEDURE: 5,
-    ObjectKind.CONSTRAINT: 6,
-    ObjectKind.INDEX: 7,
-    ObjectKind.FOREIGN_KEY: 8,
-    ObjectKind.TRIGGER: 9,
+    ObjectKind.EXTENSION: 0,   # before the tables whose columns use its types
+    ObjectKind.SCHEMA: 1,
+    ObjectKind.COLLATION: 2,   # before the tables whose columns COLLATE them
+    ObjectKind.TABLE: 3,
+    ObjectKind.FUNCTION: 4,
+    ObjectKind.VIEW: 5,
+    ObjectKind.PROCEDURE: 6,
+    ObjectKind.CONSTRAINT: 7,
+    ObjectKind.INDEX: 8,
+    ObjectKind.FOREIGN_KEY: 9,
+    ObjectKind.TRIGGER: 10,
 }
 
 # Kinds applied after the data load. Mirrored by the SPA (CreateSync splits the
@@ -198,6 +201,8 @@ class TableProgress(BaseModel):
     rows_copied: int = 0
     total_rows: int = 0
     error: str | None = None
+    # Values the load had to change, e.g. FULLGLOBE stored as NULL.
+    warning: str | None = None
     # UTC ISO 8601.
     started_at: str | None = None
     finished_at: str | None = None
@@ -236,6 +241,7 @@ class AsyncTableProgress(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
+    warning: str | None = None
 
 
 class AsyncRunState(BaseModel):

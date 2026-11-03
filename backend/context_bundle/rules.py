@@ -140,13 +140,24 @@ TYPE_APP_IMPACT: dict[str, str] = {
         "and `.exist()` must be rewritten with xpath()/xmltable()."
     ),
     "hierarchyid": (
-        "No Postgres equivalent — stored as text. Every hierarchy method "
-        "(`GetAncestor`, `IsDescendantOf`, `GetLevel`) needs redesigning, e.g. onto "
-        "ltree or a recursive CTE."
+        "Now ltree: `/1/2.5/` became `1.2_5`. Rewrite the hierarchy methods with ltree "
+        "(`IsDescendantOf` -> `<@`, `GetAncestor` -> `subpath`, `GetLevel` -> `nlevel`). "
+        "ORDER BY no longer gives hierarchyid's depth-first order once sibling numbers "
+        "differ in digit count (ltree compares labels as text)."
     ),
-    "sql_variant": "No Postgres equivalent — stored as text. Typed reads must be reworked.",
-    "geography": "PostGIS is not available in base Lakebase — stored as text; spatial queries need redesigning.",
-    "geometry": "PostGIS is not available in base Lakebase — stored as text; spatial queries need redesigning.",
+    "sql_variant": (
+        "Now jsonb `{\"type\": <SQL Server base type>, \"value\": <string>}`. Typed reads "
+        "must cast `value` by `type`, e.g. `(col->>'value')::int`."
+    ),
+    "geography": (
+        "Now PostGIS geography (SRID kept). Rewrite the spatial methods as PostGIS "
+        "functions, e.g. `STDistance` -> `ST_Distance`. FULLGLOBE values have no PostGIS "
+        "form and were stored as NULL."
+    ),
+    "geometry": (
+        "Now PostGIS geometry (SRID and Z/M kept). Rewrite the spatial methods as PostGIS "
+        "functions, e.g. `STIntersects` -> `ST_Intersects`."
+    ),
 }
 
 # Glossary keys for changes that are not about the source type.

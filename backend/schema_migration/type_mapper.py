@@ -32,8 +32,18 @@ _SIMPLE: dict[str, str] = {
     "image": "bytea",
     "rowversion": "bytea",
     "timestamp": "bytea",           # SQL Server 'timestamp' == rowversion
-    "sql_variant": "text",
-    "hierarchyid": "text",
+    # Values arrive in these types' input forms (migration/source_casts).
+    "sql_variant": "jsonb",
+    "hierarchyid": "ltree",
+    "geometry": "geometry",
+    "geography": "geography",
+}
+
+# Extension that provides each non-core target type, created before the tables.
+_EXTENSION_FOR: dict[str, str] = {
+    "geometry": "postgis",
+    "geography": "postgis",
+    "hierarchyid": "ltree",
 }
 
 # Types whose Postgres form depends on length/precision/scale.
@@ -148,8 +158,16 @@ def map_type(col: ColumnInfo) -> str:
     if t in {"varbinary", "binary"}:
         return "bytea"
 
-    # Unknown / spatial / CLR types: fall back to text and let the user review.
+    # Unknown / CLR types: fall back to text and let the user review.
     return "text"
+
+
+def required_extensions(tables) -> list[str]:
+    """Extensions the mapped columns of ``tables`` need, sorted."""
+    return sorted({
+        ext for t in tables for c in t.columns
+        if (ext := _EXTENSION_FOR.get(c.data_type.lower()))
+    })
 
 
 def is_parameterized(data_type: str) -> bool:

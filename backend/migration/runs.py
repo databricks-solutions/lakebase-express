@@ -199,11 +199,14 @@ def _copy_tables(run_id: str, req: DataLoadRequest) -> None:
             def progress(n: int, i=i) -> None:
                 _set(run_id, lambda s: setattr(s.tables[i], "rows_copied", n))
 
+            def note(text: str, i=i) -> None:
+                _set(run_id, lambda s: setattr(s.tables[i], "warning", text))
+
             try:
                 total = load_table(
                     source, target, spec, req.target_schema,
                     req.truncate_first, req.batch_size, progress,
-                    identifier_case=req.identifier_case,
+                    identifier_case=req.identifier_case, on_note=note,
                 )
                 _set(run_id, lambda s, i=i, total=total: (
                     setattr(s.tables[i], "rows_copied", total),

@@ -10,7 +10,7 @@ interface Props {
 }
 
 const KIND_PLURAL: Record<ObjectKind, string> = {
-  schema: "Schemas", collation: "Collations", table: "Tables", function: "Functions",
+  extension: "Extensions", schema: "Schemas", collation: "Collations", table: "Tables", function: "Functions",
   view: "Views", procedure: "Procedures",
   constraint: "Constraints", index: "Indexes", foreign_key: "Foreign keys",
   trigger: "Triggers",
@@ -18,7 +18,7 @@ const KIND_PLURAL: Record<ObjectKind, string> = {
 // Display order mirrors the dependency-apply order (collations precede their
 // tables; constraints, indexes, FKs, and triggers are post-data).
 const KIND_ORDER: ObjectKind[] = [
-  "schema", "collation", "table", "function", "view", "procedure",
+  "extension", "schema", "collation", "table", "function", "view", "procedure",
   "constraint", "index", "foreign_key", "trigger",
 ];
 

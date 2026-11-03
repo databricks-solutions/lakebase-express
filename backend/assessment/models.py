@@ -94,6 +94,10 @@ class ColumnInfo(BaseModel):
     # and unique-index results (schema_migration/collation_mapper). Optional so
     # reports saved before collations were scanned still load.
     collation_name: str | None = None
+    # A CLR user-defined type: the loader reads it through ToString().
+    is_clr_type: bool = False
+    # geography only: FULLGLOBE values, which load as NULL (counted at assessment).
+    full_globe_count: int = 0
 
 
 class ForeignKeyInfo(BaseModel):

@@ -1087,6 +1087,7 @@ function TableProgress({ tp }: { tp: RunState["tables"][number] }) {
       </div>
       <div className="bar"><div className={`bar__fill bar__fill--${tp.status}`} style={{ width: `${pct}%` }} /></div>
       {tp.error && <div className="banner banner--err">{tp.error}</div>}
+      {tp.warning && <div className="banner banner--warn">{tp.warning}</div>}
     </div>
   );
 }

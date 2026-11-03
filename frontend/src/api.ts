@@ -217,7 +217,7 @@ export interface LakebaseConn {
 }
 
 export type ObjectKind =
-  | "schema" | "collation" | "table" | "function" | "view" | "procedure" | "trigger"
+  | "extension" | "schema" | "collation" | "table" | "function" | "view" | "procedure" | "trigger"
   | "constraint" | "index" | "foreign_key";
 
 // Mirror of backend/migration/models.py POST_DATA_KINDS: plan items applied
@@ -303,6 +303,8 @@ export interface TableProgress {
   rows_copied: number;
   total_rows: number;
   error?: string | null;
+  // Values the load had to change, e.g. FULLGLOBE stored as NULL.
+  warning?: string | null;
 }
 
 export interface RunState {

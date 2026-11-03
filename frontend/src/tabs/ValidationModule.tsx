@@ -18,7 +18,7 @@ const KIND_ORDER: ObjectKind[] = [
   "constraint", "index", "foreign_key",
 ];
 const KIND_LABEL: Record<ObjectKind, string> = {
-  schema: "Schemas", collation: "Collations", table: "Tables", view: "Views",
+  extension: "Extensions", schema: "Schemas", collation: "Collations", table: "Tables", view: "Views",
   function: "Functions", procedure: "Procedures", trigger: "Triggers",
   constraint: "Constraints", index: "Indexes", foreign_key: "Foreign keys",
 };

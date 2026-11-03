@@ -54,19 +54,29 @@ def test_bit_columns_detected_for_coercion():
 
 
 def test_source_select_casts_driver_hostile_types():
-    """sql_variant / hierarchyid / spatial columns break pymssql (and Spark) when
-    fetched raw — the loader must convert them to text server-side, aliased back
-    to the original names so the COPY column list keeps matching."""
+    """sql_variant / hierarchyid / spatial / CLR columns break pymssql (and Spark)
+    when fetched raw — the loader converts them server-side, aliased back to the
+    original names so the COPY column list keeps matching."""
     cols = [
         ColumnInfo(name="Id", data_type="int"),
-        ColumnInfo(name="Payload", data_type="sql_variant"),
-        ColumnInfo(name="Node", data_type="hierarchyid"),
-        ColumnInfo(name="Pin", data_type="geography"),
+        ColumnInfo(name="Node", data_type="hierarchyid", is_clr_type=True),
+        ColumnInfo(name="Pin", data_type="geography", is_clr_type=True),
+        ColumnInfo(name="Pos", data_type="MyPoint", is_clr_type=True),
     ]
     assert _source_select(cols) == (
-        "[Id], CAST([Payload] AS NVARCHAR(MAX)) AS [Payload], "
-        "[Node].ToString() AS [Node], [Pin].STAsText() AS [Pin]"
+        "[Id], "
+        "CASE WHEN [Node].GetLevel() = 0 THEN '' ELSE REPLACE(SUBSTRING("
+        "REPLACE([Node].ToString(), '.', '_'), 2, LEN([Node].ToString()) - 2), '/', '.') "
+        "END AS [Node], "
+        "CASE WHEN [Pin].STGeometryType() = 'FullGlobe' THEN NULL ELSE "
+        "'SRID=' + CAST([Pin].STSrid AS VARCHAR(11)) + ';' + [Pin].AsTextZM() END AS [Pin], "
+        "[Pos].ToString() AS [Pos]"
     )
+
+
+def test_unknown_types_that_are_not_clr_stay_plain():
+    # e.g. Azure SQL's json/vector: ToString() would fail on them.
+    assert _source_select([ColumnInfo(name="Doc", data_type="json")]) == "[Doc]"
 
 
 def test_source_select_falls_back_to_star_without_metadata():
