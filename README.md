@@ -47,10 +47,7 @@ PostgreSQL, MySQL, …) "Coming soon".
   its own service principal, which needs an ACL on that scope; `deploy.sh` grants
   it, provided you hold **MANAGE** there.
 
-The scan and assessment run without a Databricks workspace; the Foundation Model
-features and the Job-offload/Async data paths require one, plus
-[grants on `system.ai`](https://databricks-solutions.github.io/lakebase-express/docs/installation/#foundation-model-access). The source
-login needs [read-only grants](https://databricks-solutions.github.io/lakebase-express/docs/installation/#source-database-grants) to be assessable.
+The source login needs [read-only grants](https://databricks-solutions.github.io/lakebase-express/docs/installation/#source-database-grants) to be accessible.
 
 ## Quick Start
 
