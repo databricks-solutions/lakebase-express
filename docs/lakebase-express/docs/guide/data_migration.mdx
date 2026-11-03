@@ -9,6 +9,12 @@ Two modules move the data. **Data Migration** selects the tables and load option
 **Create Sync** runs the load, either in the app (**Sync now**) or as a Databricks Job
 (**Async mode**).
 
+Create Sync recommends a mode from the selected tables' size, and preselects it until you
+pick one. It recommends **Async mode** when the selection is over 10 GB, any table is over
+2 GB, or the total is over 50 million rows; otherwise **Sync now**. The in-app loader copies
+one table at a time, while the job copies in parallel. These thresholds are a starting point,
+not yet calibrated against timed runs.
+
 ## Select tables & options
 
 - Pick the tables to load (search, *Select all*). Selecting a table without the tables its
