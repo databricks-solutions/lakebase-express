@@ -119,7 +119,7 @@ def test_the_dropped_foreign_keys_are_persisted_and_inherited():
     """They were held in a local variable: a run that died mid-load took the only
     copy of their definitions with it, leaving the target with no FKs at all."""
     code = generate(_spec())[0].code
-    assert "_checkpoint(dropped_fks=dropped_fks)" in code
+    assert "_checkpoint(tables_total=len(TABLES), dropped_fks=dropped_fks)" in code
     assert "_merge_fks(inherited_fks, drop_target_fks(todo))" in code
     # Restored (or reported) — a resume of this run must not try again.
     assert "_checkpoint(dropped_fks=[])" in code
@@ -420,6 +420,8 @@ def test_tables_left_falls_back_to_the_checkpoints_when_the_total_is_unknown():
         "dbo.Items": AsyncTableProgress(status="failed", error="boom"),
     })
     assert async_runs.tables_left(state) == 1
+    # Never "1 of 0": the total falls back to the same checkpoints.
+    assert async_runs.tables_total(state) == 2
 
 
 def test_the_newest_resumable_run_is_offered(project):
@@ -433,6 +435,14 @@ def test_a_run_another_already_resumed_is_never_offered_again(project):
     first = _state(project, tables=_loaded("dbo.Orders"))
     _state(project, resumed_from=first.run_id, tables=_loaded("dbo.Orders", "dbo.Items"),
            tables_total=2)
+    assert async_runs.find_resumable(project) is None
+
+
+def test_a_later_full_rerun_withdraws_the_offer(project):
+    """A re-run from the Jobs UI does not resume, yet it reloaded what the failure left."""
+    _state(project, tables={**_loaded("dbo.Orders"),
+                            "dbo.Items": AsyncTableProgress(status="failed", error="boom")})
+    _state(project, status="success", tables=_loaded("dbo.Orders", "dbo.Items"), tables_total=2)
     assert async_runs.find_resumable(project) is None
 
 

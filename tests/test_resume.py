@@ -317,6 +317,13 @@ def test_a_resume_that_failed_too_is_offered_not_its_ancestor(monkeypatch, proje
     assert runs.find_resumable(project).run_id == second.run_id
 
 
+def test_a_later_full_run_withdraws_the_offer(monkeypatch, project):
+    _sync(monkeypatch, _req(project), _fails_on("Items"))
+    _sync(monkeypatch, _req(project), _ok())
+
+    assert runs.find_resumable(project) is None
+
+
 def test_another_projects_run_is_never_offered(monkeypatch, project):
     _sync(monkeypatch, _req(str(uuid.uuid4())), _fails_on("Items"))
 

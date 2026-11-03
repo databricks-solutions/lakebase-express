@@ -67,21 +67,12 @@ def is_resumable(state: RunState) -> bool:
 
 
 def find_resumable(project_id: str, limit: int = 20) -> RunState | None:
-    """The newest resumable run of a project, for the UI's resume offer.
-
-    A run that a later one already resumed is never it, however much of it failed —
-    what it left behind is that later run's business now. Walking newest-first means
-    every resume is seen before the run it continued.
-    """
-    superseded: set[str] = set()
+    """The project's newest run, if resuming it would help. Only the newest: any later
+    run (a resume or a full re-run) has rewritten the target since an older one."""
     for record in _REGISTRY.list(limit, project_id):
         state = _REGISTRY.get(record.run_id)
-        if state is None:
-            continue
-        if state.resumed_from:
-            superseded.add(state.resumed_from)
-        if state.run_id not in superseded and is_resumable(state):
-            return state
+        if state is not None:
+            return state if is_resumable(state) else None
     return None
 
 

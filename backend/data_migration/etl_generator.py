@@ -703,7 +703,8 @@ if dropped_fks:
     print(f"Dropped {len(dropped_fks)} foreign key(s) for the load — restored afterwards.")
 # Persisted before the load, or a run that dies mid-copy takes the only copy of
 # these definitions with it and the target keeps no foreign keys at all.
-_checkpoint(dropped_fks=dropped_fks)
+# The total too: a run started from the Jobs UI has no other record of it.
+_checkpoint(tables_total=len(TABLES), dropped_fks=dropped_fks)
 
 failures: dict[str, Exception] = {}
 total_rows = 0
