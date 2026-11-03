@@ -48,13 +48,9 @@ is one — and streams every partition straight into the plan-created table with
 loading tables concurrently. There is no Delta landing, synced table or CDC: it is a
 one-off full snapshot, re-runnable.
 
-| Option | Effect |
-|--------|--------|
-| **Create job, run later** | Create the job without starting it — open it in the workspace to choose compute (serverless or a cluster), tune it, and *Run now* |
-| **Run once** | Create the job and start a run now, on serverless compute |
-
-The job is persistent either way, so the snapshot can be re-run later from the Jobs UI, or
-put on a schedule there (`POST /api/migration/async/setup` also accepts a `quartz_cron`).
+The job is created without starting it — open it in the workspace to choose compute
+(serverless or a cluster), tune it, and *Run now*. It is persistent, so the snapshot can be
+re-run later from the Jobs UI, or put on a schedule there (`POST /api/migration/async/setup` also accepts a `quartz_cron`).
 
 ### Load tuning
 

@@ -17,7 +17,6 @@ interface Props {
 }
 
 type Mode = "now" | "async";
-type Schedule = "once" | "create";
 type SyncScope = "schema" | "full";
 
 export default function CreateSync({ state, setState, onGoConnection, onGoSchema, onGoData, onGoValidation, workspace, onManageWorkspace }: Props) {
@@ -62,7 +61,6 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
   const [pwdKey, setPwdKey] = useState("azuresql-password");
   const [lakebasePwdKey, setLakebasePwdKey] = useState("lakebase-password");
   const [workspaceDir, setWorkspaceDir] = useState("/Workspace/Shared/lakebase-express");
-  const [schedule, setSchedule] = useState<Schedule>("create");
   // Create/update the secret scope from the entered connection passwords on submit.
   const [syncSecrets, setSyncSecrets] = useState(true);
   const [secretMsg, setSecretMsg] = useState<string | null>(null);
@@ -358,7 +356,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
         quartz_cron: null,
         timezone: "UTC",
         // A resume is a run: there is nothing to continue in a job left unstarted.
-        run_now: resumeFrom ? true : schedule === "once",
+        run_now: !!resumeFrom,
         resume_from: resumeFrom ?? null,
       });
       setAsyncRes(r);
@@ -541,8 +539,9 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
             the cluster, several tables load concurrently, and each partition streams straight into
             the plan-created tables with Postgres COPY. The plan's constraints, indexes, foreign
             keys, and triggers are applied by chained job tasks — one per object type — that run
-            after the copy succeeds, each with per-statement progress in its own run output. Create
-            it to run later on the compute you choose, or run it now.
+            after the copy succeeds, each with per-statement progress in its own run output. The job
+            is created without running — open it in the workspace to pick the compute (serverless or
+            a cluster), tune it, and hit Run now.
           </p>
 
           {workspace && !workspace.connected && (
@@ -551,19 +550,6 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
               {onManageWorkspace && <button className="link" onClick={onManageWorkspace}>Log in in Settings</button>}
             </div>
           )}
-
-          <div className="modecards" style={{ marginTop: 14 }}>
-            <ModeCard
-              on={schedule === "create"} onSelect={() => setSchedule("create")}
-              badge="Create only" title="Create job, run later"
-              desc="Create the Databricks job without starting it — open it in the workspace to pick the compute (serverless or a cluster), tune it, and hit Run now."
-            />
-            <ModeCard
-              on={schedule === "once"} onSelect={() => setSchedule("once")}
-              badge="One-off" title="Run once"
-              desc="Submit a single Databricks job run that snapshots the selected tables into Lakebase now (on serverless compute)."
-            />
-          </div>
 
           <div className="field-row" style={{ marginTop: 14 }}>
             <SecretScopeField
@@ -631,9 +617,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
               {previewBusy ? "Generating…" : "Preview generated notebook"}
             </button>
             <button className="btn btn--primary" disabled={asyncBusy || noTables || noTarget} onClick={() => setupAsync()}>
-              {asyncBusy ? "Setting up…"
-                : schedule === "create" ? "Apply plan & create job"
-                : "Apply plan & run snapshot"}
+              {asyncBusy ? "Setting up…" : "Apply plan & create job"}
             </button>
             {asyncResumable && (
               <button className="btn" disabled={asyncBusy || noTables || noTarget} onClick={() => setupAsync(asyncResumable.run_id)}>
