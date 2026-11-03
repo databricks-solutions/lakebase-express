@@ -348,7 +348,9 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
   // objects aren't sent — removing them is a review-and-drop, not a conversion.
   const open = report.items.filter((i) => i.status !== "matched" && i.status !== "extra" && !i.remediated);
   const extras = report.items.filter((i) => i.status === "extra" && !i.remediated).length;
-  const rowOnly = open.filter((i) => !sqlFixable(i)).length;
+  // Only what DDL can fix goes to the agent; row-count drift needs Re-copy table data.
+  const fixable = open.filter(sqlFixable);
+  const rowOnly = open.length - fixable.length;
   const running = repair?.status === "running";
 
   function markRemediated(ids: Set<string>) {
@@ -365,7 +367,7 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
   }
 
   async function resolve() {
-    if (!state.lakebase || !open.length) return;
+    if (!state.lakebase || !fixable.length) return;
     setError(null);
     // Re-runs continue each item's attempt history instead of starting over.
     const prior = new Map((repair?.items ?? []).map((i) => [i.id, i.attempts]));
@@ -375,7 +377,7 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
     try {
       const { run_id } = await api.startValidationRepair({
         lakebase: state.lakebase,
-        targets: open.map((item) => ({ item, prior_attempts: prior.get(item.id) ?? [] })),
+        targets: fixable.map((item) => ({ item, prior_attempts: prior.get(item.id) ?? [] })),
         target_schema: state.targetSchema,
         endpoint: fmEndpoint || undefined,
         max_attempts: attempts,
@@ -403,7 +405,7 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
     }
   }
 
-  if (!open.length && !repair) return null;
+  if (!fixable.length && !repair) return null;
 
   return (
     <section className="card">
@@ -423,8 +425,8 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
         (translating source T-SQL where needed), applies it to Lakebase, and iterates on any
         Postgres error until the object is consistent — or it runs out of attempts.
         {rowOnly > 0 && (
-          <> {rowOnly} row-count mismatch{rowOnly === 1 ? "" : "es"} can't be fixed by SQL — the agent
-          flags {rowOnly === 1 ? "it" : "them"} for <strong>Re-copy table data</strong> below.</>
+          <> {rowOnly} row-count mismatch{rowOnly === 1 ? "" : "es"} can't be fixed by SQL, so the
+          agent skips {rowOnly === 1 ? "it" : "them"} — use <strong>Re-copy table data</strong> below.</>
         )}
         {extras > 0 && (
           <> {extras} object{extras === 1 ? " exists" : "s exist"} only in the target — nothing to
@@ -432,12 +434,16 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
           <strong>Remove from target</strong> in the object list below.</>
         )}
       </p>
-      <AgentAttempts value={attempts} onChange={setAttempts} />
-      <div className="actions">
-        <button className="btn btn--primary" disabled={running || !open.length} onClick={resolve}>
-          {running ? "Agent working…" : `✦ Resolve ${open.length.toLocaleString()} with the AI agent`}
-        </button>
-      </div>
+      {(fixable.length > 0 || running) && (
+        <>
+          <AgentAttempts value={attempts} onChange={setAttempts} />
+          <div className="actions">
+            <button className="btn btn--primary" disabled={running} onClick={resolve}>
+              {running ? "Agent working…" : `✦ Resolve ${fixable.length.toLocaleString()} with the AI agent`}
+            </button>
+          </div>
+        </>
+      )}
       {error && <div className="banner banner--err">{error}</div>}
       {repair && <RepairAgentPanel repair={repair} />}
       {repair && !running && repair.fixed > 0 && (
