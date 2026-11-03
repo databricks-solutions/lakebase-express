@@ -103,7 +103,7 @@ def test_the_loader_copies_only_what_the_resumed_run_left():
     # truncated, and its FKs are already down.
     assert 'todo = [spec for spec in TABLES if f"{spec[0]}.{spec[1]}" not in loaded]' in code
     assert "drop_target_fks(todo)" in code
-    assert "pool.submit(snapshot_table, *spec): spec for spec in todo" in code
+    assert "pool.submit(_load, budget, turn, spec): spec for turn, spec in enumerate(todo)" in code
 
 
 def test_each_table_is_checkpointed_as_it_settles():

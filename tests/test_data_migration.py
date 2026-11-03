@@ -137,12 +137,11 @@ def test_snapshot_copies_direct_no_staging_double_write():
 
 def test_snapshot_parallelizes_tables_and_source_reads():
     """30GB+ sources need the cluster busy: concurrent tables on a thread pool,
-    and range-partitioned JDBC reads when the scanned primary key allows it."""
+    and key-range chunks read several at a time when the primary key allows it."""
     code = generate(_req())[0].code
     assert "ThreadPoolExecutor" in code and "MAX_PARALLEL_TABLES" in code
-    for opt in ("partitionColumn", "lowerBound", "upperBound", "numPartitions"):
-        assert opt in code
-    # The per-partition COPY runs on executors via a DataFrame API.
+    assert "pool.submit(_copy_chunk, relation, part_col, r, fetch_size, fq_target, col_list)" in code
+    # The per-chunk COPY runs on executors via a DataFrame API.
     assert "mapInArrow" in code
 
 
@@ -154,7 +153,7 @@ def test_snapshot_avoids_apis_unsupported_on_serverless():
     assert ".rdd" not in code
     assert "foreachPartition" not in code
     # "query" and "dbtable" on the same (mutated) reader is a JDBC error.
-    assert "def _reader()" in code
+    assert "def _reader(fetch_size" in code
 
 
 def test_no_delta_landing_or_cdc_or_synced_table():
@@ -187,7 +186,7 @@ def test_source_read_casts_spark_unreadable_types():
     assert '"geometry": "{c}.STAsText() AS {a}"' in code
     # The read resolves its relation through the projection helper, which names
     # every column and casts the unreadable ones.
-    assert "dbtable = _source_relation(src_schema, src_table)" in code
+    assert "relation = _source_relation(src_schema, src_table)" in code
     assert "FROM [{src_schema}].[{src_table}]) AS src" in code
 
 
@@ -203,7 +202,7 @@ def _source_relation(code: str, meta: list[dict]):
 
     start = code.index("UNREADABLE_TYPES = {")
     ns: dict = {"_reader": _Reader}
-    exec(code[start:code.index("def read_source")], ns)
+    exec(code[start:code.index("def _chunk_edges")], ns)
     return ns["_source_relation"]("dbo", "Orders")
 
 
@@ -295,15 +294,15 @@ def test_snapshot_rows_map_source_to_lakebase_targets():
     code = generate(_req(target_schema="public"))[0].code
     # dbo -> target schema (public); Orders lower-cased; PK rides along as the
     # partition-column candidate for the parallel read.
-    assert '("dbo", "Orders", "public", "orders", "OrderId")' in code
+    assert '("dbo", "Orders", "public", "orders", "OrderId", 8, 8, 10000),' in code
     # Non-default schema keeps its own lower-cased name; no PK -> single stream.
-    assert '("Sales", "Invoice", "sales", "invoice", None)' in code
+    assert '("Sales", "Invoice", "sales", "invoice", None, 1, 1, 10000),' in code
 
 
 def test_snapshot_rows_can_preserve_source_case():
     code = generate(_req(target_schema="AppCore", identifier_case="preserve"))[0].code
-    assert '("dbo", "Orders", "AppCore", "Orders", "OrderId")' in code
-    assert '("Sales", "Invoice", "Sales", "Invoice", None)' in code
+    assert '("dbo", "Orders", "AppCore", "Orders", "OrderId", 8, 8, 10000),' in code
+    assert '("Sales", "Invoice", "Sales", "Invoice", None, 1, 1, 10000),' in code
 
 
 # --- Scanner / model contract ----------------------------------------------------

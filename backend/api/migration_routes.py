@@ -100,6 +100,7 @@ def plan(req: BuildPlanRequest) -> PlanResponse:
         req.translate,
         req.endpoint,
         identifier_case=req.identifier_case,
+        translate_workers=req.translate_workers,
     )
     return PlanResponse(items=items)
 

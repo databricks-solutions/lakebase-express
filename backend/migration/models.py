@@ -98,6 +98,7 @@ class BuildPlanRequest(BaseModel):
     identifier_case: IdentifierCase = IdentifierCase.LOWERCASE
     translate: bool = True              # run AI translation for code objects
     endpoint: str | None = None         # FM endpoint override
+    translate_workers: int | None = Field(default=None, ge=1, le=64)  # None = default (8)
 
 
 class PlanResponse(BaseModel):

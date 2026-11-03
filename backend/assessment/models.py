@@ -140,6 +140,8 @@ class TableInfo(BaseModel):
     schema_name: str
     table_name: str
     row_count: int
+    # Heap/clustered-index pages × 8 KB; 0 for reports scanned before it existed.
+    data_bytes: int = 0
     column_count: int
     columns: list[ColumnInfo] = []
     # Primary-key column(s), in key order (empty if the table has no PK).

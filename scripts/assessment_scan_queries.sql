@@ -69,7 +69,7 @@ WHERE   t.is_ms_shipped = 0
    --------------------------------------------------------------------------- */
 PRINT '===== Q2 Approximate row counts =====';
 SELECT  s.name AS TABLE_SCHEMA, t.name AS TABLE_NAME,
-        SUM(p.row_count) AS ROW_COUNT
+        SUM(p.row_count) AS ROW_COUNT, SUM(p.used_page_count) AS USED_PAGES
 FROM    sys.dm_db_partition_stats p
 JOIN    sys.tables t  ON t.object_id = p.object_id
 JOIN    sys.schemas s ON s.schema_id = t.schema_id

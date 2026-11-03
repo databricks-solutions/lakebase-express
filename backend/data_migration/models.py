@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.schema_migration.naming import IdentifierCase
 
@@ -18,6 +18,69 @@ class TableRef(BaseModel):
     # Primary-key column(s), in key order; auto-filled from the assessment scan.
     # Not required for the snapshot copy — kept for parity with the assessment model.
     primary_key: list[str] = []
+    # Assessment stats the tuning recommender sizes partitions/fetches from; None/0/"" = unknown.
+    row_count: int | None = None
+    data_bytes: int = 0
+    primary_key_type: str = ""
+
+
+# Bounds an override is clamped into, so a stray value never reaches the notebook.
+STREAMS_RANGE = (1, 256)
+TABLE_STREAMS_RANGE = (1, 64)
+FETCH_RANGE = (500, 50_000)
+TRANSLATE_WORKERS_RANGE = (1, 64)
+
+
+class TuningOverrides(BaseModel):
+    """Per-project load tuning; None = use the recommendation."""
+    max_streams: int | None = None
+    table_streams: int | None = None
+    fetch_size: int | None = None
+    translate_workers: int | None = None
+
+    @field_validator("max_streams", "table_streams", "fetch_size", "translate_workers")
+    @classmethod
+    def _clamp(cls, v: int | None, info) -> int | None:
+        if v is None:
+            return None
+        lo, hi = {
+            "max_streams": STREAMS_RANGE, "table_streams": TABLE_STREAMS_RANGE,
+            "fetch_size": FETCH_RANGE, "translate_workers": TRANSLATE_WORKERS_RANGE,
+        }[info.field_name]
+        return max(lo, min(hi, v))
+
+
+class CapacityLimits(BaseModel):
+    """What the live source and target allow; None = could not be read."""
+    target_max_connections: int | None = None
+    target_reserved_connections: int | None = None
+    target_connections_in_use: int | None = None
+    source_service_objective: str | None = None
+    source_cpus: float | None = None
+    source_max_workers: int | None = None
+    # Why a value is missing (permission, unreachable…), shown next to the recommendation.
+    notes: list[str] = []
+
+
+class TablePlan(BaseModel):
+    schema_name: str
+    table_name: str
+    # Key-range chunks the table is read in — each one Spark task and one COPY transaction.
+    chunks: int
+    # Chunks of this table loading at once.
+    streams: int
+    fetch_size: int
+    reason: str
+
+
+class TuningPlan(BaseModel):
+    # Concurrent COPY streams across all tables — each holds one source and one target connection.
+    max_streams: int
+    max_parallel_tables: int
+    # Largest first, the order the notebook loads them in.
+    tables: list[TablePlan]
+    reasons: list[str] = []
+    warnings: list[str] = []
 
 
 class PostLoadStatement(BaseModel):
@@ -81,6 +144,10 @@ class DataGenRequest(BaseModel):
     # server-side from the app's own config, never by the client. Empty means the
     # notebook is generated without run-state reporting.
     run_store: RunStoreTarget | None = None
+
+    # Load tuning: the probed limits (from /api/data/tuning) and the project's overrides.
+    capacity: CapacityLimits | None = None
+    tuning: TuningOverrides = Field(default_factory=TuningOverrides)
 
 
 class Artifact(BaseModel):

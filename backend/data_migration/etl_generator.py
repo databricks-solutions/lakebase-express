@@ -25,7 +25,15 @@ generated Python can contain real f-strings/braces without escaping games.
 """
 from __future__ import annotations
 
-from backend.data_migration.models import Artifact, DataGenRequest, PostLoadStatement, TableRef
+from backend.data_migration.models import (
+    Artifact,
+    DataGenRequest,
+    PostLoadStatement,
+    TablePlan,
+    TableRef,
+    TuningPlan,
+)
+from backend.data_migration.tuning import recommend
 from backend.run_store import RUN_ID_PREFIX
 from backend.schema_migration.naming import map_object, map_schema
 from backend.schema_migration.routine_sql import with_kind_guard
@@ -258,11 +266,15 @@ _SNAPSHOT = '''\
 # MAGIC   loader uses. COPY parses values server-side against the real column types
 # MAGIC   (uuid/xml/timestamptz included), so no staging table and no
 # MAGIC   `INSERT .. SELECT CAST(..)` double write are needed.
-# MAGIC * **Partitioned source reads** — tables whose scanned primary key is
-# MAGIC   numeric/date/timestamp are range-partitioned into `NUM_PARTITIONS`
-# MAGIC   concurrent JDBC reads; each partition COPYs independently.
+# MAGIC * **Chunked source reads** — tables whose scanned primary key is
+# MAGIC   numeric/date/timestamp are read in key-range chunks of a bounded size (see
+# MAGIC   `TABLES`), several at a time. Each chunk is one Spark task and one COPY,
+# MAGIC   committed on its own: a huge table never pushes more than a chunk through
+# MAGIC   one worker, and its rows show up in the target as chunks finish.
 # MAGIC * **Concurrent tables** — up to `MAX_PARALLEL_TABLES` tables load at once,
-# MAGIC   keeping a multi-node cluster busy instead of walking tables one by one.
+# MAGIC   largest first, sharing `MAX_STREAMS` connections so neither database is
+# MAGIC   pushed past its limit. Lakebase Express recommended these values from the
+# MAGIC   scanned table sizes and both databases' limits; edit them freely.
 # MAGIC * **Hidden columns projected through an expression** — a temporal table's
 # MAGIC   period columns (`ValidFrom`/`ValidTo`) are HIDDEN, and the read would COPY
 # MAGIC   nulls into the NOT NULL columns the plan created: SQL Server keeps that flag
@@ -307,22 +319,22 @@ __RUN_STATE__
 # COMMAND ----------
 
 # --- Tuning ---
-# Tables loaded concurrently; each drives its own source read + COPY streams.
-MAX_PARALLEL_TABLES = 4
-# Range-partitioned JDBC reads per table (used when the table has a usable
-# partition column — see TABLES below). Every read partition opens one COPY
-# connection, so peak Postgres connections ≈ MAX_PARALLEL_TABLES * NUM_PARTITIONS;
-# keep that under the Lakebase instance's connection limit.
-NUM_PARTITIONS = 8
-# Rows per JDBC round trip on the source read.
-FETCH_SIZE = 10000
+__TUNING_NOTES__
+# Concurrent COPY streams across all tables. Each holds one source and one Postgres
+# connection, so keep it under both databases' connection limits.
+MAX_STREAMS = __MAX_STREAMS__
+# Tables loaded at once; they share MAX_STREAMS.
+MAX_PARALLEL_TABLES = __MAX_PARALLEL_TABLES__
 
 # COMMAND ----------
 
-# Tables to snapshot:
-#   (source_schema, source_table, target_schema, target_table, partition_column)
+# Tables to snapshot, largest first (the order they start in):
+#   (source_schema, source_table, target_schema, target_table, partition_column,
+#    chunks, streams, fetch_size)
 # partition_column is the scanned primary key's leading column; None (or a
-# non-numeric/date key) falls back to a single-stream read for that table.
+# non-numeric/date key) reads the table as one chunk. chunks = key ranges the
+# table is split into (one COPY each); streams = chunks loading at once;
+# fetch_size = rows per source round trip.
 TABLES = [
 __TABLES__
 ]
@@ -330,7 +342,8 @@ __TABLES__
 # COMMAND ----------
 
 import datetime
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
 
 import psycopg
@@ -341,7 +354,7 @@ PG_KWARGS = dict(
     application_name="lakebase-express-snapshot",
 )
 
-# Spark can only range-partition a JDBC read on numeric/date/timestamp columns.
+# Key types a table can be cut into ranges on.
 _PARTITIONABLE = (int, float, Decimal, datetime.date, datetime.datetime)
 
 
@@ -350,7 +363,7 @@ _PARTITIONABLE = (int, float, Decimal, datetime.date, datetime.datetime)
 # options like encrypt (the driver negotiates TLS by default, which Azure SQL
 # enforces anyway). A fresh reader per call: .option() mutates the reader, and
 # "query" and "dbtable" must never end up on the same one.
-def _reader():
+def _reader(fetch_size: int = 10000):
     return (
         spark.read.format("sqlserver")
         .option("host", HOST)
@@ -358,13 +371,13 @@ def _reader():
         .option("database", DATABASE)
         .option("user", USER)
         .option("password", PASSWORD)
-        .option("fetchsize", FETCH_SIZE)
+        .option("fetchsize", fetch_size)
     )
 
 
 def _bounds(dbtable: str, part_col: str):
     """MIN/MAX of the partition column, or None when the probe fails or the key
-    isn't range-partitionable — the table then falls back to a single-stream read."""
+    can't be cut into ranges — the table is then read as one chunk."""
     try:
         row = (
             _reader()
@@ -376,7 +389,7 @@ def _bounds(dbtable: str, part_col: str):
             .first()
         )
     except Exception as exc:
-        print(f"   bounds probe failed on {dbtable} — single-stream read ({exc})")
+        print(f"   bounds probe failed on {dbtable} — read as one chunk ({exc})")
         return None
     lo, hi = (row["lo"], row["hi"]) if row else (None, None)
     if lo is None or hi is None or lo == hi or not isinstance(lo, _PARTITIONABLE):
@@ -445,21 +458,47 @@ def _source_relation(src_schema: str, src_table: str) -> str:
     return f"(SELECT {', '.join(parts)} FROM [{src_schema}].[{src_table}]) AS src"
 
 
-def read_source(src_schema: str, src_table: str, part_col: str | None):
-    """Read one source table, range-partitioned on part_col when possible."""
-    dbtable = _source_relation(src_schema, src_table)
-    bounds = _bounds(dbtable, part_col) if part_col else None
-    if bounds:
-        return (
-            _reader()
-            .option("dbtable", dbtable)
-            .option("partitionColumn", part_col)
-            .option("lowerBound", str(bounds[0]))
-            .option("upperBound", str(bounds[1]))
-            .option("numPartitions", NUM_PARTITIONS)
-            .load()
-        )
-    return _reader().option("dbtable", dbtable).load()
+def _chunk_edges(lo, hi, n: int) -> list:
+    """Up to n - 1 increasing cut points splitting [lo, hi] evenly. Datetimes are cut
+    on whole seconds, so each edge converts to any SQL Server date/time type the
+    same way on both sides of it."""
+    edges = []
+    for i in range(1, n):
+        edge = lo + (hi - lo) * i // n if isinstance(lo, int) else lo + (hi - lo) * i / n
+        if isinstance(edge, datetime.datetime):
+            edge = edge.replace(microsecond=0)
+        if edge > lo and (not edges or edge > edges[-1]):
+            edges.append(edge)
+    return edges
+
+
+def _literal(v) -> str:
+    if isinstance(v, datetime.datetime):
+        return f"'{v.strftime('%Y-%m-%dT%H:%M:%S')}'"
+    if isinstance(v, datetime.date):
+        return f"'{v.isoformat()}'"
+    return repr(v) if isinstance(v, float) else str(v)
+
+
+def _chunk_where(col: str, lo, hi) -> str:
+    """The chunk's key range; the first and last are open-ended, so no row is ever
+    left between chunks, whatever was inserted after the bounds probe."""
+    conds = []
+    if lo is not None:
+        conds.append(f"[{col}] >= {_literal(lo)}")
+    if hi is not None:
+        conds.append(f"[{col}] < {_literal(hi)}" if lo is not None
+                     else f"([{col}] < {_literal(hi)} OR [{col}] IS NULL)")
+    return f" WHERE {' AND '.join(conds)}" if conds else ""
+
+
+def _narrow(relation: str, where: str) -> str:
+    """The source relation restricted to one chunk."""
+    if not where:
+        return relation
+    if relation.endswith(") AS src"):
+        return relation[: -len(") AS src")] + where + ") AS src"
+    return f"(SELECT * FROM {relation}{where}) AS src"
 
 
 def _copy_stream(fq_target: str, col_list: str):
@@ -488,17 +527,31 @@ def _utcnow() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col) -> tuple:
+def _copy_chunk(relation, part_col, edges, fetch_size, fq_target, col_list) -> int:
+    """One key range: a single-partition read streamed into one COPY, committed on its own."""
+    lo, hi = edges
+    dbtable = _narrow(relation, _chunk_where(part_col, lo, hi) if part_col else "")
+    df = _reader(fetch_size).option("dbtable", dbtable).load()
+    return sum(r["rows"] for r in df.mapInArrow(_copy_stream(fq_target, col_list), "rows long").collect())
+
+
+def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col,
+                   chunks, streams, fetch_size) -> tuple:
     """Copy one table; (rows, started_at, finished_at) — the timings ride along into
     the run's per-table checkpoint."""
     started_at = _utcnow()
     label = f"{src_schema}.{src_table} -> {dst_schema}.{dst_table}"
     fq_target = f'"{dst_schema}"."{dst_table}"'
-    print(f"-> {label} ...")
-    df = read_source(src_schema, src_table, part_col)
-    # Target columns keep the scanned source names, so the DataFrame's columns
-    # are the COPY column list (order-independent — COPY matches by name).
-    col_list = ", ".join(f'"{c}"' for c in df.columns)
+    relation = _source_relation(src_schema, src_table)
+    bounds = _bounds(relation, part_col) if part_col and chunks > 1 else None
+    edges = _chunk_edges(*bounds, chunks) if bounds else []
+    ranges = list(zip([None, *edges], [*edges, None]))
+    streams = max(1, min(streams, len(ranges)))
+    print(f"-> {label} ({len(ranges):,} chunk(s), {streams} at a time) ...")
+    # Target columns keep the scanned source names, so the relation's columns are
+    # the COPY column list (order-independent — COPY matches by name).
+    columns = _reader(fetch_size).option("dbtable", relation).load().columns
+    col_list = ", ".join(f'"{c}"' for c in columns)
     has_triggers = False
     with psycopg.connect(**PG_KWARGS) as pg, pg.cursor() as cur:
         cur.execute("SELECT to_regclass(%s)", (fq_target,))
@@ -518,17 +571,62 @@ def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col) -> tu
         if has_triggers:
             cur.execute(f"ALTER TABLE {fq_target} DISABLE TRIGGER USER")
         cur.execute(f"TRUNCATE TABLE {fq_target}")
-    # Truncate committed above; the parallel COPY streams append into the empty
-    # table. A failure leaves the table partial — re-running truncates it again.
+    # Truncate committed above; the chunks append into the empty table. A failure
+    # leaves the table partial — re-running truncates it again.
+    rows = done = 0
     try:
-        counts = df.mapInArrow(_copy_stream(fq_target, col_list), "rows long").collect()
+        with ThreadPoolExecutor(max_workers=streams) as pool:
+            futures = [pool.submit(_copy_chunk, relation, part_col, r, fetch_size, fq_target, col_list)
+                       for r in ranges]
+            try:
+                for fut in as_completed(futures):
+                    rows += fut.result()
+                    done += 1
+                    if len(ranges) >= 10 and done * 10 // len(ranges) > (done - 1) * 10 // len(ranges):
+                        print(f"   {label}: {done:,}/{len(ranges):,} chunks, {rows:,} rows")
+            except BaseException:
+                # The chunks already running finish; the rest never start.
+                for f in futures:
+                    f.cancel()
+                raise
     finally:
         if has_triggers:
             with psycopg.connect(**PG_KWARGS) as pg, pg.cursor() as cur:
                 cur.execute(f"ALTER TABLE {fq_target} ENABLE TRIGGER USER")
-    rows = sum(r["rows"] for r in counts)
     print(f"   ok {label}: {rows:,} rows")
     return rows, started_at, _utcnow()
+
+
+class _StreamBudget:
+    """Hands out MAX_STREAMS in TABLES order: the largest tables start first and
+    the smaller ones fill the streams left over."""
+
+    def __init__(self, total):
+        self._free = total
+        self._turn = 0
+        self._cond = threading.Condition()
+
+    def acquire(self, turn, n):
+        with self._cond:
+            self._cond.wait_for(lambda: self._turn == turn and self._free >= n)
+            self._free -= n
+            self._turn += 1
+            self._cond.notify_all()
+
+    def release(self, n):
+        with self._cond:
+            self._free += n
+            self._cond.notify_all()
+
+
+def _load(budget, turn, spec):
+    # Capped, or a table asking for more than the budget would wait forever.
+    streams = max(1, min(spec[6], MAX_STREAMS))
+    budget.acquire(turn, streams)
+    try:
+        return snapshot_table(*spec[:6], streams, spec[7])
+    finally:
+        budget.release(streams)
 
 
 def _merge_fks(inherited, captured) -> list:
@@ -546,7 +644,7 @@ def drop_target_fks(tables) -> list:
     idempotent post-load foreign-keys task) can put them back after the load."""
     with psycopg.connect(**PG_KWARGS) as pg, pg.cursor() as cur:
         oids = []
-        for _s, _t, dst_schema, dst_table, _p in tables:
+        for _s, _t, dst_schema, dst_table, *_ in tables:
             cur.execute("SELECT to_regclass(%s)::oid", (f'"{dst_schema}"."{dst_table}"',))
             oid = cur.fetchone()[0]
             if oid is not None:
@@ -598,7 +696,8 @@ if loaded:
     print(f"Resuming: {len(loaded)} table(s) already loaded, {len(todo)} to copy.")
     _checkpoint(tables=progress)
 
-print(f"Snapshotting {len(todo)} table(s), up to {MAX_PARALLEL_TABLES} in parallel ...")
+print(f"Snapshotting {len(todo)} table(s), up to {MAX_PARALLEL_TABLES} in parallel "
+      f"over {MAX_STREAMS} streams ...")
 dropped_fks = _merge_fks(inherited_fks, drop_target_fks(todo))
 if dropped_fks:
     print(f"Dropped {len(dropped_fks)} foreign key(s) for the load — restored afterwards.")
@@ -608,9 +707,10 @@ _checkpoint(dropped_fks=dropped_fks)
 
 failures: dict[str, Exception] = {}
 total_rows = 0
+budget = _StreamBudget(MAX_STREAMS)
 with ThreadPoolExecutor(max_workers=MAX_PARALLEL_TABLES) as pool:
-    futures = {pool.submit(snapshot_table, *spec): spec for spec in todo}
-    for fut, (src_schema, src_table, _s, _t, _p) in futures.items():
+    futures = {pool.submit(_load, budget, turn, spec): spec for turn, spec in enumerate(todo)}
+    for fut, (src_schema, src_table, *_) in futures.items():
         name = f"{src_schema}.{src_table}"
         try:
             rows, started_at, finished_at = fut.result()
@@ -796,14 +896,32 @@ def _render_header(req: DataGenRequest) -> str:
     )
 
 
-def _snapshot_row(t: TableRef, target_schema: str, identifier_case="lowercase") -> str:
+def _one_line(text: str) -> str:
+    # A newline would end the comment and leave the rest as code.
+    return " ".join(text.split())
+
+
+def _snapshot_row(
+    t: TableRef, tp: TablePlan, target_schema: str, identifier_case="lowercase"
+) -> str:
     """One TABLES entry, mapping source names to their Lakebase targets (matching
     the plan). The scanned primary key's leading column rides along as the
     partition-column candidate for the range-partitioned read."""
     dst_schema = map_schema(t.schema_name, target_schema, identifier_case)
     dst_table = map_object(t.table_name, identifier_case)
     part = f'"{t.primary_key[0]}"' if t.primary_key else "None"
-    return f'    ("{t.schema_name}", "{t.table_name}", "{dst_schema}", "{dst_table}", {part})'
+    return (
+        f'    ("{t.schema_name}", "{t.table_name}", "{dst_schema}", "{dst_table}", {part}, '
+        f"{tp.chunks}, {tp.streams}, {tp.fetch_size}),  # {_one_line(tp.reason)}"
+    )
+
+
+def _tuning_notes(plan: TuningPlan) -> str:
+    """Why these values, as comments above them."""
+    lines = ["# Recommended by Lakebase Express:"]
+    lines += [f"#   {_one_line(r)}" for r in plan.reasons]
+    lines += [f"#   WARNING: {_one_line(w)}" for w in plan.warnings]
+    return "\n".join(lines)
 
 
 def _post_load_rows(statements: list[PostLoadStatement]) -> str:
@@ -849,12 +967,19 @@ def _render_run_state(req: DataGenRequest, phase: str) -> tuple[str, str]:
 
 
 def _snapshot(req: DataGenRequest) -> Artifact:
-    rows = ",\n".join(
-        _snapshot_row(t, req.target_schema, req.identifier_case) for t in req.tables
+    plan = recommend(req.tables, req.capacity, req.tuning)
+    refs = {(t.schema_name, t.table_name): t for t in req.tables}
+    rows = "\n".join(
+        _snapshot_row(refs[(tp.schema_name, tp.table_name)], tp, req.target_schema,
+                      req.identifier_case)
+        for tp in plan.tables
     )
     run_state, pip_extra = _render_run_state(req, LOADER_TASK_KEY)
     code = (
         _SNAPSHOT.replace("__HEADER__", _render_header(req))
+        .replace("__TUNING_NOTES__", _tuning_notes(plan))
+        .replace("__MAX_STREAMS__", str(plan.max_streams))
+        .replace("__MAX_PARALLEL_TABLES__", str(plan.max_parallel_tables))
         .replace("__TABLES__", rows)
         .replace("__RUN_STATE__", run_state)
         .replace("__PIP_EXTRA__", pip_extra)

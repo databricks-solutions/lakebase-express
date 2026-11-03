@@ -56,6 +56,35 @@ one-off full snapshot, re-runnable.
 The job is persistent either way, so the snapshot can be re-run later from the Jobs UI, or
 put on a schedule there (`POST /api/migration/async/setup` also accepts a `quartz_cron`).
 
+### Load tuning
+
+The app recommends how hard the job pushes both databases, and writes the values into the
+notebook with the reason for each:
+
+| Setting | Recommended from |
+|---------|------------------|
+| **Concurrent streams** | The tighter of the two databases. Lakebase: 75% of its free connections (`max_connections` minus reserved and in-use). Source: 4 per vCore, at most half its worker threads, so its own workload keeps running. Each stream holds one connection on each side. |
+| **Streams per table** | How many of a table's chunks load at once: as many as it has, up to 32, and at most half the streams when several tables load. |
+| **Rows per fetch** | The average row width: ~8 MB per source round trip, between 500 and 50,000 rows. An override is picked from fixed steps (1,000 to 50,000). |
+
+Tables start largest first and share the streams, up to 16 at a time; every loading table
+holds at least one stream, so the streams also cap how many tables load at once.
+
+Each table is read in **chunks**: key ranges of its primary key of about 256 MB each (or 2M
+rows on older scans), sized from the assessment. A chunk is one Spark task and one `COPY`,
+committed on its own, so a huge table never pushes more than one chunk through a worker,
+however few streams the source allows, and its rows appear in Lakebase as chunks finish. A
+table without a numeric/date primary key is read as one chunk.
+
+The limits are read live when you open Async mode: the source's service objective
+(`sys.dm_user_db_resource_governance` on Azure SQL, `sys.dm_os_sys_info` on SQL Server),
+which needs `VIEW DATABASE STATE`, and the target's `max_connections`. A limit that can't
+be read is shown as such, and the recommendation falls back to the other side, or to the
+previous fixed values (32 streams, 8 partitions). Fill any field to override it for the
+project; the app warns when streams go past what a database allows. **Reset to
+recommended** clears the overrides. **Re-check limits** only reads the databases' limits
+again (e.g. after a Lakebase resize) and keeps the overrides.
+
 - The app applies the plan's pre-data items itself; the job runs the copy, then the
   constraints, indexes, foreign keys and triggers in chained tasks — one per object type —
   each with per-statement progress in its own run output.

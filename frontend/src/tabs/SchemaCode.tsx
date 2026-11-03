@@ -73,6 +73,7 @@ export default function SchemaCode({ state, setState, fmEndpoint }: Props) {
         identifier_case: state.identifierCase,
         translate: true, // T-SQL code objects are always AI-translated
         endpoint: fmEndpoint || undefined,
+        translate_workers: state.tuning.translate_workers ?? null,
       });
       // Poll until the run finishes; ~1.2s cadence matches the other phases.
       for (;;) {
@@ -101,7 +102,7 @@ export default function SchemaCode({ state, setState, fmEndpoint }: Props) {
       setBusy(false);
       setProgress(null);
     }
-  }, [report, state.targetSchema, state.identifierCase, fmEndpoint, setState]);
+  }, [report, state.targetSchema, state.identifierCase, state.tuning.translate_workers, fmEndpoint, setState]);
 
   const editSql = useCallback(
     (id: string, sql: string) =>
@@ -182,10 +183,22 @@ export default function SchemaCode({ state, setState, fmEndpoint }: Props) {
           the bulk copy doesn't pay index-maintenance or FK-validation costs.
         </p>
 
-        <div className="actions">
+        <div className="actions" style={{ alignItems: "flex-end" }}>
           <button className="btn btn--primary" disabled={busy} onClick={buildPlan}>
             {busy ? "Agent is translating…" : items ? "Rebuild plan" : "Generate plan with AI"}
           </button>
+          <div className="field field--narrow" style={{ marginBottom: 0 }}>
+            <label title="Code objects translated at once — lower it if the endpoint rate-limits">Parallel translations</label>
+            <input
+              type="number" min={1} max={64} placeholder="8" disabled={busy}
+              value={state.tuning.translate_workers ?? ""}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const n = v === "" ? null : Math.min(64, Math.max(1, Math.floor(Number(v)) || 1));
+                setState((s) => ({ ...s, tuning: { ...s.tuning, translate_workers: n } }));
+              }}
+            />
+          </div>
         </div>
         <TranslatingStatus active={busy} />
         {busy && progress && progress.total > 0 && (

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type WorkspaceStatus } from "../api";
+import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type CapacityLimits, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type TableRef, type TuningOverrides, type TuningPlan, type WorkspaceStatus } from "../api";
 import CodeBlock from "../components/CodeBlock";
 import SecretScopeField from "../components/SecretScopeField";
 import type { MigrationState } from "../App";
@@ -7,6 +7,7 @@ import { mapObject, mapSchema } from "../naming";
 
 interface Props {
   state: MigrationState;
+  setState: React.Dispatch<React.SetStateAction<MigrationState>>;
   onGoConnection?: () => void;
   onGoSchema?: () => void;
   onGoData?: () => void;
@@ -19,7 +20,7 @@ type Mode = "now" | "async";
 type Schedule = "once" | "create";
 type SyncScope = "schema" | "full";
 
-export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData, onGoValidation, workspace, onManageWorkspace }: Props) {
+export default function CreateSync({ state, setState, onGoConnection, onGoSchema, onGoData, onGoValidation, workspace, onManageWorkspace }: Props) {
   const report = state.report;
   const conn = state.connection;
 
@@ -74,6 +75,20 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   const [previewBusy, setPreviewBusy] = useState(false);
   // A previous job run of this project whose tables can be finished off.
   const [asyncResumable, setAsyncResumable] = useState<ResumableAsyncRun | null>(null);
+
+  // Load tuning: the recommendation for the selected tables, and the probed limits it
+  // came from (kept per connection pair, so editing an override doesn't re-probe).
+  const [tuningPlan, setTuningPlan] = useState<TuningPlan | null>(null);
+  const [tuningBusy, setTuningBusy] = useState(false);
+  const [tuningError, setTuningError] = useState<string | null>(null);
+  const [probeNonce, setProbeNonce] = useState(0);
+  const capacityRef = useRef<{ key: string; limits: CapacityLimits } | null>(null);
+  const limitsKey = `${conn?.host}/${conn?.database}|${state.lakebase?.host}/${state.lakebase?.database}`;
+  const tuningRefs = useMemo(
+    () => tableRefs(state.report?.tables ?? [], state.selection),
+    [state.report, state.selection],
+  );
+  const tuningKey = JSON.stringify(state.tuning);
 
   useEffect(() => {
     if (!runId) return;
@@ -136,6 +151,38 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
       .catch(() => {});
     return () => { live = false; };
   }, [conn?.project_id, mode, asyncRes?.run_id]);
+
+  useEffect(() => {
+    if (mode !== "async" || !tuningRefs.length) return;
+    const cached = capacityRef.current?.key === limitsKey ? capacityRef.current.limits : null;
+    let live = true;
+    const timer = setTimeout(() => {
+      setTuningBusy(true);
+      api.recommendTuning({
+        tables: tuningRefs, overrides: state.tuning, capacity: cached,
+        source: cached ? null : conn, lakebase: cached ? null : state.lakebase,
+      })
+        .then((r) => {
+          capacityRef.current = { key: limitsKey, limits: r.capacity };
+          if (live) { setTuningPlan(r.plan); setTuningError(null); }
+        })
+        .catch((e) => { if (live) setTuningError((e as Error).message); })
+        .finally(() => { if (live) setTuningBusy(false); });
+    }, cached ? 300 : 0);
+    return () => { live = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, tuningRefs, tuningKey, limitsKey, probeNonce]);
+
+  function recheckLimits() {
+    capacityRef.current = null;
+    setProbeNonce((n) => n + 1);
+  }
+
+  const setTuning = (patch: TuningOverrides) =>
+    setState((s) => ({ ...s, tuning: { ...s.tuning, ...patch } }));
+  // Clears every load override (and any legacy field); translation workers belong to Schema & Code.
+  const resetTuning = () =>
+    setState((s) => ({ ...s, tuning: { translate_workers: s.tuning.translate_workers ?? null } }));
 
   if (!report || !conn) {
     return (
@@ -242,10 +289,10 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
       lakebase_database: state.lakebase?.database ?? "lakebase",
       lakebase_user: state.lakebase?.user ?? "",
       lakebase_password_secret_key: lakebasePwdKey,
-      // primary_key feeds the notebook's range-partitioned (parallel) source reads.
-      tables: selectedTables.map((t) => ({
-        schema_name: t.schema_name, table_name: t.table_name, primary_key: t.primary_key ?? [],
-      })),
+      // primary_key feeds the range-partitioned (parallel) source reads; the stats size them.
+      tables: tuningRefs,
+      capacity: capacityRef.current?.key === limitsKey ? capacityRef.current.limits : null,
+      tuning: state.tuning,
       // Post-data plan items (constraints/indexes/FKs/triggers) — the job
       // applies them itself after the snapshot, since it may run detached
       // from the app. `kind` lets the job split them into one task per type.
@@ -552,6 +599,13 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
             exist); the generated notebook reads both from the runtime scope — never inline them.
           </div>
 
+          {!noTables && (
+            <LoadTuning
+              plan={tuningPlan} overrides={state.tuning} busy={tuningBusy} error={tuningError}
+              onChange={setTuning} onReset={resetTuning} onRecheck={recheckLimits}
+            />
+          )}
+
           {noTarget && (
             <div className="banner banner--err">
               No Lakebase target configured.{" "}
@@ -632,6 +686,134 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
           )}
         </section>
       )}
+    </div>
+  );
+}
+
+/** The selected tables with the stats the tuning recommender sizes them from. */
+function tableRefs(tables: TableInfo[], selection: string[]): TableRef[] {
+  return tables
+    .filter((t) => selection.length === 0 || selection.includes(`${t.schema_name}.${t.table_name}`))
+    .map((t) => ({
+      schema_name: t.schema_name, table_name: t.table_name, primary_key: t.primary_key ?? [],
+      row_count: t.row_count, data_bytes: t.data_bytes ?? 0,
+      primary_key_type: t.columns.find((c) => c.name === t.primary_key?.[0])?.data_type ?? "",
+    }));
+}
+
+const TUNING_ROWS_SHOWN = 50;
+
+// Rows per fetch is picked from these steps; smaller ones only add round trips.
+const FETCH_STEPS = [1000, 2500, 5000, 10000, 25000, 50000];
+
+/** Recommended load tuning with per-field overrides; a blank field uses the recommendation. */
+function LoadTuning({ plan, overrides, busy, error, onChange, onReset, onRecheck }: {
+  plan: TuningPlan | null;
+  overrides: TuningOverrides;
+  busy: boolean;
+  error: string | null;
+  onChange: (patch: TuningOverrides) => void;
+  onReset: () => void;
+  onRecheck: () => void;
+}) {
+  const num = (v: string, max: number) =>
+    v.trim() === "" ? null : Math.min(max, Math.max(1, Math.floor(Number(v)) || 1));
+  const overridden = overrides.max_streams != null || overrides.table_streams != null
+    || overrides.fetch_size != null || "max_parallel_tables" in overrides || "num_partitions" in overrides;
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="stack" style={{ marginTop: 14 }}>
+      <details className="planitem" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+        <summary>
+          <span className="planitem__name">Load tuning</span>
+          <span className="muted" style={{ fontSize: 13 }}>
+            {busy ? "Checking limits…" : plan
+              ? `${plan.max_streams} streams · up to ${plan.max_parallel_tables} tables at once`
+              : "Recommended from table sizes and database limits"}
+          </span>
+          <span className={`sbadge ${overridden ? "sbadge--info" : "sbadge--ok"}`}>
+            {overridden ? "Customized" : "Recommended"}
+          </span>
+          <svg className={`acc__chevron ${open ? "acc__chevron--open" : ""}`} viewBox="0 0 24 24"
+               width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </summary>
+        <div className="planitem__body stack">
+          <span className="muted" style={{ fontSize: 13 }}>
+            Recommended from the table sizes and both databases' limits
+            {overridden && <>{" · "}<button className="link" onClick={onReset}>Reset to recommended</button></>}
+            {" · "}<button className="link" disabled={busy} onClick={onRecheck}>Re-check limits</button>
+          </span>
+          <div className="field-row">
+            <div className="field">
+              <label>Concurrent streams</label>
+              <input
+                type="number" min={1} max={256} placeholder={plan ? String(plan.max_streams) : "auto"}
+                value={overrides.max_streams ?? ""}
+                onChange={(e) => onChange({ max_streams: num(e.target.value, 256) })}
+              />
+            </div>
+            <div className="field">
+              <label>Streams per table</label>
+              <input
+                type="number" min={1} max={64} placeholder="per table"
+                value={overrides.table_streams ?? ""}
+                onChange={(e) => onChange({ table_streams: num(e.target.value, 64) })}
+              />
+            </div>
+            <div className="field">
+              <label>Rows per fetch</label>
+              <select
+                value={overrides.fetch_size ?? ""}
+                onChange={(e) => onChange({ fetch_size: e.target.value ? Number(e.target.value) : null })}
+              >
+                <option value="">Per table (recommended)</option>
+                {/* A value saved before these steps existed stays selectable. */}
+                {overrides.fetch_size != null && !FETCH_STEPS.includes(overrides.fetch_size) && (
+                  <option value={overrides.fetch_size}>{overrides.fetch_size.toLocaleString()}</option>
+                )}
+                {FETCH_STEPS.map((n) => <option key={n} value={n}>{n.toLocaleString()}</option>)}
+              </select>
+            </div>
+          </div>
+          <p className="muted" style={{ margin: 0 }}>
+            Blank fields use the recommendation. Each stream uses one source and one Lakebase
+            connection; large tables load in ~256 MB chunks, each committed on its own. The values
+            are written into the notebook, where you can still edit them.
+          </p>
+          {plan && plan.reasons.length > 0 && (
+            <ul className="muted" style={{ margin: 0, paddingLeft: 18 }}>
+              {plan.reasons.map((r) => <li key={r}>{r}</li>)}
+            </ul>
+          )}
+          {plan && (
+            <details className="orig">
+              <summary>Per-table plan ({plan.tables.length.toLocaleString()} tables, largest first)</summary>
+              <table className="dtable" style={{ marginTop: 8 }}>
+                <thead><tr><th>Table</th><th>Chunks</th><th>Streams</th><th>Rows per fetch</th><th>Why</th></tr></thead>
+                <tbody>
+                  {plan.tables.slice(0, TUNING_ROWS_SHOWN).map((t) => (
+                    <tr key={`${t.schema_name}.${t.table_name}`}>
+                      <td>{t.schema_name}.{t.table_name}</td>
+                      <td>{t.chunks.toLocaleString()}</td>
+                      <td>{t.streams}</td>
+                      <td>{t.fetch_size.toLocaleString()}</td>
+                      <td className="dtable__sub">{t.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {plan.tables.length > TUNING_ROWS_SHOWN && (
+                <p className="muted">…and {(plan.tables.length - TUNING_ROWS_SHOWN).toLocaleString()} smaller tables.</p>
+              )}
+            </details>
+          )}
+        </div>
+      </details>
+      {/* Kept outside the collapsed panel so problems are never hidden. */}
+      {error && <div className="banner banner--err">{error}</div>}
+      {plan?.warnings.map((w) => <div key={w} className="banner banner--warn">{w}</div>)}
     </div>
   );
 }
