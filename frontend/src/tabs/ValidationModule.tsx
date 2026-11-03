@@ -759,6 +759,9 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
   // Re-copy (row-count mismatches): reuses the data-migration engine for one table.
   const [copyRunId, setCopyRunId] = useState<string | null>(null);
   const [copyRun, setCopyRun] = useState<RunState | null>(null);
+  // Not loaded by design (e.g. FULLGLOBE in a NOT NULL column): the run succeeds,
+  // but nothing was copied, so it is not a fix.
+  const [copyWarn, setCopyWarn] = useState<string | null>(null);
   const copyRef = useRef(true);
   useEffect(() => () => { copyRef.current = false; }, []);
 
@@ -842,6 +845,7 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
     }
     // Empty passwords are fine — /data/start resolves both sides from the session cache.
     setApplyErr(null);
+    setCopyWarn(null);
     const { run_id } = await api.startData({
       source_type: conn.source_type, host: conn.host, database: conn.database,
       username: conn.username, password: conn.password, port: conn.port,
@@ -862,7 +866,9 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
       try {
         const r = await api.dataStatus(run_id);
         setCopyRun(r);
+        const t = r.tables[0];
         if (r.status === "running") setTimeout(tick, 1200);
+        else if (t?.status === "warning") setCopyWarn(t.warning || "The table was not loaded.");
         else if (r.status === "success") { markRemediated(); setApplied("Table re-copied."); }
         else setApplyErr(r.tables[0]?.error || r.error || "Re-copy failed.");
       } catch (e) {
@@ -907,7 +913,9 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
       {aiErr && <div className="banner banner--err">{aiErr}</div>}
       {analysis && <div className="agentstep__analysis" style={{ marginTop: 10 }}>✦ {analysis}</div>}
 
-      {copyRunId && copyRun && (
+      {copyRunId && copyRun && (() => {
+        const shown = copyRun.tables[0]?.status === "warning" ? "warning" : copyRun.status;
+        return (
         <div className="prog" style={{ marginTop: 12 }}>
           <div className="prog__row">
             <span className="prog__name">{copyRun.tables[0]?.name}</span>
@@ -915,18 +923,19 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
               {copyRun.tables[0]?.rows_copied.toLocaleString()}
               {copyRun.tables[0]?.total_rows ? ` / ${copyRun.tables[0].total_rows.toLocaleString()}` : ""} rows
             </span>
-            <span className={`sbadge sbadge--${copyRun.status === "success" ? "ok" : copyRun.status === "running" ? "ai" : "err"}`}>
-              {copyRun.status}
+            <span className={`sbadge sbadge--${shown === "success" ? "ok" : shown === "running" ? "ai" : shown === "warning" ? "warn" : "err"}`}>
+              {shown}
             </span>
           </div>
           <div className="bar">
             <div
-              className={`bar__fill bar__fill--${copyRun.status === "success" ? "success" : copyRun.status === "running" ? "running" : "failed"}`}
-              style={{ width: copyRun.tables[0]?.total_rows ? `${Math.min(100, (copyRun.tables[0].rows_copied / copyRun.tables[0].total_rows) * 100)}%` : "100%" }}
+              className={`bar__fill bar__fill--${shown === "success" ? "success" : shown === "running" ? "running" : shown === "warning" ? "warning" : "failed"}`}
+              style={{ width: shown !== "warning" && copyRun.tables[0]?.total_rows ? `${Math.min(100, (copyRun.tables[0].rows_copied / copyRun.tables[0].total_rows) * 100)}%` : "100%" }}
             />
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Side-by-side compare: what the source has (left) vs the fix to apply (right). */}
       <div className={`fixgrid ${hasSourcePane ? "" : "fixgrid--single"}`}>
@@ -960,6 +969,7 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
 
       {applied && <div className="banner banner--ok">{applied} Re-run the validation to verify.</div>}
       {applyErr && <div className="banner banner--err">{applyErr}</div>}
+      {copyWarn && <div className="banner banner--warn">Not loaded: {copyWarn}</div>}
     </div>
   );
 }
