@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type CapacityLimits, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type TableRef, type TuningOverrides, type TuningPlan, type WorkspaceStatus } from "../api";
+import { api, POST_DATA_KINDS, type ApplyResponse, type AsyncSetupResult, type CapacityLimits, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type TableRef, type TuningOverrides, type TuningPlan, type WorkspaceStatus } from "../api";
 import CodeBlock from "../components/CodeBlock";
 import SecretScopeField from "../components/SecretScopeField";
 import type { MigrationState } from "../App";
@@ -69,8 +69,6 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
   // Re-check of the job identity's run-store access, after the user creates its role.
   const [rsCheck, setRsCheck] = useState<{ ok: boolean; warning?: string | null; fix?: string | null } | null>(null);
   const [rsBusy, setRsBusy] = useState(false);
-  const [preview, setPreview] = useState<Artifact[] | null>(null);
-  const [previewBusy, setPreviewBusy] = useState(false);
   // A previous job run of this project whose tables can be finished off.
   const [asyncResumable, setAsyncResumable] = useState<ResumableAsyncRun | null>(null);
 
@@ -384,18 +382,6 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
     }
   }
 
-  async function previewNotebooks() {
-    setPreviewBusy(true); setError(null); setPreview(null);
-    try {
-      const r = await api.generateETL(asyncSpec());
-      setPreview(r.artifacts);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setPreviewBusy(false);
-    }
-  }
-
   return (
     <div className="stack">
       <section className="card">
@@ -613,9 +599,6 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
             </div>
           )}
           <div className="actions">
-            <button className="btn" disabled={previewBusy || noTables} onClick={previewNotebooks}>
-              {previewBusy ? "Generating…" : "Preview generated notebook"}
-            </button>
             <button className="btn btn--primary" disabled={asyncBusy || noTables || noTarget} onClick={() => setupAsync()}>
               {asyncBusy ? "Setting up…" : "Apply plan & create job"}
             </button>
@@ -657,16 +640,6 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
                 </button>
               }
             />
-          )}
-          {preview && (
-            <div className="stack" style={{ marginTop: 14 }}>
-              {preview.map((a) => (
-                <div key={a.filename}>
-                  <p className="muted"><strong>{a.name}</strong> — {a.description}</p>
-                  <CodeBlock code={a.code} language={a.language} filename={a.filename} />
-                </div>
-              ))}
-            </div>
           )}
         </section>
       )}
