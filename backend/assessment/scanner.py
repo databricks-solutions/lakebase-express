@@ -54,10 +54,10 @@ WHERE   t.is_ms_shipped = 0
 """
 
 # Sum of rows across heap/clustered-index partitions (index_id 0/1). Fast and
-# avoids COUNT(*) over every table.
+# avoids COUNT(*) over every table. USED_PAGES (in-row + LOB + overflow) sizes the table.
 _ROWCOUNTS_SQL = f"""
 SELECT  s.name AS TABLE_SCHEMA, t.name AS TABLE_NAME,
-        SUM(p.row_count) AS ROW_COUNT
+        SUM(p.row_count) AS ROW_COUNT, SUM(p.used_page_count) AS USED_PAGES
 FROM    sys.dm_db_partition_stats p
 JOIN    sys.tables t  ON t.object_id = p.object_id
 JOIN    sys.schemas s ON s.schema_id = t.schema_id
@@ -237,10 +237,12 @@ def scan_tables(conn: AzureSqlConnection) -> list[TableInfo]:
     identity, approximate row counts). Public so other phases (e.g.
     post-migration validation) can re-scan the source."""
     cols = conn.query(_COLUMNS_SQL)
-    rowcounts = {
-        (r["TABLE_SCHEMA"], r["TABLE_NAME"]): int(r["ROW_COUNT"] or 0)
-        for r in conn.query(_ROWCOUNTS_SQL)
-    }
+    rowcounts: dict[_TableKey, int] = {}
+    data_bytes: dict[_TableKey, int] = {}
+    for r in conn.query(_ROWCOUNTS_SQL):
+        key = (r["TABLE_SCHEMA"], r["TABLE_NAME"])
+        rowcounts[key] = int(r["ROW_COUNT"] or 0)
+        data_bytes[key] = int(r.get("USED_PAGES") or 0) * 8192
 
     # PK columns per table, accumulated in ORDINAL_POSITION order (the query is
     # already sorted), so composite keys keep their column order.
@@ -288,6 +290,7 @@ def scan_tables(conn: AzureSqlConnection) -> list[TableInfo]:
             schema_name=schema,
             table_name=table,
             row_count=rowcounts.get((schema, table), 0),
+            data_bytes=data_bytes.get((schema, table), 0),
             column_count=len(columns),
             columns=columns,
             primary_key=primary_keys.get((schema, table), []),

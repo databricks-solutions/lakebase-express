@@ -408,7 +408,8 @@ def translate_object(
 
 # Objects are translated concurrently — each translate_object is an independent
 # FM call. Bounded so a large schema doesn't open dozens of endpoint connections
-# at once; the endpoint's own concurrency is the real ceiling anyway.
+# at once; the endpoint's own concurrency is the real ceiling anyway. A project
+# can override it (TuningOverrides.translate_workers).
 _TRANSLATE_WORKERS = 8
 
 
@@ -418,6 +419,7 @@ def translate_all(
     schema_map: dict[str, str] | None = None,
     on_done: Callable[[int, int], None] | None = None,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    workers: int | None = None,
 ) -> list[Translation]:
     """Translate every object, concurrently. Order of the returned list matches
     ``objects``. ``on_done(completed, total)`` is called after each finishes, for
@@ -438,7 +440,7 @@ def translate_all(
                 completed += 1
                 on_done(completed, total)
 
-    workers = min(_TRANSLATE_WORKERS, total)
+    workers = min(workers or _TRANSLATE_WORKERS, total)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         # list() forces any unexpected exception in a worker to surface here
         # rather than being swallowed (translate_object itself is fail-soft).

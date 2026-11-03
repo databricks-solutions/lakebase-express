@@ -109,6 +109,8 @@ export interface TableInfo {
   schema_name: string;
   table_name: string;
   row_count: number;
+  // Heap/clustered-index size; absent on reports scanned before it existed.
+  data_bytes?: number;
   column_count: number;
   columns: ColumnInfo[];
   primary_key: string[];
@@ -336,6 +338,46 @@ export interface TableRef {
   schema_name: string;
   table_name: string;
   primary_key?: string[];
+  // Assessment stats the tuning recommender sizes each table's load from.
+  row_count?: number | null;
+  data_bytes?: number;
+  primary_key_type?: string;
+}
+
+// Per-project load tuning; an absent/null field uses the recommendation.
+export interface TuningOverrides {
+  max_streams?: number | null;
+  table_streams?: number | null;
+  fetch_size?: number | null;
+  translate_workers?: number | null;
+}
+
+// What the live source and target allow (null = could not be read).
+export interface CapacityLimits {
+  target_max_connections?: number | null;
+  target_reserved_connections?: number | null;
+  target_connections_in_use?: number | null;
+  source_service_objective?: string | null;
+  source_cpus?: number | null;
+  source_max_workers?: number | null;
+  notes: string[];
+}
+
+export interface TablePlan {
+  schema_name: string;
+  table_name: string;
+  chunks: number;   // key ranges, each one COPY committed on its own
+  streams: number;  // chunks of this table loading at once
+  fetch_size: number;
+  reason: string;
+}
+
+export interface TuningPlan {
+  max_streams: number;
+  max_parallel_tables: number;
+  tables: TablePlan[]; // largest first — the load order
+  reasons: string[];
+  warnings: string[];
 }
 
 export interface AsyncSetupResult {
@@ -880,6 +922,7 @@ export interface Project {
   plan: PlanItem[] | null;
   selection: string[];
   data_options: DataOptions;
+  tuning?: TuningOverrides;
   validation: ValidationReport | null;
   query_parity: QueryParityReport | null;
   statuses: Record<string, PhaseStatus>;
@@ -961,6 +1004,7 @@ export const api = {
     identifier_case: IdentifierCase;
     translate: boolean;
     endpoint?: string;
+    translate_workers?: number | null;
   }) => post<{ items: PlanItem[] }>("/api/migration/plan", body),
   // Background plan build (AI translation runs past the Apps ~120s request
   // timeout): start returns a run_id, then poll planStatus to completion.
@@ -972,8 +1016,17 @@ export const api = {
     identifier_case: IdentifierCase;
     translate: boolean;
     endpoint?: string;
+    translate_workers?: number | null;
   }) => post<{ run_id: string }>("/api/migration/plan/start", body),
   planStatus: (runId: string) => get<PlanRunState>(`/api/migration/plan/status/${runId}`),
+  // Recommended load tuning; pass back `capacity` to skip re-probing the databases.
+  recommendTuning: (body: {
+    tables: TableRef[];
+    overrides: TuningOverrides;
+    capacity?: CapacityLimits | null;
+    source?: ConnectionRequest | null;
+    lakebase?: LakebaseConn | null;
+  }) => post<{ capacity: CapacityLimits; plan: TuningPlan }>("/api/data/tuning", body),
   applyPlan: (body: { lakebase: LakebaseConn; items: PlanItem[]; stop_on_error: boolean }) =>
     post<ApplyResponse>("/api/migration/apply", body),
   startData: (body: Record<string, unknown>) =>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, POST_DATA_KINDS, type ApplyResponse, type Artifact, type AsyncSetupResult, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type WorkspaceStatus } from "../api";
+import { api, POST_DATA_KINDS, type ApplyResponse, type AsyncSetupResult, type CapacityLimits, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type TableRef, type TuningOverrides, type TuningPlan, type WorkspaceStatus } from "../api";
 import CodeBlock from "../components/CodeBlock";
 import SecretScopeField from "../components/SecretScopeField";
 import type { MigrationState } from "../App";
@@ -7,6 +7,7 @@ import { mapObject, mapSchema } from "../naming";
 
 interface Props {
   state: MigrationState;
+  setState: React.Dispatch<React.SetStateAction<MigrationState>>;
   onGoConnection?: () => void;
   onGoSchema?: () => void;
   onGoData?: () => void;
@@ -16,10 +17,9 @@ interface Props {
 }
 
 type Mode = "now" | "async";
-type Schedule = "once" | "create";
 type SyncScope = "schema" | "full";
 
-export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData, onGoValidation, workspace, onManageWorkspace }: Props) {
+export default function CreateSync({ state, setState, onGoConnection, onGoSchema, onGoData, onGoValidation, workspace, onManageWorkspace }: Props) {
   const report = state.report;
   const conn = state.connection;
 
@@ -61,7 +61,6 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   const [pwdKey, setPwdKey] = useState("azuresql-password");
   const [lakebasePwdKey, setLakebasePwdKey] = useState("lakebase-password");
   const [workspaceDir, setWorkspaceDir] = useState("/Workspace/Shared/lakebase-express");
-  const [schedule, setSchedule] = useState<Schedule>("create");
   // Create/update the secret scope from the entered connection passwords on submit.
   const [syncSecrets, setSyncSecrets] = useState(true);
   const [secretMsg, setSecretMsg] = useState<string | null>(null);
@@ -70,10 +69,22 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   // Re-check of the job identity's run-store access, after the user creates its role.
   const [rsCheck, setRsCheck] = useState<{ ok: boolean; warning?: string | null; fix?: string | null } | null>(null);
   const [rsBusy, setRsBusy] = useState(false);
-  const [preview, setPreview] = useState<Artifact[] | null>(null);
-  const [previewBusy, setPreviewBusy] = useState(false);
   // A previous job run of this project whose tables can be finished off.
   const [asyncResumable, setAsyncResumable] = useState<ResumableAsyncRun | null>(null);
+
+  // Load tuning: the recommendation for the selected tables, and the probed limits it
+  // came from (kept per connection pair, so editing an override doesn't re-probe).
+  const [tuningPlan, setTuningPlan] = useState<TuningPlan | null>(null);
+  const [tuningBusy, setTuningBusy] = useState(false);
+  const [tuningError, setTuningError] = useState<string | null>(null);
+  const [probeNonce, setProbeNonce] = useState(0);
+  const capacityRef = useRef<{ key: string; limits: CapacityLimits } | null>(null);
+  const limitsKey = `${conn?.host}/${conn?.database}|${state.lakebase?.host}/${state.lakebase?.database}`;
+  const tuningRefs = useMemo(
+    () => tableRefs(state.report?.tables ?? [], state.selection),
+    [state.report, state.selection],
+  );
+  const tuningKey = JSON.stringify(state.tuning);
 
   useEffect(() => {
     if (!runId) return;
@@ -137,6 +148,38 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
     return () => { live = false; };
   }, [conn?.project_id, mode, asyncRes?.run_id]);
 
+  useEffect(() => {
+    if (mode !== "async" || !tuningRefs.length) return;
+    const cached = capacityRef.current?.key === limitsKey ? capacityRef.current.limits : null;
+    let live = true;
+    const timer = setTimeout(() => {
+      setTuningBusy(true);
+      api.recommendTuning({
+        tables: tuningRefs, overrides: state.tuning, capacity: cached,
+        source: cached ? null : conn, lakebase: cached ? null : state.lakebase,
+      })
+        .then((r) => {
+          capacityRef.current = { key: limitsKey, limits: r.capacity };
+          if (live) { setTuningPlan(r.plan); setTuningError(null); }
+        })
+        .catch((e) => { if (live) setTuningError((e as Error).message); })
+        .finally(() => { if (live) setTuningBusy(false); });
+    }, cached ? 300 : 0);
+    return () => { live = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, tuningRefs, tuningKey, limitsKey, probeNonce]);
+
+  function recheckLimits() {
+    capacityRef.current = null;
+    setProbeNonce((n) => n + 1);
+  }
+
+  const setTuning = (patch: TuningOverrides) =>
+    setState((s) => ({ ...s, tuning: { ...s.tuning, ...patch } }));
+  // Clears every load override (and any legacy field); translation workers belong to Schema & Code.
+  const resetTuning = () =>
+    setState((s) => ({ ...s, tuning: { translate_workers: s.tuning.translate_workers ?? null } }));
+
   if (!report || !conn) {
     return (
       <div className="card">
@@ -154,12 +197,9 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
   const overwrite = state.dataOptions.truncate_first;
   const syncModeLabel = overwrite ? "Full refresh · Overwrite" : "Full refresh · Append";
 
-  const groups = useMemo(() => {
-    const by: Record<string, TableInfo[]> = {};
-    for (const t of selectedTables) (by[t.schema_name] ??= []).push(t);
-    return Object.entries(by).sort(([a], [b]) => a.localeCompare(b));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.selection, report.tables]);
+  const byGroup: Record<string, TableInfo[]> = {};
+  for (const t of selectedTables) (byGroup[t.schema_name] ??= []).push(t);
+  const groups = Object.entries(byGroup).sort(([a], [b]) => a.localeCompare(b));
 
   const noTarget = !state.lakebase?.host;
   const noTables = selectedTables.length === 0;
@@ -242,10 +282,10 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
       lakebase_database: state.lakebase?.database ?? "lakebase",
       lakebase_user: state.lakebase?.user ?? "",
       lakebase_password_secret_key: lakebasePwdKey,
-      // primary_key feeds the notebook's range-partitioned (parallel) source reads.
-      tables: selectedTables.map((t) => ({
-        schema_name: t.schema_name, table_name: t.table_name, primary_key: t.primary_key ?? [],
-      })),
+      // primary_key feeds the range-partitioned (parallel) source reads; the stats size them.
+      tables: tuningRefs,
+      capacity: capacityRef.current?.key === limitsKey ? capacityRef.current.limits : null,
+      tuning: state.tuning,
       // Post-data plan items (constraints/indexes/FKs/triggers) — the job
       // applies them itself after the snapshot, since it may run detached
       // from the app. `kind` lets the job split them into one task per type.
@@ -311,7 +351,7 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
         quartz_cron: null,
         timezone: "UTC",
         // A resume is a run: there is nothing to continue in a job left unstarted.
-        run_now: resumeFrom ? true : schedule === "once",
+        run_now: !!resumeFrom,
         resume_from: resumeFrom ?? null,
       });
       setAsyncRes(r);
@@ -339,68 +379,60 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
     }
   }
 
-  async function previewNotebooks() {
-    setPreviewBusy(true); setError(null); setPreview(null);
-    try {
-      const r = await api.generateETL(asyncSpec());
-      setPreview(r.artifacts);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setPreviewBusy(false);
-    }
-  }
+  const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+  const kvScope = syncSecrets && runtimeScopeOption?.backend_type === "AZURE_KEYVAULT";
 
   return (
     <div className="stack">
       <section className="card">
-        <h2>Select sync mode</h2>
-        <p className="muted">How do you want to run this migration?</p>
+        <h2>How do you want to run it?</h2>
         <div className="modecards">
           <ModeCard
             on={mode === "now"} onSelect={() => setMode("now")} badge="In-app" title="Sync now"
-            desc="Run the full migration now in this app — create the schema & code in Lakebase, stream the selected data, then add constraints & indexes, with live progress."
+            desc="Runs in this app with live progress. Good for small and medium databases."
           />
           <ModeCard
-            on={mode === "async"} onSelect={() => setMode("async")} badge="Offloaded" title="Async mode"
-            desc="Apply the same schema & code plan, then snapshot the selected data into Lakebase with a parallel PySpark job on Databricks (the job adds constraints & indexes after the copy) — run it now, or create it to run on compute you pick. Scales beyond the in-app loader."
+            on={mode === "async"} onSelect={() => setMode("async")} badge="Databricks job" title="Async mode"
+            desc="Creates a parallel PySpark job you run on your own compute. Built for large databases."
           />
         </div>
       </section>
 
       <section className="card">
         <div className="card__head">
-          <h3>Streams</h3>
+          <h3>Tables to migrate</h3>
           <span className="muted">
-            {selectedTables.length.toLocaleString()} streams · {selectedRows.toLocaleString()} rows
+            {plural(selectedTables.length, "table")} · {selectedRows.toLocaleString()} rows · {syncModeLabel}
             {onGoData && <> · <button className="link" onClick={onGoData}>Edit selection</button></>}
           </span>
         </div>
         {noTables ? (
           <p className="muted">No tables selected. {onGoData && <button className="link" onClick={onGoData}>Select tables in Data Migration</button>}.</p>
         ) : (
-          <div className="tablelist">
-            {groups.map(([schema, ts]) => (
-              <div key={schema} className="tgroup">
-                <div className="tgroup__head">
-                  <span className="tgroup__title">
-                    {schema} <span className="tgroup__arrow">→</span> {mapSchema(schema, state.targetSchema, state.identifierCase)}
-                  </span>
-                  <span className="tgroup__count">{ts.length}</span>
-                </div>
-                {ts.map((t) => (
-                  <div key={t.table_name} className="trow trow--static">
-                    <span className="trow__name">{t.table_name}</span>
-                    <span className="streammode">{syncModeLabel}</span>
-                    <span className="trow__target">
-                      {mapSchema(schema, state.targetSchema, state.identifierCase)}.{mapObject(t.table_name, state.identifierCase)}
+          <details className="orig">
+            <summary>Show tables and their Lakebase targets</summary>
+            <div className="tablelist">
+              {groups.map(([schema, ts]) => (
+                <div key={schema} className="tgroup">
+                  <div className="tgroup__head">
+                    <span className="tgroup__title">
+                      {schema} <span className="tgroup__arrow">→</span> {mapSchema(schema, state.targetSchema, state.identifierCase)}
                     </span>
-                    <span className="trow__rows">{t.row_count.toLocaleString()} rows</span>
+                    <span className="tgroup__count">{ts.length}</span>
                   </div>
-                ))}
-              </div>
-            ))}
-          </div>
+                  {ts.map((t) => (
+                    <div key={t.table_name} className="trow trow--static">
+                      <span className="trow__name">{t.table_name}</span>
+                      <span className="trow__target">
+                        {mapSchema(schema, state.targetSchema, state.identifierCase)}.{mapObject(t.table_name, state.identifierCase)}
+                      </span>
+                      <span className="trow__rows">{t.row_count.toLocaleString()} rows</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </details>
         )}
       </section>
 
@@ -408,43 +440,32 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
         <section className="card">
           <div className="card__head">
             <h3>Sync now</h3>
-            {!state.plan && <span className="muted">No schema plan — only data will load</span>}
+            <div className="segmented" role="tablist" aria-label="What to sync" style={{ marginBottom: 0 }}>
+              {([["schema", "Schema & code only"], ["full", "Full migration"]] as const).map(([v, label]) => (
+                <button
+                  key={v} type="button" role="tab" aria-selected={syncScope === v}
+                  className={`segmented__btn ${syncScope === v ? "segmented__btn--on" : ""}`}
+                  onClick={() => setSyncScope(v)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
           <p className="muted">
             {syncScope === "schema"
-              ? "Applies the whole plan to Lakebase — schemas, tables, translated code, constraints & indexes — but loads no data. Load the data later with a full run or Async mode."
-              : `Applies the schema & code plan to Lakebase, streams the selected tables (${overwrite ? "truncating targets first" : "appending"}), then creates the constraints, indexes, foreign keys, and triggers once the data is in. Runs here with live progress.`}
+              ? "Creates the schemas, tables, code, constraints and indexes in Lakebase. No data is copied."
+              : `Creates the schema and code, copies the selected tables (${overwrite ? "replacing" : "appending to"} existing rows), then adds constraints and indexes.`}
           </p>
-          <div className="modecards" style={{ marginTop: 14 }}>
-            <ModeCard
-              on={syncScope === "schema"} onSelect={() => setSyncScope("schema")}
-              badge="No data" title="Schema & code only"
-              desc="Only apply the migration plan — create the target objects without loading data."
-            />
-            <ModeCard
-              on={syncScope === "full"} onSelect={() => setSyncScope("full")}
-              badge="Schema + data" title="Full migration"
-              desc="Apply the schema & code plan, then stream the selected tables into Lakebase."
-            />
-          </div>
-          {noTarget && (
-            <div className="banner banner--err">
-              No Lakebase target configured.{" "}
-              {onGoConnection && <button className="link" onClick={onGoConnection}>Set it in Connections &amp; Target</button>}
-            </div>
-          )}
+          {noTarget && <NoTarget onGoConnection={onGoConnection} />}
           {!state.plan && onGoSchema && (
             <div className="banner banner--err">
-              No migration plan yet — <button className="link" onClick={onGoSchema}>generate it in Schema &amp; Code</button>
-              {syncScope === "schema" ? " to have something to apply." : " to create schema/code (data will still load)."}
+              No migration plan yet. <button className="link" onClick={onGoSchema}>Generate it in Schema &amp; Code</button>
+              {syncScope === "schema" ? "." : " (data can still load without it)."}
             </div>
           )}
           {resumable && syncScope === "full" && (
-            <div className="banner banner--info">
-              An earlier run left {resumable.tables_left} of {resumable.tables_total} table{resumable.tables_total === 1 ? "" : "s"} unfinished
-              ({resumable.rows_copied.toLocaleString()} rows already copied). Resuming loads only those;
-              starting a new sync re-copies every selected table.
-            </div>
+            <ResumeOffer left={resumable.tables_left} total={resumable.tables_total} rows={resumable.rows_copied} />
           )}
           <div className="actions">
             {syncScope === "schema" ? (
@@ -485,123 +506,105 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
       ) : (
         <section className="card">
           <div className="card__head">
-            <h3>Async mode — PySpark snapshot</h3>
-            <span className="muted">Source → PySpark job → Lakebase (Postgres)</span>
+            <h3 style={{ display: "flex", alignItems: "center" }}>
+              Async mode
+              <InfoTip label="How the job works">
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  <li>The schema &amp; code plan is applied here first, so the target tables exist.</li>
+                  <li>Source reads are range-partitioned on the primary key, and several tables load at once.</li>
+                  <li>Each partition streams into Lakebase with Postgres COPY — no Delta landing in between.</li>
+                  <li>After the copy, one chained task per object type adds constraints, indexes, foreign keys and triggers.</li>
+                  <li>Passwords are read from a Databricks secret scope at runtime, never written into the notebook.</li>
+                </ul>
+              </InfoTip>
+            </h3>
+            <span className="muted">Source → PySpark job → Lakebase</span>
           </div>
           <p className="muted">
-            Applies the same schema &amp; code plan as Sync now, then a PySpark job on Databricks
-            snapshots the selected tables into Lakebase — source reads are range-partitioned across
-            the cluster, several tables load concurrently, and each partition streams straight into
-            the plan-created tables with Postgres COPY. The plan's constraints, indexes, foreign
-            keys, and triggers are applied by chained job tasks — one per object type — that run
-            after the copy succeeds, each with per-statement progress in its own run output. Create
-            it to run later on the compute you choose, or run it now.
+            Creates a Databricks job that copies the selected tables in parallel, then adds
+            constraints, indexes, foreign keys and triggers. Open the job in your workspace to pick
+            the compute and run it.
           </p>
 
           {workspace && !workspace.connected && (
-            <div className="banner banner--err" style={{ marginTop: 14 }}>
+            <div className="banner banner--err">
               Not connected to a Databricks workspace.{" "}
               {onManageWorkspace && <button className="link" onClick={onManageWorkspace}>Log in in Settings</button>}
             </div>
           )}
-
-          <div className="modecards" style={{ marginTop: 14 }}>
-            <ModeCard
-              on={schedule === "create"} onSelect={() => setSchedule("create")}
-              badge="Create only" title="Create job, run later"
-              desc="Create the Databricks job without starting it — open it in the workspace to pick the compute (serverless or a cluster), tune it, and hit Run now."
-            />
-            <ModeCard
-              on={schedule === "once"} onSelect={() => setSchedule("once")}
-              badge="One-off" title="Run once"
-              desc="Submit a single Databricks job run that snapshots the selected tables into Lakebase now (on serverless compute)."
-            />
-          </div>
-
-          <div className="field-row" style={{ marginTop: 14 }}>
-            <SecretScopeField
-              value={secretScope}
-              onChange={setSecretScope}
-              onResolvedOption={setRuntimeScopeOption}
-              label="Runtime secret scope"
-              newLabel="Create a new scope…"
-            />
-            <div className="field"><label>Workspace folder (notebooks)</label><input value={workspaceDir} onChange={(e) => setWorkspaceDir(e.target.value)} /></div>
-          </div>
-          <div className="field-row">
-            <div className="field"><label>Source password secret key</label><input value={pwdKey} onChange={(e) => setPwdKey(e.target.value)} /></div>
-            <div className="field"><label>Lakebase password secret key</label><input value={lakebasePwdKey} onChange={(e) => setLakebasePwdKey(e.target.value)} /></div>
-          </div>
-
-          <label className="check" style={{ marginTop: 4 }}>
-            <input type="checkbox" checked={syncSecrets} onChange={(e) => setSyncSecrets(e.target.checked)} />
-            Create / update the runtime scope from the connection credentials on run
-          </label>
-          {syncSecrets && runtimeScopeOption?.backend_type === "AZURE_KEYVAULT" && (
-            <div className="banner banner--err">
-              Key Vault-backed scopes are read-only through the Databricks Secrets API. Disable
-              credential sync to use keys already present in this scope, or choose/create a
-              Databricks-backed runtime scope.
-            </div>
-          )}
-          <div className="banner banner--warn">
-            The snapshot writes into the tables the schema &amp; code plan creates, so this reuses that
-            plan (applied here first). Choose an existing runtime scope or enter a new name. With the
-            box above ticked, the source and Lakebase passwords are resolved from their configured
-            password sources and written to the two keys above (created if missing, overwritten if they
-            exist); the generated notebook reads both from the runtime scope — never inline them.
-          </div>
-
-          {noTarget && (
-            <div className="banner banner--err">
-              No Lakebase target configured.{" "}
-              {onGoConnection && <button className="link" onClick={onGoConnection}>Set it in Connections &amp; Target</button>}
-            </div>
-          )}
+          {noTarget && <NoTarget onGoConnection={onGoConnection} />}
           {!state.plan && onGoSchema && (
             <div className="banner banner--err">
-              No migration plan yet — <button className="link" onClick={onGoSchema}>generate it in Schema &amp; Code</button> to create the target tables (the snapshot loads into them).
+              No migration plan yet. <button className="link" onClick={onGoSchema}>Generate it in Schema &amp; Code</button> — the job loads into the tables it creates.
             </div>
           )}
+
+          <div className="stack" style={{ marginTop: 14 }}>
+            <Collapsible title="Job settings" meta={`${secretScope} · ${workspaceDir}`}>
+              <div className="field-row">
+                <SecretScopeField
+                  value={secretScope}
+                  onChange={setSecretScope}
+                  onResolvedOption={setRuntimeScopeOption}
+                  label="Runtime secret scope"
+                  newLabel="Create a new scope…"
+                />
+                <div className="field"><label>Workspace folder (notebooks)</label><input value={workspaceDir} onChange={(e) => setWorkspaceDir(e.target.value)} /></div>
+              </div>
+              <div className="field-row">
+                <div className="field"><label>Source password secret key</label><input value={pwdKey} onChange={(e) => setPwdKey(e.target.value)} /></div>
+                <div className="field"><label>Lakebase password secret key</label><input value={lakebasePwdKey} onChange={(e) => setLakebasePwdKey(e.target.value)} /></div>
+              </div>
+              <label className="check">
+                <input type="checkbox" checked={syncSecrets} onChange={(e) => setSyncSecrets(e.target.checked)} />
+                Write the connection passwords to these keys when creating the job
+              </label>
+              <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                Keys are created if missing and overwritten if they exist. Untick to use keys already in the scope.
+              </p>
+            </Collapsible>
+            {kvScope && (
+              <div className="banner banner--err" style={{ marginTop: 0 }}>
+                Key Vault-backed scopes are read-only through the Databricks Secrets API. Untick
+                password sync in Job settings to use existing keys, or pick a Databricks-backed scope.
+              </div>
+            )}
+            {!noTables && (
+              <LoadTuning
+                plan={tuningPlan} overrides={state.tuning} busy={tuningBusy} error={tuningError}
+                onChange={setTuning} onReset={resetTuning} onRecheck={recheckLimits}
+              />
+            )}
+          </div>
+
           {asyncResumable && (
-            <div className="banner banner--info">
-              An earlier job run left {asyncResumable.tables_left} of {asyncResumable.tables_total} table
-              {asyncResumable.tables_total === 1 ? "" : "s"} unfinished
-              ({asyncResumable.rows_copied.toLocaleString()} rows already copied). Resuming copies only
-              those; running the snapshot again re-copies every selected table.{" "}
-              {asyncResumable.run_url && <a href={asyncResumable.run_url} target="_blank" rel="noreferrer">Open that run ↗</a>}
-            </div>
+            <ResumeOffer
+              left={asyncResumable.tables_left} total={asyncResumable.tables_total}
+              rows={asyncResumable.rows_copied} runUrl={asyncResumable.run_url}
+            />
           )}
           <div className="actions">
-            <button className="btn" disabled={previewBusy || noTables} onClick={previewNotebooks}>
-              {previewBusy ? "Generating…" : "Preview generated notebook"}
-            </button>
-            <button className="btn btn--primary" disabled={asyncBusy || noTables || noTarget} onClick={() => setupAsync()}>
-              {asyncBusy ? "Setting up…"
-                : schedule === "create" ? "Apply plan & create job"
-                : "Apply plan & run snapshot"}
+            <button className="btn btn--primary" disabled={asyncBusy || noTables || noTarget || kvScope} onClick={() => setupAsync()}>
+              {asyncBusy ? "Setting up…" : "Apply plan & create job"}
             </button>
             {asyncResumable && (
-              <button className="btn" disabled={asyncBusy || noTables || noTarget} onClick={() => setupAsync(asyncResumable.run_id)}>
+              <button className="btn" disabled={asyncBusy || noTables || noTarget || kvScope} onClick={() => setupAsync(asyncResumable.run_id)}>
                 Resume last run
               </button>
             )}
           </div>
           {error && <div className="banner banner--err">{error}</div>}
-          {secretMsg && <div className="banner banner--ok">{secretMsg}</div>}
-          {applyRes && <ApplySummary res={applyRes} onGoValidation={onGoValidation} />}
           {asyncRes && (
             <div className="banner banner--ok">
               {asyncRes.run_id
-                ? `Created snapshot job ${asyncRes.job_id} and submitted run ${asyncRes.run_id}. `
-                : asyncRes.job_id
-                ? `Created snapshot job ${asyncRes.job_id} — no run started. `
-                : `Uploaded ${asyncRes.notebook_paths.length} notebook(s). `}
-              {asyncRes.note}{" "}
+                ? <>Job {asyncRes.job_id} created and a resume run started — only the unfinished tables are copied.</>
+                : <>Job {asyncRes.job_id} created. Open it, pick the compute, and click <strong>Run now</strong>.</>}{" "}
               {asyncRes.url && <a href={asyncRes.url} target="_blank" rel="noreferrer">Open job ↗</a>}{" "}
               {asyncRes.run_url && <a href={asyncRes.run_url} target="_blank" rel="noreferrer">Open run ↗</a>}
+              {secretMsg && <div style={{ marginTop: 4, fontSize: 13 }}>{secretMsg}</div>}
             </div>
           )}
+          {applyRes && <ApplySummary res={applyRes} onGoValidation={onGoValidation} />}
           {asyncRes && rsCheck?.ok && (
             <div className="banner banner--ok">
               Run-state access confirmed — this job will record its progress in run history.
@@ -620,19 +623,182 @@ export default function CreateSync({ state, onGoConnection, onGoSchema, onGoData
               }
             />
           )}
-          {preview && (
-            <div className="stack" style={{ marginTop: 14 }}>
-              {preview.map((a) => (
-                <div key={a.filename}>
-                  <p className="muted"><strong>{a.name}</strong> — {a.description}</p>
-                  <CodeBlock code={a.code} language={a.language} filename={a.filename} />
-                </div>
-              ))}
-            </div>
-          )}
         </section>
       )}
     </div>
+  );
+}
+
+function NoTarget({ onGoConnection }: { onGoConnection?: () => void }) {
+  return (
+    <div className="banner banner--err">
+      No Lakebase target configured.{" "}
+      {onGoConnection && <button className="link" onClick={onGoConnection}>Set it in Connections &amp; Target</button>}
+    </div>
+  );
+}
+
+function ResumeOffer({ left, total, rows, runUrl }: { left: number; total: number; rows: number; runUrl?: string | null }) {
+  return (
+    <div className="banner banner--info">
+      The last run stopped with {left.toLocaleString()} of {total.toLocaleString()} table{total === 1 ? "" : "s"} left
+      ({rows.toLocaleString()} rows already copied). <strong>Resume</strong> copies only those;
+      starting again copies every table.{" "}
+      {runUrl && <a href={runUrl} target="_blank" rel="noreferrer">Open that run ↗</a>}
+    </div>
+  );
+}
+
+/** An ⓘ button whose popover opens on hover or keyboard focus. */
+function InfoTip({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <span className="infotip">
+      <button type="button" className="infotip__btn" aria-label={label}>i</button>
+      <span className="infotip__pop" role="tooltip">{children}</span>
+    </span>
+  );
+}
+
+/** A bordered, collapsed-by-default section with a one-line summary. */
+function Collapsible({ title, meta, badge, children }: {
+  title: string;
+  meta?: React.ReactNode;
+  badge?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="planitem" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>
+        <span className="planitem__name">{title}</span>
+        {meta && <span className="muted" style={{ fontSize: 13 }}>{meta}</span>}
+        {badge}
+        <svg className={`acc__chevron ${open ? "acc__chevron--open" : ""}`} viewBox="0 0 24 24"
+             width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </summary>
+      <div className="planitem__body stack">{children}</div>
+    </details>
+  );
+}
+
+/** The selected tables with the stats the tuning recommender sizes them from. */
+function tableRefs(tables: TableInfo[], selection: string[]): TableRef[] {
+  return tables
+    .filter((t) => selection.length === 0 || selection.includes(`${t.schema_name}.${t.table_name}`))
+    .map((t) => ({
+      schema_name: t.schema_name, table_name: t.table_name, primary_key: t.primary_key ?? [],
+      row_count: t.row_count, data_bytes: t.data_bytes ?? 0,
+      primary_key_type: t.columns.find((c) => c.name === t.primary_key?.[0])?.data_type ?? "",
+    }));
+}
+
+const TUNING_ROWS_SHOWN = 50;
+
+// Rows per fetch is picked from these steps; smaller ones only add round trips.
+const FETCH_STEPS = [1000, 2500, 5000, 10000, 25000, 50000];
+
+/** Recommended load tuning with per-field overrides; a blank field uses the recommendation. */
+function LoadTuning({ plan, overrides, busy, error, onChange, onReset, onRecheck }: {
+  plan: TuningPlan | null;
+  overrides: TuningOverrides;
+  busy: boolean;
+  error: string | null;
+  onChange: (patch: TuningOverrides) => void;
+  onReset: () => void;
+  onRecheck: () => void;
+}) {
+  const num = (v: string, max: number) =>
+    v.trim() === "" ? null : Math.min(max, Math.max(1, Math.floor(Number(v)) || 1));
+  const overridden = overrides.max_streams != null || overrides.table_streams != null
+    || overrides.fetch_size != null || "max_parallel_tables" in overrides || "num_partitions" in overrides;
+  return (
+    <>
+      <Collapsible
+        title="Load tuning"
+        meta={busy ? "Checking limits…" : plan
+          ? `${plan.max_streams} streams · up to ${plan.max_parallel_tables} tables at once`
+          : "Recommended from table sizes and database limits"}
+        badge={
+          <span className={`sbadge ${overridden ? "sbadge--info" : "sbadge--ok"}`}>
+            {overridden ? "Customized" : "Recommended"}
+          </span>
+        }
+      >
+        <span className="muted" style={{ fontSize: 13 }}>
+          Recommended from the table sizes and both databases' limits
+          {overridden && <>{" · "}<button className="link" onClick={onReset}>Reset to recommended</button></>}
+          {" · "}<button className="link" disabled={busy} onClick={onRecheck}>Re-check limits</button>
+        </span>
+        <div className="field-row">
+          <div className="field">
+            <label>Concurrent streams</label>
+            <input
+              type="number" min={1} max={256} placeholder={plan ? String(plan.max_streams) : "auto"}
+              value={overrides.max_streams ?? ""}
+              onChange={(e) => onChange({ max_streams: num(e.target.value, 256) })}
+            />
+          </div>
+          <div className="field">
+            <label>Streams per table</label>
+            <input
+              type="number" min={1} max={64} placeholder="per table"
+              value={overrides.table_streams ?? ""}
+              onChange={(e) => onChange({ table_streams: num(e.target.value, 64) })}
+            />
+          </div>
+          <div className="field">
+            <label>Rows per fetch</label>
+            <select
+              value={overrides.fetch_size ?? ""}
+              onChange={(e) => onChange({ fetch_size: e.target.value ? Number(e.target.value) : null })}
+            >
+              <option value="">Per table (recommended)</option>
+              {/* A value saved before these steps existed stays selectable. */}
+              {overrides.fetch_size != null && !FETCH_STEPS.includes(overrides.fetch_size) && (
+                <option value={overrides.fetch_size}>{overrides.fetch_size.toLocaleString()}</option>
+              )}
+              {FETCH_STEPS.map((n) => <option key={n} value={n}>{n.toLocaleString()}</option>)}
+            </select>
+          </div>
+        </div>
+        <p className="muted" style={{ margin: 0 }}>
+          Blank fields use the recommendation. Each stream holds one source and one Lakebase
+          connection. The values are written into the notebook, where you can still edit them.
+        </p>
+        {plan && plan.reasons.length > 0 && (
+          <ul className="muted" style={{ margin: 0, paddingLeft: 18 }}>
+            {plan.reasons.map((r) => <li key={r}>{r}</li>)}
+          </ul>
+        )}
+        {plan && (
+          <details className="orig">
+            <summary>Per-table plan ({plan.tables.length.toLocaleString()} tables, largest first)</summary>
+            <table className="dtable" style={{ marginTop: 8 }}>
+              <thead><tr><th>Table</th><th>Chunks</th><th>Streams</th><th>Rows per fetch</th><th>Why</th></tr></thead>
+              <tbody>
+                {plan.tables.slice(0, TUNING_ROWS_SHOWN).map((t) => (
+                  <tr key={`${t.schema_name}.${t.table_name}`}>
+                    <td>{t.schema_name}.{t.table_name}</td>
+                    <td>{t.chunks.toLocaleString()}</td>
+                    <td>{t.streams}</td>
+                    <td>{t.fetch_size.toLocaleString()}</td>
+                    <td className="dtable__sub">{t.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {plan.tables.length > TUNING_ROWS_SHOWN && (
+              <p className="muted">…and {(plan.tables.length - TUNING_ROWS_SHOWN).toLocaleString()} smaller tables.</p>
+            )}
+          </details>
+        )}
+      </Collapsible>
+      {/* Kept outside the collapsed panel so problems are never hidden. */}
+      {error && <div className="banner banner--err" style={{ marginTop: 0 }}>{error}</div>}
+      {plan?.warnings.map((w) => <div key={w} className="banner banner--warn" style={{ marginTop: 0 }}>{w}</div>)}
+    </>
   );
 }
 
@@ -850,7 +1016,8 @@ function DataProgress({ run }: { run: RunState }) {
   const total = run.tables.length;
   const done = run.tables.filter((t) => t.status !== "pending" && t.status !== "running").length;
   const ok = run.tables.filter((t) => t.status === "success").length;
-  const failed = run.tables.filter((t) => t.status === "failed").length;
+  const failedTables = run.tables.filter((t) => t.status === "failed");
+  const failed = failedTables.length;
   // Loaded by the run this one resumed, so not copied again.
   const skipped = run.tables.filter((t) => t.status === "skipped").length;
   const rowsCopied = run.tables.reduce((n, t) => n + t.rows_copied, 0);
@@ -871,22 +1038,33 @@ function DataProgress({ run }: { run: RunState }) {
         <div className={`bar__fill bar__fill--${run.status === "running" ? "running" : statusCls === "ok" ? "success" : "failed"}`} style={{ width: `${pct}%` }} />
       </div>
       {run.error && <div className="banner banner--err">{run.error}</div>}
-      <div className="proglist" style={{ marginTop: 12 }}>
-        {run.tables.map((tp) => {
-          const tpct = tp.total_rows > 0 ? Math.min(100, (tp.rows_copied / tp.total_rows) * 100) : tp.status === "success" ? 100 : 0;
-          return (
-            <div key={tp.name} className="prog">
-              <div className="prog__row">
-                <span className="prog__name">{tp.name} <span className="trow__target">{tp.target}</span></span>
-                <span className="prog__count">{tp.rows_copied.toLocaleString()}{tp.total_rows ? ` / ${tp.total_rows.toLocaleString()}` : ""} rows</span>
-                <span className={`sbadge sbadge--${tp.status === "success" ? "ok" : tp.status === "failed" ? "err" : "skip"}`}>{tp.status}</span>
-              </div>
-              <div className="bar"><div className={`bar__fill bar__fill--${tp.status}`} style={{ width: `${tpct}%` }} /></div>
-              {tp.error && <div className="banner banner--err">{tp.error}</div>}
-            </div>
-          );
-        })}
+      {/* Failures stay in view; the full per-table list is one click away. */}
+      {failedTables.length > 0 && (
+        <div className="proglist" style={{ marginTop: 12 }}>
+          {failedTables.map((tp) => <TableProgress key={tp.name} tp={tp} />)}
+        </div>
+      )}
+      <details className="orig">
+        <summary>Per-table progress ({total.toLocaleString()} tables)</summary>
+        <div className="proglist" style={{ marginTop: 8 }}>
+          {run.tables.map((tp) => <TableProgress key={tp.name} tp={tp} />)}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function TableProgress({ tp }: { tp: RunState["tables"][number] }) {
+  const pct = tp.total_rows > 0 ? Math.min(100, (tp.rows_copied / tp.total_rows) * 100) : tp.status === "success" ? 100 : 0;
+  return (
+    <div className="prog">
+      <div className="prog__row">
+        <span className="prog__name">{tp.name} <span className="trow__target">{tp.target}</span></span>
+        <span className="prog__count">{tp.rows_copied.toLocaleString()}{tp.total_rows ? ` / ${tp.total_rows.toLocaleString()}` : ""} rows</span>
+        <span className={`sbadge sbadge--${tp.status === "success" ? "ok" : tp.status === "failed" ? "err" : "skip"}`}>{tp.status}</span>
       </div>
+      <div className="bar"><div className={`bar__fill bar__fill--${tp.status}`} style={{ width: `${pct}%` }} /></div>
+      {tp.error && <div className="banner banner--err">{tp.error}</div>}
     </div>
   );
 }

@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from backend.assessment.models import SecretRef
+from backend.data_migration.models import TuningOverrides
 from backend.schema_migration.naming import IdentifierCase
 
 
@@ -78,6 +79,7 @@ class Project(BaseModel):
     plan: list[dict[str, Any]] | None = None
     selection: list[str] = []                # selected "schema.table" keys (Data Migration)
     data_options: DataOptions = Field(default_factory=DataOptions)
+    tuning: TuningOverrides = Field(default_factory=TuningOverrides)  # None fields = recommended
     validation: dict[str, Any] | None = None  # latest post-migration ValidationReport
     query_parity: dict[str, Any] | None = None  # latest post-migration QueryParityReport
 

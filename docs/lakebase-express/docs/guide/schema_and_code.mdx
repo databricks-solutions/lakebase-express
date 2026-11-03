@@ -26,7 +26,9 @@ exact SQL that will run on Lakebase — and applies it.
   SQL across several passes; it has no reasoning and its caveats are SQL comments.
 
 Translating every code object takes minutes on a real schema, so the build runs in the
-background and the page shows progress.
+background and the page shows progress. **Parallel translations** (default 8, saved per
+project) sets how many objects go to the model at once; lower it if the endpoint
+rate-limits.
 
 ## Reviewing it
 

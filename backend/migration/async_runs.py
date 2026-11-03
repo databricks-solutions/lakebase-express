@@ -51,6 +51,11 @@ def tables_left(state: AsyncRunState) -> int:
     return sum(t.status not in _DONE for t in state.tables.values())
 
 
+def tables_total(state: AsyncRunState) -> int:
+    """Older notebook-only runs never recorded a total; their checkpoints are the floor."""
+    return state.tables_total or len(state.tables)
+
+
 def is_resumable(state: AsyncRunState, job_active: bool | None = None) -> bool:
     """True when the job run is over and a resume would skip work it already did.
 
@@ -69,26 +74,19 @@ def is_resumable(state: AsyncRunState, job_active: bool | None = None) -> bool:
 def find_resumable(
     project_id: str, limit: int = 20, job_active: Callable[[int], bool | None] | None = None
 ) -> AsyncRunState | None:
-    """The project's newest async run worth resuming, for the UI's resume offer.
+    """The project's newest async run, if resuming it would help. Only the newest: any
+    later run (a resume, or a re-run from the Jobs UI) has rewritten the target since.
 
-    ``job_active`` is asked about a run still marked running (see is_resumable). A run
-    that a later one already resumed is never offered again: whatever it left behind
-    is that resume's business now, which is why this walks newest-first.
+    ``job_active`` is asked about a run still marked running (see is_resumable).
     """
-    superseded: set[str] = set()
     for record in _RUNS.list(limit, project_id):
         state = _RUNS.get(record.run_id)
         if state is None:
             continue
-        if state.resumed_from:
-            superseded.add(state.resumed_from)
-        if state.run_id in superseded:
-            continue
         active = None
         if state.status not in _TERMINAL and job_active and state.job_run_id:
             active = job_active(state.job_run_id)
-        if is_resumable(state, active):
-            return state
+        return state if is_resumable(state, active) else None
     return None
 
 

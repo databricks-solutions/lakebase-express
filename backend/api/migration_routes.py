@@ -100,6 +100,7 @@ def plan(req: BuildPlanRequest) -> PlanResponse:
         req.translate,
         req.endpoint,
         identifier_case=req.identifier_case,
+        translate_workers=req.translate_workers,
     )
     return PlanResponse(items=items)
 
@@ -425,7 +426,7 @@ def resumable_async(project_id: str) -> ResumableAsyncResponse:
             run_id=state.run_id,
             status=state.status,
             started_at=state.started_at,
-            tables_total=state.tables_total,
+            tables_total=async_runs.tables_total(state),
             tables_left=async_runs.tables_left(state),
             rows_copied=sum(t.rows_copied for t in state.tables.values()),
             job_id=state.job_id,

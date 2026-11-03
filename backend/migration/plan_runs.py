@@ -55,7 +55,7 @@ def _execute(run_id: str, req: BuildPlanRequest) -> None:
         items = build_plan(
             req.tables, req.programmable_objects, req.target_schema,
             req.translate, req.endpoint, on_translate_progress=progress,
-            identifier_case=req.identifier_case,
+            identifier_case=req.identifier_case, translate_workers=req.translate_workers,
         )
         _set(run_id, lambda s: (
             setattr(s, "status", "success"),

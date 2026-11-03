@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type AssessmentReport, type ConnectionRequest, type IdentifierCase, type LakebaseConn, type PhaseStatus, type PlanItem, type Project, type QueryParityReport, type SecretRef, type StorageStatus, type ValidationReport, type WorkspaceStatus } from "./api";
+import { api, type AssessmentReport, type ConnectionRequest, type IdentifierCase, type LakebaseConn, type PhaseStatus, type PlanItem, type Project, type QueryParityReport, type SecretRef, type StorageStatus, type TuningOverrides, type ValidationReport, type WorkspaceStatus } from "./api";
 import { SOURCE_CONNECTORS, type Connector } from "./connectors";
 import Sidebar, { type NavId } from "./components/Sidebar";
 import AppBar, { GlobalSearch } from "./components/AppBar";
@@ -30,6 +30,8 @@ export interface MigrationState {
   // Data Migration marks the tables + load options; concluded in Create Sync.
   selection: string[];
   dataOptions: { truncate_first: boolean; batch_size: number };
+  // Load/translation tuning overrides; empty = recommended values.
+  tuning: TuningOverrides;
   // Post-migration validation report (independent module).
   validation: ValidationReport | null;
   // Post-migration query-parity report (independent module).
@@ -161,6 +163,7 @@ function deriveState(p: Project, s: Secrets): MigrationState {
       truncate_first: p.data_options?.truncate_first ?? true,
       batch_size: p.data_options?.batch_size ?? 5000,
     },
+    tuning: p.tuning ?? {},
     validation: p.validation,
     queryParity: p.query_parity,
   };
@@ -243,6 +246,7 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
           plan: next.plan,
           selection: next.selection,
           data_options: next.dataOptions,
+          tuning: next.tuning,
           validation: next.validation,
           query_parity: next.queryParity,
         };
@@ -324,7 +328,7 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
           {module === "assessment" && <AssessmentModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} projectId={project.id} onSave={saveNow} />}
           {module === "schema" && <SchemaCode state={state} setState={setState} fmEndpoint={fmEndpoint} />}
           {module === "data" && <DataMigration state={state} setState={setState} onGoConnection={goConnection} onContinue={() => setModule("sync")} />}
-          {module === "sync" && <CreateSync state={state} onGoConnection={goConnection} onGoSchema={() => setModule("schema")} onGoData={() => setModule("data")} onGoValidation={() => setModule("validation")} workspace={workspace} onManageWorkspace={onManageWorkspace} />}
+          {module === "sync" && <CreateSync state={state} setState={setState} onGoConnection={goConnection} onGoSchema={() => setModule("schema")} onGoData={() => setModule("data")} onGoValidation={() => setModule("validation")} workspace={workspace} onManageWorkspace={onManageWorkspace} />}
           {module === "validation" && <ValidationModule state={state} setState={setState} goConnection={goConnection} fmEndpoint={fmEndpoint} />}
           {module === "parity" && <QueryParityModule state={state} setState={setState} goConnection={goConnection} goAssessment={() => setModule("assessment")} fmEndpoint={fmEndpoint} />}
           {module === "skill" && <AppMigrationSkill projectId={project.id} onSave={saveNow} fmEndpoint={fmEndpoint} />}
