@@ -669,6 +669,8 @@ a { color: var(--primary); }
 .modecard__body { min-width: 0; }
 .modecard__title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; color: var(--ink-2); }
 .modecard__badge { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; padding: 2px 7px; border-radius: 5px; background: var(--primary-weak); color: var(--primary); }
+.modecard__badge--rec { background: var(--ok-weak); color: var(--ok); }
+.modeadvice { margin: 12px 0 0; font-size: 13px; }
 .modecard__desc { display: block; font-size: 13px; color: var(--muted); margin-top: 5px; line-height: 1.5; }
 
 .trow--static { cursor: default; }

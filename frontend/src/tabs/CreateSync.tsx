@@ -4,6 +4,7 @@ import CodeBlock from "../components/CodeBlock";
 import SecretScopeField from "../components/SecretScopeField";
 import type { MigrationState } from "../App";
 import { mapObject, mapSchema } from "../naming";
+import { adviseMode, type Mode } from "../modeAdvice";
 
 interface Props {
   state: MigrationState;
@@ -16,14 +17,23 @@ interface Props {
   onManageWorkspace?: () => void;
 }
 
-type Mode = "now" | "async";
 type SyncScope = "schema" | "full";
 
 export default function CreateSync({ state, setState, onGoConnection, onGoSchema, onGoData, onGoValidation, workspace, onManageWorkspace }: Props) {
   const report = state.report;
   const conn = state.connection;
 
-  const [mode, setMode] = useState<Mode>("now");
+  // Null until the user picks one; until then the size-based recommendation applies.
+  const [chosenMode, setMode] = useState<Mode | null>(null);
+  const advice = useMemo(
+    () => adviseMode(
+      (report?.tables ?? []).filter((t) =>
+        state.selection.length === 0 || state.selection.includes(`${t.schema_name}.${t.table_name}`)),
+      workspace?.connected !== false,
+    ),
+    [report, state.selection, workspace?.connected],
+  );
+  const mode: Mode = chosenMode ?? advice?.mode ?? "now";
 
   // Sync-now execution state.
   const [busy, setBusy] = useState(false);
@@ -389,13 +399,20 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
         <div className="modecards">
           <ModeCard
             on={mode === "now"} onSelect={() => setMode("now")} badge="In-app" title="Sync now"
+            recommended={advice?.mode === "now"}
             desc="Runs in this app with live progress. Good for small and medium databases."
           />
           <ModeCard
             on={mode === "async"} onSelect={() => setMode("async")} badge="Databricks job" title="Async mode"
+            recommended={advice?.mode === "async"}
             desc="Creates a parallel PySpark job you run on your own compute. Built for large databases."
           />
         </div>
+        {advice && (
+          <p className="muted modeadvice">
+            <strong>{advice.mode === "async" ? "Async mode" : "Sync now"} recommended:</strong> {advice.reason}.
+          </p>
+        )}
       </section>
 
       <section className="card">
@@ -802,12 +819,17 @@ function LoadTuning({ plan, overrides, busy, error, onChange, onReset, onRecheck
   );
 }
 
-function ModeCard({ on, onSelect, badge, title, desc }: { on: boolean; onSelect: () => void; badge: string; title: string; desc: string }) {
+function ModeCard({ on, onSelect, badge, title, desc, recommended = false }: {
+  on: boolean; onSelect: () => void; badge: string; title: string; desc: string; recommended?: boolean;
+}) {
   return (
     <button className={`modecard ${on ? "modecard--on" : ""}`} onClick={onSelect} aria-pressed={on}>
       <span className="modecard__radio" aria-hidden />
       <span className="modecard__body">
-        <span className="modecard__title">{title} <span className="modecard__badge">{badge}</span></span>
+        <span className="modecard__title">
+          {title} <span className="modecard__badge">{badge}</span>
+          {recommended && <span className="modecard__badge modecard__badge--rec">Recommended</span>}
+        </span>
         <span className="modecard__desc">{desc}</span>
       </span>
     </button>
