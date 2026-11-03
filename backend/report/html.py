@@ -33,7 +33,7 @@ _PROVENANCE_LABEL = {
 _STATUS_TONE = {
     "success": "ok", "matched": "ok", "match": "ok", "created": "ok", "scheduled": "ok",
     "partial": "warn", "mismatch": "warn", "mismatched": "warn", "extra": "warn",
-    "skipped": "warn", "running": "warn", "submitted": "warn",
+    "skipped": "warn", "running": "warn", "submitted": "warn", "warning": "warn",
     "failed": "err", "missing": "err", "error": "err",
 }
 

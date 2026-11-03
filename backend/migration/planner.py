@@ -4,8 +4,8 @@ Each plan item carries the exact SQL that will be applied to Lakebase, so the
 user can review and edit it before execution. Table DDL is generated from the
 type mapper; code objects are (optionally) translated by the Foundation Model.
 
-The plan has two phases. Pre-data items (schemas, collations, tables, functions,
-views, procedures) are applied before the data load; post-data items (constraints,
+The plan has two phases. Pre-data items (extensions, schemas, collations, tables,
+functions, views, procedures) are applied before the data load; post-data items (constraints,
 indexes, foreign keys, triggers — see POST_DATA_KINDS) only after it, so the
 bulk COPY runs against bare tables and identity sequences can sync to the
 loaded data.
@@ -20,6 +20,7 @@ from backend.schema_migration.ai_translator import translate_all
 from backend.schema_migration.collation_mapper import collect_collations
 from backend.schema_migration.ddl_generator import (
     check_constraint_ddl,
+    extension_ddl,
     column_default_ddl,
     foreign_key_ddl,
     identity_ddl,
@@ -29,6 +30,12 @@ from backend.schema_migration.ddl_generator import (
     table_ddl,
 )
 from backend.schema_migration.naming import IdentifierCase, map_object, map_schema
+from backend.schema_migration.type_mapper import required_extensions
+
+_EXTENSION_NOTES = {
+    "postgis": "Provides the geometry/geography types the source spatial columns map to.",
+    "ltree": "Provides the ltree type the source hierarchyid columns map to.",
+}
 
 _KIND_FROM_TYPE = {
     "PROCEDURE": ObjectKind.PROCEDURE,
@@ -66,6 +73,16 @@ def build_plan(
     # collations are created there and would otherwise have nowhere to land.
     schemas = set(schema_map.values()) | ({collation_schema} if usage.created() else set())
     items: list[PlanItem] = [
+        PlanItem(
+            id=f"extension:{ext}",
+            kind=ObjectKind.EXTENSION,
+            name=ext,
+            sql=extension_ddl(ext),
+            notes=_EXTENSION_NOTES.get(ext, ""),
+        )
+        for ext in required_extensions(tables)
+    ]
+    items += [
         PlanItem(
             id=f"schema:{ms}",
             kind=ObjectKind.SCHEMA,

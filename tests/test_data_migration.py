@@ -9,6 +9,7 @@ from backend.assessment import scanner
 from backend.assessment.models import TableInfo
 from backend.data_migration.etl_generator import generate
 from backend.data_migration.models import DataGenRequest, LoadMode, PostLoadStatement, TableRef
+from backend.migration.source_casts import CLR_CAST, SOURCE_CASTS
 
 
 def _req(**over):
@@ -175,15 +176,16 @@ def test_both_passwords_read_from_secret_scope_never_embedded():
 
 def test_source_read_casts_spark_unreadable_types():
     """Spark's sqlserver reader fails whole tables containing sql_variant /
-    hierarchyid / spatial columns (UNRECOGNIZED_SQL_TYPE, e.g. sql_variant id
-    -156) — the read must project them through server-side casts to text,
-    discovered from INFORMATION_SCHEMA at runtime."""
+    hierarchyid / spatial / CLR columns (UNRECOGNIZED_SQL_TYPE, e.g. sql_variant
+    id -156) — the read projects them through the same server-side casts as the
+    in-app loader, discovered from INFORMATION_SCHEMA at runtime."""
     code = generate(_req())[0].code
     assert "INFORMATION_SCHEMA.COLUMNS" in code
-    assert '"sql_variant": "CAST({c} AS NVARCHAR(MAX)) AS {a}"' in code
-    assert '"hierarchyid": "{c}.ToString() AS {a}"' in code
-    assert '"geography": "{c}.STAsText() AS {a}"' in code
-    assert '"geometry": "{c}.STAsText() AS {a}"' in code
+    ns: dict = {}
+    start = code.index("UNREADABLE_TYPES = ")
+    exec(code[start:code.index("def _source_relation")], ns)
+    assert ns["UNREADABLE_TYPES"] == SOURCE_CASTS
+    assert ns["CLR_CAST"] == CLR_CAST
     # The read resolves its relation through the projection helper, which names
     # every column and casts the unreadable ones.
     assert "relation = _source_relation(src_schema, src_table)" in code
@@ -200,15 +202,15 @@ def _source_relation(code: str, meta: list[dict]):
         def load(self):
             return SimpleNamespace(collect=lambda: meta)
 
-    start = code.index("UNREADABLE_TYPES = {")
+    start = code.index("UNREADABLE_TYPES = ")
     ns: dict = {"_reader": _Reader}
     exec(code[start:code.index("def _chunk_edges")], ns)
     return ns["_source_relation"]("dbo", "Orders")
 
 
-def _col(name, data_type="int", position=1, hidden=False) -> dict:
+def _col(name, data_type="int", position=1, hidden=False, clr=False) -> dict:
     return {"COLUMN_NAME": name, "DATA_TYPE": data_type, "ORDINAL_POSITION": position,
-            "is_hidden": hidden}
+            "is_hidden": hidden, "is_assembly_type": clr}
 
 
 def test_hidden_period_columns_are_projected_through_an_expression():
@@ -249,9 +251,20 @@ def test_unreadable_columns_are_cast_inside_that_list():
     meta = [_col("OrderId", "bigint", 1), _col("Node", "hierarchyid", 2),
             _col("ValidFrom", "datetime2", 3, hidden=True)]
     relation = _source_relation(generate(_req())[0].code, meta)
-    assert "[Node].ToString() AS [Node]" in relation
+    assert SOURCE_CASTS["hierarchyid"].format(c="[Node]", a="[Node]") in relation
     assert "[OrderId], " in relation
     assert "ISNULL([ValidFrom], [ValidFrom]) AS [ValidFrom]" in relation
+
+
+def test_clr_columns_are_read_through_to_string():
+    """sys.types flags user CLR types; any of them gets ToString(), the text the
+    plan's text column takes. Spatial types are CLR too but keep their own cast."""
+    meta = [_col("Id", "int", 1), _col("Pos", "MyPoint", 2, clr=True),
+            _col("Shape", "geometry", 3, clr=True)]
+    relation = _source_relation(generate(_req())[0].code, meta)
+    assert "[Pos].ToString() AS [Pos]" in relation
+    assert "[Shape].AsBinaryZM()" in relation
+    assert "JOIN sys.types ty ON ty.user_type_id = sc.user_type_id" in generate(_req())[0].code
 
 
 def test_the_column_list_follows_the_source_order():

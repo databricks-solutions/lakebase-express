@@ -70,10 +70,10 @@ _TYPE_NOTES: dict[str, tuple[str, Severity, str]] = {
     "ntext": ("text", Severity.LOW, "Deprecated LOB; map to text."),
     "varbinary": ("bytea", Severity.LOW, "Map to bytea."),
     "binary": ("bytea", Severity.LOW, "Map to bytea."),
-    "hierarchyid": ("text/ltree", Severity.HIGH, "No PG equivalent; redesign required."),
-    "geography": ("PostGIS geography", Severity.HIGH, "Requires PostGIS; not available in base Lakebase."),
-    "geometry": ("PostGIS geometry", Severity.HIGH, "Requires PostGIS; not available in base Lakebase."),
-    "sql_variant": ("text/jsonb", Severity.HIGH, "No PG equivalent; redesign required."),
+    "hierarchyid": ("ltree", Severity.HIGH, "Mapped to ltree ('/1/2/' becomes '1.2'); hierarchy methods must be rewritten and sibling sort order differs."),
+    "geography": ("PostGIS geography", Severity.MEDIUM, "Mapped to PostGIS geography; spatial methods must be rewritten as PostGIS functions."),
+    "geometry": ("PostGIS geometry", Severity.MEDIUM, "Mapped to PostGIS geometry; spatial methods must be rewritten as PostGIS functions."),
+    "sql_variant": ("jsonb", Severity.HIGH, "No PG equivalent; stored as jsonb {type, value}, so typed reads must be reworked."),
     "xml": ("xml", Severity.MEDIUM, "PG xml type is limited vs T-SQL XML methods."),
     "rowversion": ("bytea", Severity.MEDIUM, "No auto-versioning; replace with trigger or app logic."),
     "timestamp": ("bytea", Severity.MEDIUM, "SQL Server 'timestamp' is rowversion, NOT a datetime."),
@@ -96,6 +96,39 @@ def check_types(tables: Iterable[TableInfo]) -> list[Finding]:
                     object_name=f"{t.fqn}.{col.name}",
                     detail=detail,
                     recommendation=f"Map to Postgres '{target}'.",
+                )
+            )
+    return findings
+
+
+def check_full_globes(tables: Iterable[TableInfo]) -> list[Finding]:
+    """FULLGLOBE geography values: PostGIS has no form for them, so they load as
+    NULL — or fail the table when the column is NOT NULL."""
+    findings: list[Finding] = []
+    for t in tables:
+        for col in t.columns:
+            n = col.full_globe_count
+            if not n:
+                continue
+            if col.is_nullable:
+                severity, detail = Severity.MEDIUM, (
+                    f"{n:,} FULLGLOBE value(s) have no PostGIS form and will load as NULL, "
+                    "so 'the whole Earth' becomes 'unknown'.")
+            else:
+                severity, detail = Severity.HIGH, (
+                    f"{n:,} FULLGLOBE value(s) have no PostGIS form and the column is "
+                    "NOT NULL, so the table will not be loaded (the run warns, it doesn't fail).")
+            findings.append(
+                Finding(
+                    rule_id="GEOGRAPHY_FULLGLOBE",
+                    title="FULLGLOBE values have no PostGIS form",
+                    severity=severity,
+                    object_name=f"{t.fqn}.{col.name}",
+                    detail=detail,
+                    recommendation=(
+                        "Decide what these rows mean on the target, e.g. a flag column "
+                        "for 'applies everywhere', and update the application to match."
+                    ),
                 )
             )
     return findings
@@ -449,6 +482,7 @@ def run_all_rules(
     tables, objects = list(tables), list(objects)
     return (
         check_types(tables)
+        + check_full_globes(tables)
         + check_collations(tables)
         + check_code(objects)
         + check_temp_objects(tables, objects)

@@ -450,6 +450,7 @@ def _snapshot_fakes(copy_chunk, bounds=(1, 1001)):
     reader = type("R", (), {"option": lambda self, *a: self,
                             "load": lambda self: type("D", (), {"columns": ["Id"]})()})
     return dict(_source_relation=lambda s, t: "(SELECT [Id] FROM [dbo].[T]) AS src",
+                _full_globes=lambda s, t: None,
                 _bounds=lambda rel, col: bounds, _reader=lambda *a: reader(),
                 psycopg=_PgFake(), _copy_chunk=copy_chunk, _utcnow=lambda: "now")
 

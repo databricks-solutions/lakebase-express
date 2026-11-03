@@ -39,9 +39,15 @@ How the load works:
   afterwards; user triggers are disabled during each table's `COPY`, so translated
   triggers don't fire once per bulk-loaded row.
 - Each table loads in **one transaction**: it either commits in full or leaves nothing.
-- Types the driver can't read (`sql_variant`, `hierarchyid`, spatial) are converted to text
-  on the source. A table that hits a coercion edge fails with the database error — rows are
-  never silently dropped.
+- Types the driver can't read are converted on the source into the input form of their
+  target type: `geometry`/`geography` → PostGIS (SRID and Z/M kept), `hierarchyid` →
+  `ltree` (`/1/2/` becomes `1.2`), `sql_variant` → `jsonb` `{"type", "value"}`, and CLR
+  user-defined types → `text`. The plan creates the `postgis`/`ltree` extensions first.
+  A geography `FULLGLOBE` has no PostGIS form: it loads as NULL and the table's progress
+  row says how many. In a `NOT NULL` column the table is not loaded and gets a warning
+  instead; the run, or the Async job, still succeeds. A
+  table that hits a coercion edge fails with the database error — rows are never silently
+  dropped.
 - Transient failures on either side (a resuming serverless database, a dropped connection)
   retry; real errors fail on the first attempt.
 

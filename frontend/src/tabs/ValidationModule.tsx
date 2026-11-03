@@ -18,7 +18,7 @@ const KIND_ORDER: ObjectKind[] = [
   "constraint", "index", "foreign_key",
 ];
 const KIND_LABEL: Record<ObjectKind, string> = {
-  schema: "Schemas", collation: "Collations", table: "Tables", view: "Views",
+  extension: "Extensions", schema: "Schemas", collation: "Collations", table: "Tables", view: "Views",
   function: "Functions", procedure: "Procedures", trigger: "Triggers",
   constraint: "Constraints", index: "Indexes", foreign_key: "Foreign keys",
 };
@@ -348,7 +348,9 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
   // objects aren't sent — removing them is a review-and-drop, not a conversion.
   const open = report.items.filter((i) => i.status !== "matched" && i.status !== "extra" && !i.remediated);
   const extras = report.items.filter((i) => i.status === "extra" && !i.remediated).length;
-  const rowOnly = open.filter((i) => !sqlFixable(i)).length;
+  // Only what DDL can fix goes to the agent; row-count drift needs Re-copy table data.
+  const fixable = open.filter(sqlFixable);
+  const rowOnly = open.length - fixable.length;
   const running = repair?.status === "running";
 
   function markRemediated(ids: Set<string>) {
@@ -365,7 +367,7 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
   }
 
   async function resolve() {
-    if (!state.lakebase || !open.length) return;
+    if (!state.lakebase || !fixable.length) return;
     setError(null);
     // Re-runs continue each item's attempt history instead of starting over.
     const prior = new Map((repair?.items ?? []).map((i) => [i.id, i.attempts]));
@@ -375,7 +377,7 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
     try {
       const { run_id } = await api.startValidationRepair({
         lakebase: state.lakebase,
-        targets: open.map((item) => ({ item, prior_attempts: prior.get(item.id) ?? [] })),
+        targets: fixable.map((item) => ({ item, prior_attempts: prior.get(item.id) ?? [] })),
         target_schema: state.targetSchema,
         endpoint: fmEndpoint || undefined,
         max_attempts: attempts,
@@ -403,7 +405,7 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
     }
   }
 
-  if (!open.length && !repair) return null;
+  if (!fixable.length && !repair) return null;
 
   return (
     <section className="card">
@@ -423,8 +425,8 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
         (translating source T-SQL where needed), applies it to Lakebase, and iterates on any
         Postgres error until the object is consistent — or it runs out of attempts.
         {rowOnly > 0 && (
-          <> {rowOnly} row-count mismatch{rowOnly === 1 ? "" : "es"} can't be fixed by SQL — the agent
-          flags {rowOnly === 1 ? "it" : "them"} for <strong>Re-copy table data</strong> below.</>
+          <> {rowOnly} row-count mismatch{rowOnly === 1 ? "" : "es"} can't be fixed by SQL, so the
+          agent skips {rowOnly === 1 ? "it" : "them"} — use <strong>Re-copy table data</strong> below.</>
         )}
         {extras > 0 && (
           <> {extras} object{extras === 1 ? " exists" : "s exist"} only in the target — nothing to
@@ -432,12 +434,16 @@ function RepairAgentCard({ state, setState, fmEndpoint, llm, onFixesApplied }: {
           <strong>Remove from target</strong> in the object list below.</>
         )}
       </p>
-      <AgentAttempts value={attempts} onChange={setAttempts} />
-      <div className="actions">
-        <button className="btn btn--primary" disabled={running || !open.length} onClick={resolve}>
-          {running ? "Agent working…" : `✦ Resolve ${open.length.toLocaleString()} with the AI agent`}
-        </button>
-      </div>
+      {(fixable.length > 0 || running) && (
+        <>
+          <AgentAttempts value={attempts} onChange={setAttempts} />
+          <div className="actions">
+            <button className="btn btn--primary" disabled={running} onClick={resolve}>
+              {running ? "Agent working…" : `✦ Resolve ${fixable.length.toLocaleString()} with the AI agent`}
+            </button>
+          </div>
+        </>
+      )}
       {error && <div className="banner banner--err">{error}</div>}
       {repair && <RepairAgentPanel repair={repair} />}
       {repair && !running && repair.fixed > 0 && (
@@ -753,6 +759,9 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
   // Re-copy (row-count mismatches): reuses the data-migration engine for one table.
   const [copyRunId, setCopyRunId] = useState<string | null>(null);
   const [copyRun, setCopyRun] = useState<RunState | null>(null);
+  // Not loaded by design (e.g. FULLGLOBE in a NOT NULL column): the run succeeds,
+  // but nothing was copied, so it is not a fix.
+  const [copyWarn, setCopyWarn] = useState<string | null>(null);
   const copyRef = useRef(true);
   useEffect(() => () => { copyRef.current = false; }, []);
 
@@ -836,6 +845,7 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
     }
     // Empty passwords are fine — /data/start resolves both sides from the session cache.
     setApplyErr(null);
+    setCopyWarn(null);
     const { run_id } = await api.startData({
       source_type: conn.source_type, host: conn.host, database: conn.database,
       username: conn.username, password: conn.password, port: conn.port,
@@ -856,7 +866,9 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
       try {
         const r = await api.dataStatus(run_id);
         setCopyRun(r);
+        const t = r.tables[0];
         if (r.status === "running") setTimeout(tick, 1200);
+        else if (t?.status === "warning") setCopyWarn(t.warning || "The table was not loaded.");
         else if (r.status === "success") { markRemediated(); setApplied("Table re-copied."); }
         else setApplyErr(r.tables[0]?.error || r.error || "Re-copy failed.");
       } catch (e) {
@@ -901,7 +913,9 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
       {aiErr && <div className="banner banner--err">{aiErr}</div>}
       {analysis && <div className="agentstep__analysis" style={{ marginTop: 10 }}>✦ {analysis}</div>}
 
-      {copyRunId && copyRun && (
+      {copyRunId && copyRun && (() => {
+        const shown = copyRun.tables[0]?.status === "warning" ? "warning" : copyRun.status;
+        return (
         <div className="prog" style={{ marginTop: 12 }}>
           <div className="prog__row">
             <span className="prog__name">{copyRun.tables[0]?.name}</span>
@@ -909,18 +923,19 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
               {copyRun.tables[0]?.rows_copied.toLocaleString()}
               {copyRun.tables[0]?.total_rows ? ` / ${copyRun.tables[0].total_rows.toLocaleString()}` : ""} rows
             </span>
-            <span className={`sbadge sbadge--${copyRun.status === "success" ? "ok" : copyRun.status === "running" ? "ai" : "err"}`}>
-              {copyRun.status}
+            <span className={`sbadge sbadge--${shown === "success" ? "ok" : shown === "running" ? "ai" : shown === "warning" ? "warn" : "err"}`}>
+              {shown}
             </span>
           </div>
           <div className="bar">
             <div
-              className={`bar__fill bar__fill--${copyRun.status === "success" ? "success" : copyRun.status === "running" ? "running" : "failed"}`}
-              style={{ width: copyRun.tables[0]?.total_rows ? `${Math.min(100, (copyRun.tables[0].rows_copied / copyRun.tables[0].total_rows) * 100)}%` : "100%" }}
+              className={`bar__fill bar__fill--${shown === "success" ? "success" : shown === "running" ? "running" : shown === "warning" ? "warning" : "failed"}`}
+              style={{ width: shown !== "warning" && copyRun.tables[0]?.total_rows ? `${Math.min(100, (copyRun.tables[0].rows_copied / copyRun.tables[0].total_rows) * 100)}%` : "100%" }}
             />
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Side-by-side compare: what the source has (left) vs the fix to apply (right). */}
       <div className={`fixgrid ${hasSourcePane ? "" : "fixgrid--single"}`}>
@@ -954,6 +969,7 @@ function FixPanel({ item, state, setState, fmEndpoint }: {
 
       {applied && <div className="banner banner--ok">{applied} Re-run the validation to verify.</div>}
       {applyErr && <div className="banner banner--err">{applyErr}</div>}
+      {copyWarn && <div className="banner banner--warn">Not loaded: {copyWarn}</div>}
     </div>
   );
 }

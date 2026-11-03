@@ -122,8 +122,10 @@ WHERE  trigger_schema = ANY(%(schemas)s)
 
 # collation_name is the column's *explicit* collation — NULL when it inherits the
 # database default, which is exactly the "no COLLATE applied" case to detect.
+# Extension types (geometry, ltree) report as USER-DEFINED; udt_name names them.
 _PG_COLUMNS_SQL = """
-SELECT table_schema AS schema, table_name AS "table", column_name AS name, data_type,
+SELECT table_schema AS schema, table_name AS "table", column_name AS name,
+       CASE WHEN data_type = 'USER-DEFINED' THEN udt_name ELSE data_type END AS data_type,
        column_default IS NOT NULL AS has_default,
        is_identity = 'YES' AS is_identity,
        collation_name
@@ -1197,7 +1199,7 @@ def _rollup(
     items: list[ValidationItem], *, target_schema: str, source_database: str, target_database: str
 ) -> ValidationReport:
     """Sort the items and derive the report stats (counts, score, row totals)."""
-    items.sort(key=lambda i: (KIND_ORDER.get(i.kind, 9), i.source_name or i.target_name))
+    items.sort(key=lambda i: (KIND_ORDER.get(i.kind, len(KIND_ORDER)), i.source_name or i.target_name))
     counts = {s: sum(i.status is s for i in items) for s in MatchStatus}
     # Plain percentage of compared objects that matched; int() floors, so 100
     # is only reachable when every object matches.
