@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,7 +29,6 @@ class TableRef(BaseModel):
 STREAMS_RANGE = (1, 256)
 TABLE_STREAMS_RANGE = (1, 64)
 FETCH_RANGE = (500, 50_000)
-TRANSLATE_WORKERS_RANGE = (1, 64)
 
 
 class TuningOverrides(BaseModel):
@@ -36,16 +36,15 @@ class TuningOverrides(BaseModel):
     max_streams: int | None = None
     table_streams: int | None = None
     fetch_size: int | None = None
-    translate_workers: int | None = None
 
-    @field_validator("max_streams", "table_streams", "fetch_size", "translate_workers")
+    @field_validator("max_streams", "table_streams", "fetch_size")
     @classmethod
     def _clamp(cls, v: int | None, info) -> int | None:
         if v is None:
             return None
         lo, hi = {
             "max_streams": STREAMS_RANGE, "table_streams": TABLE_STREAMS_RANGE,
-            "fetch_size": FETCH_RANGE, "translate_workers": TRANSLATE_WORKERS_RANGE,
+            "fetch_size": FETCH_RANGE,
         }[info.field_name]
         return max(lo, min(hi, v))
 
@@ -132,7 +131,11 @@ class DataGenRequest(BaseModel):
     lakebase_database: str = "lakebase"
     lakebase_user: str
     # Lakebase role password, read from the secret scope at runtime (never embedded).
-    lakebase_password_secret_key: str
+    lakebase_password_secret_key: str = ""
+    # "databricks": the job mints an OAuth credential as its run-as identity, which
+    # the app sets to the signed-in user. Server-filled: user and endpoint below.
+    lakebase_auth_mode: Literal["password", "databricks"] = "password"
+    lakebase_endpoint: str = ""
 
     # Post-data phase of the migration plan (constraints, indexes, FKs,
     # triggers), embedded into the generated notebook and applied by the job

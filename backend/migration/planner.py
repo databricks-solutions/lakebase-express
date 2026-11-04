@@ -53,7 +53,6 @@ def build_plan(
     endpoint: str | None,
     on_translate_progress: Callable[[int, int], None] | None = None,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
-    translate_workers: int | None = None,
 ) -> list[PlanItem]:
     """Build the editable migration plan. ``on_translate_progress(done, total)``
     is called as code-object translations complete (for background-run progress);
@@ -149,8 +148,6 @@ def build_plan(
         # that wrap translate_all; only the new opt-in needs the extra argument.
         if identifier_case == IdentifierCase.PRESERVE:
             translate_kwargs["identifier_case"] = identifier_case
-        if translate_workers:
-            translate_kwargs["workers"] = translate_workers
         for tr in translate_all(objects, endpoint, **translate_kwargs):
             translations[tr.object_name] = tr
 

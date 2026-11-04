@@ -64,10 +64,34 @@ PASSWORD = dbutils.secrets.get(scope="__SCOPE__", key="__PWD_KEY__")
 PG_HOST = "__PG_HOST__"
 PG_PORT = __PG_PORT__
 PG_DATABASE = "__PG_DATABASE__"
+__PG_AUTH__'''
+
+
+# Target auth, one per LakebaseAuth mode. _pg_password() is what renewals call.
+_PG_AUTH_PASSWORD = '''\
 PG_USER = "__PG_USER__"
-# Lakebase role password from the secret scope (never embedded). Alternatively,
-# mint a short-lived Postgres OAuth token from the workspace identity and use it here.
-PG_PASSWORD = dbutils.secrets.get(scope="__SCOPE__", key="__PG_PWD_KEY__")'''
+# Lakebase role password from the secret scope (never embedded).
+PG_PASSWORD = dbutils.secrets.get(scope="__SCOPE__", key="__PG_PWD_KEY__")
+
+
+def _pg_password():
+    return PG_PASSWORD'''
+
+_PG_AUTH_IDENTITY = '''\
+# Databricks identity: connects as this job's run-as identity over a short-lived
+# OAuth credential — no password anywhere.
+PG_ENDPOINT = "__PG_ENDPOINT__"
+from databricks.sdk import WorkspaceClient as _PgWorkspace
+
+_pg_ws = _PgWorkspace()
+PG_USER = _pg_ws.current_user.me().user_name
+
+
+def _pg_password():
+    return _pg_ws.postgres.generate_database_credential(endpoint=PG_ENDPOINT).token
+
+
+PG_PASSWORD = _pg_password()'''
 
 
 # Emitted when the app has a Lakebase-backed run store: the job records its own
@@ -353,6 +377,7 @@ __TABLES__
 
 import datetime
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
 
@@ -363,6 +388,20 @@ PG_KWARGS = dict(
     user=PG_USER, password=PG_PASSWORD, sslmode="require",
     application_name="lakebase-express-snapshot",
 )
+
+# An OAuth credential lasts an hour and is checked only at login. Renewed on the
+# driver before each chunk, so the copy of PG_KWARGS each chunk ships is live.
+_PG_RENEW_S = 30 * 60
+_pg_renewed = time.monotonic()
+_pg_lock = threading.Lock()
+
+
+def _renew_pg_credential():
+    global _pg_renewed
+    with _pg_lock:
+        if time.monotonic() - _pg_renewed > _PG_RENEW_S:
+            PG_KWARGS["password"] = _pg_password()
+            _pg_renewed = time.monotonic()
 
 # Key types a table can be cut into ranges on.
 _PARTITIONABLE = (int, float, Decimal, datetime.date, datetime.datetime)
@@ -565,6 +604,7 @@ def _utcnow() -> str:
 def _copy_chunk(relation, part_col, edges, fetch_size, fq_target, col_list) -> int:
     """One key range: a single-partition read streamed into one COPY, committed on its own."""
     lo, hi = edges
+    _renew_pg_credential()
     dbtable = _narrow(relation, _chunk_where(part_col, lo, hi) if part_col else "")
     df = _reader(fetch_size).option("dbtable", dbtable).load()
     return sum(r["rows"] for r in df.mapInArrow(_copy_stream(fq_target, col_list), "rows long").collect())
@@ -589,6 +629,7 @@ def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col,
     columns = _reader(fetch_size).option("dbtable", relation).load().columns
     col_list = ", ".join(f'"{c}"' for c in columns)
     has_triggers = False
+    _renew_pg_credential()
     with psycopg.connect(**PG_KWARGS) as pg, pg.cursor() as cur:
         cur.execute("SELECT to_regclass(%s)", (fq_target,))
         if cur.fetchone()[0] is None:
@@ -627,6 +668,7 @@ def snapshot_table(src_schema, src_table, dst_schema, dst_table, part_col,
                 raise
     finally:
         if has_triggers:
+            _renew_pg_credential()
             with psycopg.connect(**PG_KWARGS) as pg, pg.cursor() as cur:
                 cur.execute(f"ALTER TABLE {fq_target} ENABLE TRIGGER USER")
     print(f"   ok {label}: {rows:,} rows")
@@ -707,6 +749,7 @@ def restore_target_fks(dropped) -> dict:
     failures = {}
     if not dropped:
         return failures
+    _renew_pg_credential()
     with psycopg.connect(**PG_KWARGS) as pg:
         for tbl, name, definition in dropped:
             try:
@@ -911,14 +954,19 @@ _PG_HEADER = '''\
 PG_HOST = "__PG_HOST__"
 PG_PORT = __PG_PORT__
 PG_DATABASE = "__PG_DATABASE__"
-PG_USER = "__PG_USER__"
-# Lakebase role password from the secret scope (never embedded).
-PG_PASSWORD = dbutils.secrets.get(scope="__SCOPE__", key="__PG_PWD_KEY__")'''
+__PG_AUTH__'''
+
+
+def _pg_auth(req: DataGenRequest) -> str:
+    if req.lakebase_auth_mode == "databricks":
+        return _PG_AUTH_IDENTITY.replace("__PG_ENDPOINT__", req.lakebase_endpoint)
+    return _PG_AUTH_PASSWORD
 
 
 def _render_pg_header(req: DataGenRequest) -> str:
     return (
-        _PG_HEADER.replace("__SCOPE__", req.secret_scope)
+        _PG_HEADER.replace("__PG_AUTH__", _pg_auth(req))
+        .replace("__SCOPE__", req.secret_scope)
         .replace("__PG_HOST__", req.lakebase_host)
         .replace("__PG_PORT__", str(req.lakebase_port))
         .replace("__PG_DATABASE__", req.lakebase_database)
@@ -929,7 +977,8 @@ def _render_pg_header(req: DataGenRequest) -> str:
 
 def _render_header(req: DataGenRequest) -> str:
     return (
-        _HEADER.replace("__HOST__", req.host)
+        _HEADER.replace("__PG_AUTH__", _pg_auth(req))
+        .replace("__HOST__", req.host)
         .replace("__PORT__", str(req.port))
         .replace("__DATABASE__", req.database)
         .replace("__USER__", req.username)
@@ -1004,12 +1053,16 @@ def _post_load_rows(statements: list[PostLoadStatement]) -> str:
     return ",\n".join(rows)
 
 
+# w.postgres (Lakebase OAuth credentials) needs a recent SDK on the cluster.
+_SDK_PIP = " databricks-sdk>=0.81.0"
+
+
 def _render_run_state(req: DataGenRequest, phase: str) -> tuple[str, str]:
     """(reporter block, extra pip packages). Without a run store the reporter is a
     no-op stub, so the templates' calls stay valid."""
     rs = req.run_store
     if rs is None:
-        return _RUN_STATE_STUB, ""
+        return _RUN_STATE_STUB, _SDK_PIP if req.lakebase_auth_mode == "databricks" else ""
     block = (
         _RUN_STATE
         .replace("__RS_HOST__", rs.host)
@@ -1022,8 +1075,7 @@ def _render_run_state(req: DataGenRequest, phase: str) -> tuple[str, str]:
         .replace("__RS_ID_PREFIX__", RUN_ID_PREFIX)
         .replace("__RS_TASKS__", repr(run_task_keys(req)))
     )
-    # w.postgres (Lakebase OAuth credentials) needs a recent SDK on the cluster.
-    return block, " databricks-sdk>=0.81.0"
+    return block, _SDK_PIP
 
 
 def _snapshot(req: DataGenRequest) -> Artifact:

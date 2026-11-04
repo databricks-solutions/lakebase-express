@@ -60,6 +60,11 @@ def _app_identity() -> str:
     return current_workspace().get("user") or "unknown"
 
 
+def request_actor() -> str | None:
+    """The signed-in user the Apps proxy named on this request, or None."""
+    return _actor.get()
+
+
 def current_actor() -> str:
     """The signed-in user, or the app's own identity marked as such.
 

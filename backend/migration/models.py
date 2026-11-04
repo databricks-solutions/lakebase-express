@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,9 @@ class LakebaseConnRequest(BaseModel):
     secret_ref: SecretRef | None = None
     port: int = 5432
     sslmode: str = "require"
+    # "databricks": connect as the signed-in Databricks user over OAuth; the server
+    # sets ``user`` and ignores any password (see connectors/lakebase_identity.py).
+    auth_mode: Literal["password", "databricks"] = "password"
     # Scopes the remembered/resolved target password to one migration project.
     # Not a connection field — excluded when building a LakebaseConnection.
     project_id: str = ""
@@ -101,7 +105,6 @@ class BuildPlanRequest(BaseModel):
     identifier_case: IdentifierCase = IdentifierCase.LOWERCASE
     translate: bool = True              # run AI translation for code objects
     endpoint: str | None = None         # FM endpoint override
-    translate_workers: int | None = Field(default=None, ge=1, le=64)  # None = default (8)
 
 
 class PlanResponse(BaseModel):

@@ -8,7 +8,7 @@ stored here; non-secret scope/key/workspace references may be persisted.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -43,6 +43,8 @@ class TargetConfig(BaseModel):
     sslmode: str = "require"
     # See SourceConfig.secret_ref — the non-secret password pointer for the target.
     secret_ref: SecretRef | None = None
+    # "databricks": the target connects as the signed-in Databricks user, no password.
+    auth_mode: Literal["password", "databricks"] = "password"
 
 
 class DataOptions(BaseModel):

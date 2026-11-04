@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 from backend.config import workspace_client
+from backend.connectors.lakebase_identity import create_role_snippet as _role_snippet
 from backend.data_migration.models import DataGenRequest, RunStoreTarget
 from backend.migration import async_runs
 from backend.migration.job_offload import (
@@ -52,21 +53,13 @@ _MISSING_ROLE = "42704"
 
 
 def create_role_snippet(identity: str, identity_type: str, endpoint: str) -> str:
-    """What the user runs to give a job identity a Lakebase role. Needs a session
-    authenticated as a Databricks identity (``databricks psql``); the app's password
-    login is not one, which is why it cannot do this itself."""
-    project = endpoint.split("/branches/")[0].removeprefix("projects/")
-    # Doubled, or a quote in an identity would break the snippet.
-    literal = identity.replace("'", "''")
-    return (
-        f"-- Run against the Lakebase project holding the run-state table:\n"
-        f"--   databricks psql --project {project}\n"
-        "CREATE EXTENSION IF NOT EXISTS databricks_auth;\n"
-        f"SELECT databricks_create_role('{literal}', '{identity_type}');"
-    )
+    """What the user runs to give a job identity a Lakebase role. The app's password
+    login is not a Databricks-identity session, which is why it cannot do this itself."""
+    return _role_snippet(identity, identity_type, endpoint,
+                         where="the Lakebase project holding the run-state table")
 
 
-def grant_run_store_access(job_id: int) -> tuple[str, str] | None:
+def grant_run_store_access(job_id: int, as_user: str = "") -> tuple[str, str] | None:
     """Give the job's identity write access to the run-state table; (message, fix)
     when it could not be granted, else None.
 
@@ -79,9 +72,12 @@ def grant_run_store_access(job_id: int) -> tuple[str, str] | None:
     config = store.notebook_config()
     if config is None:
         return None
-    identity = "unknown"
+    identity, identity_type = "unknown", "USER"
     try:
-        identity, identity_type = run_as_identity(workspace_client(), job_id)
+        # as_user: the user the job is about to be switched to run as.
+        identity, identity_type = (
+            (as_user, "USER") if as_user else run_as_identity(workspace_client(), job_id)
+        )
         store.grant_writer(identity)  # type: ignore[attr-defined]
         log.info("Granted run-store write access to %s", identity)
         return None
@@ -105,14 +101,14 @@ def grant_run_store_access(job_id: int) -> tuple[str, str] | None:
         )
 
 
-def check_run_store_access(job_id: int | None) -> tuple[str, str | None] | None:
+def check_run_store_access(job_id: int | None, as_user: str = "") -> tuple[str, str | None] | None:
     """(message, fix) when the job cannot record its run state, else None. Shared by
     provisioning and the user's re-check."""
     if get_run_store().notebook_config() is None:
         return RUN_STATE_DISABLED, None
     if job_id is None:
         return None
-    return grant_run_store_access(job_id)
+    return grant_run_store_access(job_id, as_user)
 
 
 def setup_async(
@@ -175,7 +171,15 @@ def _recorded(
 ) -> dict:
     """Record the provisioned job in the run store and return ``result`` with our
     own run id added. Recording must never fail the provisioning that succeeded."""
-    failed = check_run_store_access(result.get("job_id"))
+    pending = result.get("run_as_pending") or ""
+    if pending:
+        result["note"] = (
+            f"Job created but not started: it has to run as you ({pending}) to connect to "
+            "Lakebase with your Databricks identity, and the app isn't allowed to set that. "
+            "Open the job, use 'Run as' → yourself, then 'Run now'"
+            + (" or unpause its schedule." if quartz_cron else ".")
+        )
+    failed = check_run_store_access(result.get("job_id"), pending)
     if failed:
         result["run_state_warning"], result["run_state_fix"] = failed
     try:

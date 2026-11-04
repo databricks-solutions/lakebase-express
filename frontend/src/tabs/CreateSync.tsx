@@ -70,6 +70,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
   const [runtimeScopeOption, setRuntimeScopeOption] = useState<SecretScopeOption | null>(null);
   const [pwdKey, setPwdKey] = useState("azuresql-password");
   const [lakebasePwdKey, setLakebasePwdKey] = useState("lakebase-password");
+  const lbIdentity = state.lakebase?.auth_mode === "databricks";
   const [workspaceDir, setWorkspaceDir] = useState("/Workspace/Shared/lakebase-express");
   // Create/update the secret scope from the entered connection passwords on submit.
   const [syncSecrets, setSyncSecrets] = useState(true);
@@ -186,9 +187,8 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
 
   const setTuning = (patch: TuningOverrides) =>
     setState((s) => ({ ...s, tuning: { ...s.tuning, ...patch } }));
-  // Clears every load override (and any legacy field); translation workers belong to Schema & Code.
-  const resetTuning = () =>
-    setState((s) => ({ ...s, tuning: { translate_workers: s.tuning.translate_workers ?? null } }));
+  // Clears every load override (and any legacy field).
+  const resetTuning = () => setState((s) => ({ ...s, tuning: {} }));
 
   if (!report || !conn) {
     return (
@@ -291,7 +291,9 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
       lakebase_port: state.lakebase?.port ?? 5432,
       lakebase_database: state.lakebase?.database ?? "lakebase",
       lakebase_user: state.lakebase?.user ?? "",
-      lakebase_password_secret_key: lakebasePwdKey,
+      // Databricks identity: the job runs as the user and mints its own credential.
+      lakebase_auth_mode: lbIdentity ? "databricks" : "password",
+      lakebase_password_secret_key: lbIdentity ? "" : lakebasePwdKey,
       // primary_key feeds the range-partitioned (parallel) source reads; the stats size them.
       tables: tuningRefs,
       capacity: capacityRef.current?.key === limitsKey ? capacityRef.current.limits : null,
@@ -325,21 +327,21 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
       if (syncSecrets) {
         const secrets: Record<string, string> = {};
         if (conn!.password) secrets[pwdKey] = conn!.password;
-        if (state.lakebase.password) secrets[lakebasePwdKey] = state.lakebase.password;
+        if (!lbIdentity && state.lakebase.password) secrets[lakebasePwdKey] = state.lakebase.password;
         const s = await api.ensureSecrets({
           scope: secretScope,
           secrets,
           source: conn!,
-          lakebase: state.lakebase,
+          lakebase: lbIdentity ? undefined : state.lakebase,
           source_key: pwdKey,
-          lakebase_key: lakebasePwdKey,
+          lakebase_key: lbIdentity ? undefined : lakebasePwdKey,
         });
         const wrote = new Set(s.keys);
         // Only now can we tell if a password was truly unavailable (neither
         // entered nor stored) — surface a precise, actionable error.
         const missing: string[] = [];
         if (!wrote.has(pwdKey)) missing.push("source");
-        if (!wrote.has(lakebasePwdKey)) missing.push("Lakebase");
+        if (!lbIdentity && !wrote.has(lakebasePwdKey)) missing.push("Lakebase");
         if (missing.length) {
           setError(`Missing ${missing.join(" and ")} password${missing.length > 1 ? "s" : ""} — ` +
             "not entered this session and none stored yet. Re-enter them in the Connection step " +
@@ -570,7 +572,14 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
               </div>
               <div className="field-row">
                 <div className="field"><label>Source password secret key</label><input value={pwdKey} onChange={(e) => setPwdKey(e.target.value)} /></div>
-                <div className="field"><label>Lakebase password secret key</label><input value={lakebasePwdKey} onChange={(e) => setLakebasePwdKey(e.target.value)} /></div>
+                {lbIdentity ? (
+                  <div className="field">
+                    <label>Lakebase</label>
+                    <p className="muted" style={{ margin: 0, fontSize: 13 }}>No secret — the job runs as you and connects with your Databricks identity.</p>
+                  </div>
+                ) : (
+                  <div className="field"><label>Lakebase password secret key</label><input value={lakebasePwdKey} onChange={(e) => setLakebasePwdKey(e.target.value)} /></div>
+                )}
               </div>
               <label className="check">
                 <input type="checkbox" checked={syncSecrets} onChange={(e) => setSyncSecrets(e.target.checked)} />
@@ -611,7 +620,13 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
             )}
           </div>
           {error && <div className="banner banner--err">{error}</div>}
-          {asyncRes && (
+          {asyncRes?.run_as_pending && (
+            <div className="banner banner--err">
+              {asyncRes.note}{" "}
+              {asyncRes.url && <a href={asyncRes.url} target="_blank" rel="noreferrer">Open job ↗</a>}
+            </div>
+          )}
+          {asyncRes && !asyncRes.run_as_pending && (
             <div className="banner banner--ok">
               {asyncRes.run_id
                 ? <>Job {asyncRes.job_id} created and a resume run started — only the unfinished tables are copied.</>

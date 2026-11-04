@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -408,9 +409,17 @@ def translate_object(
 
 # Objects are translated concurrently — each translate_object is an independent
 # FM call. Bounded so a large schema doesn't open dozens of endpoint connections
-# at once; the endpoint's own concurrency is the real ceiling anyway. A project
-# can override it (TuningOverrides.translate_workers).
-_TRANSLATE_WORKERS = 8
+# at once; the endpoint's own concurrency is the real ceiling anyway.
+def _translate_workers() -> int:
+    """LBX_TRANSLATE_WORKERS (1–64), default 8; a bad value falls back to 8."""
+    try:
+        return max(1, min(64, int(os.getenv("LBX_TRANSLATE_WORKERS", "8"))))
+    except ValueError:
+        log.warning("Invalid LBX_TRANSLATE_WORKERS, using 8")
+        return 8
+
+
+_TRANSLATE_WORKERS = _translate_workers()
 
 
 def translate_all(

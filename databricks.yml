@@ -39,6 +39,10 @@ variables:
     description: Secret key holding the Fernet key that encrypts stored passwords.
     default: lbx-credential-key
 
+  translate_workers:
+    description: Code objects the AI translates at once (1–64); lower it if the endpoint rate-limits.
+    default: "8"
+
   egress_probe:
     description: >-
       Log the app's public egress IP at startup, for allowlisting it on the source
@@ -65,6 +69,11 @@ resources:
       name: ${var.app_name}
       description: "SQL Server → Lakebase migration accelerator (FastAPI + React SPA)"
       source_code_path: .
+      # On-behalf-of-user scopes: `postgres` lets a target in "Databricks identity"
+      # mode mint a Lakebase credential as the signed-in user. The iam.* defaults are
+      # implicit and rejected if listed.
+      user_api_scopes:
+        - postgres
       # The single declaration of the runtime spec: deploy.sh renders app.yaml from
       # this, because `apps start` reads that file and not this block.
       config:
@@ -94,5 +103,7 @@ resources:
             value: ${var.projects_pg_secret_key}
           - name: LBX_CREDENTIAL_KEY_SECRET_KEY
             value: ${var.credential_key_secret_key}
+          - name: LBX_TRANSLATE_WORKERS
+            value: ${var.translate_workers}
           - name: LBX_EGRESS_PROBE
             value: ${var.egress_probe}

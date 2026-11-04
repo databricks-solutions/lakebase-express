@@ -205,6 +205,43 @@ def _ensure_job(w, paths: list[str], schedule: jobs.CronSchedule | None, name: s
     ).job_id, True
 
 
+def ensure_run_as_user(w, job_id: int, user: str,
+                       schedule: jobs.CronSchedule | None = None) -> bool:
+    """Make the job run as ``user``, so its OAuth credential is theirs; False when
+    the app may not — setting another user's run-as needs a workspace admin. Then
+    the user gets CAN_MANAGE to set it themselves, and a schedule waits paused
+    rather than firing as the wrong identity."""
+    try:
+        w.jobs.update(job_id=job_id, new_settings=jobs.JobSettings(
+            run_as=jobs.JobRunAs(user_name=user)))
+        return True
+    except Exception as exc:
+        log.warning("Could not set job %s to run as %s: %s", job_id, user, exc)
+    try:
+        w.jobs.update_permissions(job_id=str(job_id), access_control_list=[
+            jobs.JobAccessControlRequest(
+                user_name=user, permission_level=jobs.JobPermissionLevel.CAN_MANAGE)
+        ])
+    except Exception as exc:
+        log.warning("Could not grant %s CAN_MANAGE on job %s: %s", user, job_id, exc)
+    if schedule is not None:
+        try:
+            w.jobs.update(job_id=job_id, new_settings=jobs.JobSettings(schedule=jobs.CronSchedule(
+                quartz_cron_expression=schedule.quartz_cron_expression,
+                timezone_id=schedule.timezone_id, pause_status=jobs.PauseStatus.PAUSED)))
+        except Exception as exc:
+            log.warning("Could not pause the schedule of job %s: %s", job_id, exc)
+    return False
+
+
+def _run_as_pending(w, req: DataGenRequest, job_id: int,
+                    schedule: jobs.CronSchedule | None = None) -> str:
+    """The user the job still has to be switched to, or "" when it already runs as them."""
+    if req.lakebase_auth_mode != "databricks":
+        return ""
+    return "" if ensure_run_as_user(w, job_id, req.lakebase_user, schedule) else req.lakebase_user
+
+
 def create_job_and_run(
     req: DataGenRequest, workspace_dir: str, resume_from: str | None = None
 ) -> dict:
@@ -221,12 +258,21 @@ def create_job_and_run(
         w, paths, None, job_name(req.project_id, label),
         job_tags(req.project_id, label), req.project_id,
     )
+    host = (w.config.host or "").rstrip("/")
+    pending = _run_as_pending(w, req, job_id)
+    if pending:
+        # Running now would connect as the app, not the user — leave it to them.
+        return {
+            "job_id": job_id, "job_created": created, "run_id": None,
+            "resumed_from": resume_from, "notebook_path": paths[0], "notebook_paths": paths,
+            "url": f"{host}/jobs/{job_id}" if host else None, "run_url": None,
+            "run_as_pending": pending,
+        }
     run = w.jobs.run_now(
         job_id=job_id,
         job_parameters={RESUME_PARAM: resume_from} if resume_from else None,
     )
     run_id = getattr(run, "run_id", None) or run.response.run_id
-    host = (w.config.host or "").rstrip("/")
     return {
         "job_id": job_id,
         "job_created": created,
@@ -275,6 +321,7 @@ def create_scheduled_job(
         "notebook_path": paths[0],
         "notebook_paths": paths,
         "scheduled": bool(quartz_cron),
+        "run_as_pending": _run_as_pending(w, req, job_id, schedule),
     }
 
 

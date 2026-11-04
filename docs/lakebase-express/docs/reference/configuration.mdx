@@ -28,6 +28,7 @@ Set these under `targets.<name>.variables` in `target.yml`.
 | `projects_pg_database` | `databricks_postgres` | `LBX_PROJECTS_PG_DATABASE` | Database holding the project, credential and run tables |
 | `projects_pg_secret_key` | `lakebase-password` | `LBX_PROJECTS_PG_SECRET_KEY` | Secret key holding that role's password |
 | `credential_key_secret_key` | `lbx-credential-key` | `LBX_CREDENTIAL_KEY_SECRET_KEY` | Secret key holding the Fernet key that encrypts stored passwords |
+| `translate_workers` | `"8"` | `LBX_TRANSLATE_WORKERS` | Code objects the AI translates at once (1–64) |
 | `egress_probe` | `"false"` | `LBX_EGRESS_PROBE` | Log the app's public egress IP at startup, for firewall allowlisting |
 
 The CI job *Deploy config* checks that every `${var.*}` in `databricks.yml` is declared and
@@ -43,6 +44,7 @@ that every variable without a default appears in `target.yml.sample`.
 | `LBX_SECRET_SCOPE` | `lakebase-express` | Default secret scope |
 | `LBX_FM_ENDPOINT` | `databricks-claude-opus-4-8` | Default model endpoint; Settings can override it per session |
 | `LBX_FM_API` | `gateway` | `serving` or `gateway`; an unknown value falls back to `gateway` with a warning |
+| `LBX_TRANSLATE_WORKERS` | `8` | Code objects translated at once (1–64); lower it if the endpoint rate-limits |
 | `LBX_LOG_LEVEL` | `INFO` | Backend log level (`./run_local.sh --verbose` sets `DEBUG`); an unknown name falls back to `INFO` |
 | `LBX_EGRESS_PROBE` | off | Truthy to log the public egress IP once at startup |
 

@@ -1,8 +1,8 @@
 """Lakebase (Postgres) target connector.
 
 Connects to a Databricks Lakebase database instance over the Postgres wire
-protocol using ``psycopg`` and manual role credentials (username + password).
-The migration engine uses this to apply DDL/code and bulk-load data.
+protocol using ``psycopg``, as a role with a password or as the signed-in
+Databricks user over OAuth (``auth_mode="databricks"``). The migration engine uses this to apply DDL/code and bulk-load data.
 """
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 import psycopg
 from psycopg.rows import dict_row
+
+from backend.connectors import lakebase_identity
 
 # Retryable: connection dropped, server briefly unable to serve, sessions collided.
 # Public: the context bundle exports these so a migrated app retries on SQLSTATE
@@ -37,6 +39,13 @@ def transient_reason(exc: BaseException) -> str | None:
     return None
 
 
+def _auth_rejected(exc: psycopg.OperationalError) -> bool:
+    if getattr(exc, "sqlstate", None) in ("28000", "28P01"):
+        return True
+    text = str(exc).lower()
+    return "authentication failed" in text or ("role" in text and "does not exist" in text)
+
+
 @dataclass(frozen=True)
 class LakebaseConnection:
     host: str
@@ -45,19 +54,28 @@ class LakebaseConnection:
     password: str
     port: int = 5432
     sslmode: str = "require"  # Lakebase requires TLS
+    auth_mode: str = lakebase_identity.AUTH_PASSWORD
 
     def connect(self) -> psycopg.Connection:
         """Open a new psycopg connection (caller manages its lifecycle)."""
-        return psycopg.connect(
-            host=self.host,
-            dbname=self.database,
-            user=self.user,
-            password=self.password,
-            port=self.port,
-            sslmode=self.sslmode,
-            connect_timeout=15,
-            application_name="lakebase-express",
-        )
+        identity = self.auth_mode == lakebase_identity.AUTH_DATABRICKS
+        # Minted per connect: a run outlives one credential, open connections don't care.
+        password = lakebase_identity.credential(self.user, self.host) if identity else self.password
+        try:
+            return psycopg.connect(
+                host=self.host,
+                dbname=self.database,
+                user=self.user,
+                password=password,
+                port=self.port,
+                sslmode=self.sslmode,
+                connect_timeout=15,
+                application_name="lakebase-express",
+            )
+        except psycopg.OperationalError as exc:
+            if identity and _auth_rejected(exc):
+                raise lakebase_identity.missing_role_error(self.user, self.host, exc) from exc
+            raise
 
     def query(
         self, sql: str, params: dict | None = None, statement_timeout_ms: int | None = None

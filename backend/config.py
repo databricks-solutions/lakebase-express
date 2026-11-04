@@ -77,21 +77,27 @@ def lakebase_endpoint(host: str) -> str:
     wrong database. Never raises: listing Lakebase projects is a workspace read the
     deployed app's service principal may not have.
     """
+    try:
+        return find_lakebase_endpoint(workspace_client(), host)
+    except Exception as exc:
+        log.warning("Could not resolve the Lakebase endpoint for %s: %s", _host_label(host), exc)
+    return ""
+
+
+def find_lakebase_endpoint(w: WorkspaceClient, host: str) -> str:
+    """The endpoint path serving ``host`` as seen by ``w``'s identity, or "". Raises
+    when that identity cannot list Lakebase projects."""
     wanted = _host_label(host).lower()
     if not wanted:
         return ""
-    try:
-        w = workspace_client()
-        for project in w.postgres.list_projects():
-            for branch in w.postgres.list_branches(project.name):
-                for endpoint in w.postgres.list_endpoints(branch.name):
-                    hosts = getattr(endpoint.status, "hosts", None)
-                    if (getattr(hosts, "host", "") or "").lower() == wanted:
-                        log.info("Resolved Lakebase endpoint for %s: %s", wanted, endpoint.name)
-                        return endpoint.name
-        log.warning("No Lakebase endpoint found for host %s", wanted)
-    except Exception as exc:
-        log.warning("Could not resolve the Lakebase endpoint for %s: %s", wanted, exc)
+    for project in w.postgres.list_projects():
+        for branch in w.postgres.list_branches(project.name):
+            for endpoint in w.postgres.list_endpoints(branch.name):
+                hosts = getattr(endpoint.status, "hosts", None)
+                if (getattr(hosts, "host", "") or "").lower() == wanted:
+                    log.info("Resolved Lakebase endpoint for %s: %s", wanted, endpoint.name)
+                    return endpoint.name
+    log.warning("No Lakebase endpoint found for host %s", wanted)
     return ""
 
 

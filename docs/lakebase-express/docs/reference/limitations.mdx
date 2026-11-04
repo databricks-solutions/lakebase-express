@@ -34,14 +34,25 @@ title: Limitations and roadmap
 
 ### Lakebase authentication
 
-Lakebase auth in Lakebase Express is **native Postgres roles only** — a role name and
-password over the Postgres wire protocol. Databricks identity auth (OAuth/OIDC for users,
-service principals or groups) is **not** supported yet, so target access isn't governed by
-workspace RBAC and doesn't inherit SSO/MFA or short-lived credentials.
+The target connects with a Postgres role and password, or as the signed-in Databricks user
+over OAuth (see [Authentication](../guide/connections.mdx#authentication)). Databricks
+identity has limits:
 
-TLS is always required and passwords are never stored in clear text, but a long-lived role
-password is a shared secret you must rotate yourself: use a dedicated least-privilege role,
-and prefer a **private network path** (Private Link / private endpoints) over a public
+- **Jobs must run as you.** The app sets the job's *Run as* to you, which needs its service
+  principal to be a workspace admin; otherwise you set it yourself in the Jobs UI before
+  the first run.
+- **Each user needs a Postgres role** on the Lakebase project, created by its owner.
+- **Ownership follows the identity.** Objects you create belong to your role. Switching a
+  project between password and identity auth, or between users, leaves existing objects
+  owned by the other role, so re-applying the plan can fail with `permission denied` until ownership is
+  reassigned (`REASSIGN OWNED BY ... TO ...`).
+- **Long runs need the app open.** A credential lasts an hour and is checked only at login.
+  A connection opened after your sign-in expires fails until you reopen the app.
+- The app's own project and run store still connect with the configured role password.
+
+With password auth, TLS is always required and passwords are never stored in clear text,
+but a long-lived role password is a shared secret you must rotate yourself: use a dedicated
+least-privilege role, and prefer a **private network path** (Private Link / private endpoints) over a public
 endpoint with an IP allowlist.
 
 ### `money` and fixed-scale arithmetic

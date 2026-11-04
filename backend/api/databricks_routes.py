@@ -11,7 +11,8 @@ import logging
 
 from fastapi import APIRouter
 
-from backend import config
+from backend import audit, config
+from backend.connectors.lakebase_identity import running_in_app
 
 log = logging.getLogger("lakebase_express.databricks")
 
@@ -20,7 +21,12 @@ router = APIRouter(prefix="/api/databricks", tags=["databricks"])
 
 @router.get("/status")
 def status() -> dict:
-    return config.current_workspace()
+    """The bound workspace, plus who is using the app. ``user`` is the app's own
+    identity (the service principal when deployed); ``signed_in_user`` is the
+    person, from the Apps proxy — locally the CLI profile is both."""
+    ws = config.current_workspace()
+    signed_in = audit.request_actor() or (None if running_in_app() else ws.get("user"))
+    return {**ws, "signed_in_user": signed_in}
 
 
 # --- Secret scopes (for the password-source dropdowns) ----------------------------
