@@ -182,3 +182,25 @@ def test_the_route_explains_a_missing_identity(monkeypatch):
     with pytest.raises(migration_routes.HTTPException) as exc:
         migration_routes._with_job_identity(_spec())
     assert exc.value.status_code == 400 and "no sign-in" in exc.value.detail
+
+
+@pytest.mark.parametrize("path", ["/api/migration/job/submit", "/api/migration/job/schedule",
+                                  "/api/migration/async/setup"])
+def test_no_job_route_lets_a_client_pick_whom_the_job_runs_as(monkeypatch, path):
+    """A job runs as lakebase_user in identity mode, so every route must replace it
+    with the signed-in user — else a client could run SQL as someone else."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(lakebase_identity, "current_identity", lambda: "ana@corp.com")
+    monkeypatch.setattr(lakebase_identity, "resolve_endpoint", lambda user, host: _EP)
+    seen = []
+    capture = lambda spec, *a, **k: seen.append(spec.lakebase_user) or {"job_id": 1}  # noqa: E731
+    monkeypatch.setattr(job_offload, "create_job_and_run", capture)
+    monkeypatch.setattr(job_offload, "create_scheduled_job", capture)
+    monkeypatch.setattr(async_setup, "setup_async", capture)
+    app = FastAPI()
+    app.include_router(migration_routes.router)
+    spec = _spec(lakebase_user="victim@corp.com").model_dump(mode="json")
+    TestClient(app).post(path, json={"spec": spec})
+    assert seen == ["ana@corp.com"]

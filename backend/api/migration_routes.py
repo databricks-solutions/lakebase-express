@@ -273,8 +273,9 @@ class ScheduleJobRequest(BaseModel):
 def submit_job(req: OffloadRequest) -> dict:
     """Create/reuse the persistent snapshot job and run it now (re-runnable later
     from the Jobs UI)."""
+    spec = _with_job_identity(req.spec)
     try:
-        result = job_offload.create_job_and_run(req.spec, req.workspace_dir)
+        result = job_offload.create_job_and_run(spec, req.workspace_dir)
     except Exception as exc:
         log.exception("Job offload failed")
         audit.record("job.submitted", project_id=req.spec.project_id, outcome="failed",
@@ -287,8 +288,9 @@ def submit_job(req: OffloadRequest) -> dict:
 
 @router.post("/job/schedule")
 def schedule_job(req: ScheduleJobRequest) -> dict:
+    spec = _with_job_identity(req.spec)
     try:
-        result = job_offload.create_scheduled_job(req.spec, req.workspace_dir, req.quartz_cron, req.timezone)
+        result = job_offload.create_scheduled_job(spec, req.workspace_dir, req.quartz_cron, req.timezone)
     except Exception as exc:
         log.exception("Job schedule failed")
         audit.record("job.scheduled", project_id=req.spec.project_id, outcome="failed",
