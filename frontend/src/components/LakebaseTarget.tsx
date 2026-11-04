@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type LakebaseConn, type SecretRef } from "../api";
+import { api, type LakebaseAuthMode, type LakebaseConn, type SecretRef } from "../api";
 import type { MigrationState } from "../App";
 import PasswordField from "./PasswordField";
 
@@ -10,6 +10,7 @@ const DEFAULT: LakebaseConn = {
   password: "",
   port: 5432,
   sslmode: "require",
+  auth_mode: "password",
 };
 
 /** Lakebase target connection — controlled by the shared migration state so the
@@ -40,6 +41,13 @@ export default function LakebaseTarget({
     setSaved(false);
     setState((s) => ({ ...s, lakebase: { ...(s.lakebase ?? DEFAULT), ...next } }));
   };
+
+  const setAuthMode = (mode: LakebaseAuthMode) => {
+    setSaved(false);
+    setMsg(null);
+    setState((s) => ({ ...s, lakebase: { ...(s.lakebase ?? DEFAULT), auth_mode: mode } }));
+  };
+  const identity = conn.auth_mode === "databricks";
 
   const setPreserveCase = (preserve: boolean) => {
     setSaved(false);
@@ -126,23 +134,12 @@ export default function LakebaseTarget({
       </div>
       <div className="field">
         <label>User (role)</label>
-        <input value={conn.user} onChange={(e) => set("user", e.target.value)} />
-      </div>
-      <div className="field">
-        <label>Identifier casing</label>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={state.identifierCase === "preserve"}
-            onChange={(e) => setPreserveCase(e.target.checked)}
-          />
-          Preserve source schema and object casing
-        </label>
-        <p className="muted">
-          Off by default: names are lower-cased for PostgreSQL. Turn this on when existing
-          applications require exact source names such as <code>SalesLT.Product</code>;
-          those names are case-sensitive and must be double-quoted in PostgreSQL queries.
-        </p>
+        <input
+          value={identity ? "" : conn.user}
+          disabled={identity}
+          placeholder={identity ? "Your signed-in Databricks user" : ""}
+          onChange={(e) => set("user", e.target.value)}
+        />
       </div>
       <PasswordField
         password={conn.password}
@@ -150,7 +147,23 @@ export default function LakebaseTarget({
         workspaceHost={workspaceHost}
         onChange={setPassword}
         onAutofill={autofill}
+        identity={{
+          on: identity,
+          onToggle: (on) => setAuthMode(on ? "databricks" : "password"),
+          note: "Connects as you over OAuth — no password. Needs a Postgres role for your identity; jobs run as you too.",
+        }}
       />
+      <label
+        className="check"
+        title="Off by default: names are lower-cased. Source-cased names are case-sensitive and must be double-quoted in PostgreSQL queries."
+      >
+        <input
+          type="checkbox"
+          checked={state.identifierCase === "preserve"}
+          onChange={(e) => setPreserveCase(e.target.checked)}
+        />
+        <span>Preserve source casing (e.g. <code>SalesLT.Product</code>) instead of lower-casing names</span>
+      </label>
 
       <div className="actions">
         <button className="btn" disabled={busy} onClick={test}>

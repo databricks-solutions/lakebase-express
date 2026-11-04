@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from backend.assessment.models import ConnectionRequest
+from backend.connectors import lakebase_identity
 from backend.connectors.credentials import LAKEBASE_NAMESPACE, resolve_effective_password
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
@@ -62,6 +63,12 @@ def _source_conn(src: ConnectionRequest | None):
 def _target_conn(lb: LakebaseConnRequest | None):
     if lb is None or not lb.host:
         return None
+    if lb.auth_mode == lakebase_identity.AUTH_DATABRICKS:
+        try:
+            user = lakebase_identity.current_identity()
+        except lakebase_identity.IdentityAuthError:
+            return None
+        return LakebaseConnection(**lb.model_copy(update={"user": user, "password": ""}).conn_kwargs())
     password, _ = resolve_effective_password(
         LAKEBASE_NAMESPACE, lb.host, lb.database, lb.user, lb.project_id,
         lb.password, lb.secret_ref,

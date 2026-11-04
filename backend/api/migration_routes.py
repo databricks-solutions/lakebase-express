@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from backend import audit
 from backend.assessment.models import ConnectionRequest
+from backend.connectors import lakebase_identity
 from backend.connectors.credentials import (
     LAKEBASE_NAMESPACE,
     remember_effective,
@@ -51,7 +52,16 @@ def with_lakebase_password(lb: LakebaseConnRequest) -> LakebaseConnRequest:
     session, so a page reload sends them empty. The effective secret reference (if
     any) is stamped onto the returned model's ``secret_ref`` so ``_remember_lakebase``
     persists the pointer, not the resolved value. Shared with the validation routes.
+
+    In Databricks identity mode there is no password: the role is the signed-in
+    user, stamped here so a client cannot name someone else's.
     """
+    if lb.auth_mode == lakebase_identity.AUTH_DATABRICKS:
+        try:
+            user = lakebase_identity.current_identity()
+        except lakebase_identity.IdentityAuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return lb.model_copy(update={"user": user, "password": "", "secret_ref": None})
     password, ref = resolve_effective_password(
         LAKEBASE_NAMESPACE, lb.host, lb.database, lb.user, lb.project_id,
         lb.password, lb.secret_ref,
@@ -77,7 +87,10 @@ def test_lakebase(req: LakebaseConnRequest) -> TestResult:
         ok = LakebaseConnection(**req.conn_kwargs()).test_connection()
         if ok:
             _remember_lakebase(req)
-        return TestResult(ok=ok, message="Connected to Lakebase." if ok else "Probe failed.")
+        message = "Connected to Lakebase." if ok else "Probe failed."
+        if ok and req.auth_mode == lakebase_identity.AUTH_DATABRICKS:
+            message = f"Connected to Lakebase as {req.user}."
+        return TestResult(ok=ok, message=message)
     except HTTPException as exc:  # missing password — keep the friendly TestResult shape
         return TestResult(ok=False, message=str(exc.detail))
     except Exception as exc:
@@ -100,7 +113,6 @@ def plan(req: BuildPlanRequest) -> PlanResponse:
         req.translate,
         req.endpoint,
         identifier_case=req.identifier_case,
-        translate_workers=req.translate_workers,
     )
     return PlanResponse(items=items)
 
@@ -392,6 +404,7 @@ def setup_async(req: AsyncSetupRequest) -> dict:
     Lakebase tables. Returns a UI-friendly summary."""
     if req.resume_from:
         _check_async_resume(req)
+    req = req.model_copy(update={"spec": _with_job_identity(req.spec)})
     try:
         return async_setup.setup_async(
             req.spec, req.workspace_dir, req.quartz_cron, req.timezone, req.run_now,
@@ -400,6 +413,19 @@ def setup_async(req: AsyncSetupRequest) -> dict:
     except Exception as exc:
         log.exception("Async setup failed")
         raise HTTPException(status_code=502, detail=f"Async setup failed: {exc}") from exc
+
+
+def _with_job_identity(spec: DataGenRequest) -> DataGenRequest:
+    """In Databricks identity mode the job runs as the signed-in user: stamp who,
+    and the endpoint their credential is minted for — server-side, never trusted."""
+    if spec.lakebase_auth_mode != lakebase_identity.AUTH_DATABRICKS:
+        return spec
+    try:
+        user = lakebase_identity.current_identity()
+        endpoint = lakebase_identity.resolve_endpoint(user, spec.lakebase_host)
+    except lakebase_identity.IdentityAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return spec.model_copy(update={"lakebase_user": user, "lakebase_endpoint": endpoint})
 
 
 class ResumableAsyncRun(ResumableRun):

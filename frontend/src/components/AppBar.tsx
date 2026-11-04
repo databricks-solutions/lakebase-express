@@ -37,9 +37,27 @@ export default function AppBar({
             <circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none" />
           </svg>
         </button>
-        <span className="avatar" title="Workspace user">DB</span>
+        <UserAvatar user={workspace?.signed_in_user} />
       </div>
     </header>
+  );
+}
+
+/** "ana.lima@corp.com" → "AL"; a single-word name → its first two letters. */
+function initials(user: string): string {
+  const parts = user.split("@")[0].split(/[._\-\s]+/).filter(Boolean);
+  const letters = parts.length > 1 ? parts[0][0] + parts[1][0] : (parts[0] ?? "").slice(0, 2);
+  return letters.toUpperCase() || "?";
+}
+
+function UserAvatar({ user }: { user?: string | null }) {
+  if (!user) {
+    return <span className="avatar avatar--anon" title="Signed-in user unknown">?</span>;
+  }
+  return (
+    <span className="avatar" title={`Signed in as ${user}`} aria-label={`Signed in as ${user}`}>
+      {initials(user)}
+    </span>
   );
 }
 
@@ -66,7 +84,7 @@ function WorkspaceChip({ workspace, onManage }: { workspace?: WorkspaceStatus | 
     <button
       className="wschip"
       onClick={onManage}
-      title={`${workspace.host ?? ""}${workspace.user ? ` · ${workspace.user}` : ""}`}
+      title={`${workspace.host ?? ""}${workspace.signed_in_user ? ` · ${workspace.signed_in_user}` : ""}`}
     >
       <span className="wschip__dot wschip__dot--on" />
       <span className="wschip__host">{workspaceName(workspace.host)}</span>

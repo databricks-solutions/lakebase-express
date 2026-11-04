@@ -153,6 +153,7 @@ function deriveState(p: Project, s: Secrets): MigrationState {
       sslmode: p.target.sslmode,
       password: s.target,
       secret_ref: s.targetRef ?? p.target.secret_ref ?? null,
+      auth_mode: p.target.auth_mode ?? "password",
       project_id: p.id,
     },
     targetSchema: p.target_schema,
@@ -238,7 +239,7 @@ function ProjectWorkspace({ project, setProject, secretsRef, forceRender, fmEndp
             ? { source_type: next.connection.source_type, host: next.connection.host, database: next.connection.database, username: next.connection.username, port: next.connection.port, secret_ref: next.connection.secret_ref ?? null }
             : prev.source,
           target: next.lakebase
-            ? { host: next.lakebase.host, database: next.lakebase.database, user: next.lakebase.user, port: next.lakebase.port, sslmode: next.lakebase.sslmode, secret_ref: next.lakebase.secret_ref ?? null }
+            ? { host: next.lakebase.host, database: next.lakebase.database, user: next.lakebase.user, port: next.lakebase.port, sslmode: next.lakebase.sslmode, secret_ref: next.lakebase.secret_ref ?? null, auth_mode: next.lakebase.auth_mode ?? "password" }
             : prev.target,
           target_schema: next.targetSchema,
           identifier_case: next.identifierCase,

@@ -14,7 +14,6 @@ from backend.data_migration.models import (
     TuningOverrides,
 )
 from backend.data_migration.tuning import DEFAULT_STREAMS, MAX_STREAMS, recommend
-from backend.migration import planner
 from backend.schema_migration import ai_translator
 
 _GB = 1024 ** 3
@@ -169,8 +168,8 @@ def test_overrides_win_and_are_listed():
 
 
 def test_overrides_are_clamped_into_range():
-    o = TuningOverrides(max_streams=1000, table_streams=0, fetch_size=2, translate_workers=99)
-    assert (o.max_streams, o.table_streams, o.fetch_size, o.translate_workers) == (256, 1, 500, 64)
+    o = TuningOverrides(max_streams=1000, table_streams=0, fetch_size=2)
+    assert (o.max_streams, o.table_streams, o.fetch_size) == (256, 1, 500)
 
 
 def test_a_saved_partitions_override_is_dropped():
@@ -365,7 +364,8 @@ def _chunk_ns(code: str, **fakes) -> dict:
     import datetime
     from concurrent.futures import ThreadPoolExecutor, as_completed
     ns: dict = {"datetime": datetime, "ThreadPoolExecutor": ThreadPoolExecutor,
-                "as_completed": as_completed, "PG_KWARGS": {}}
+                "as_completed": as_completed, "PG_KWARGS": {},
+                "_renew_pg_credential": lambda: None}
     exec(code[code.index("def _chunk_edges"):code.index("class _StreamBudget")], ns)
     ns.update(fakes)
     return ns
@@ -507,18 +507,15 @@ def test_a_table_without_bounds_is_one_chunk():
 # --- Translation workers ---------------------------------------------------------------------
 
 
-def test_translate_workers_reach_the_translator(monkeypatch):
-    seen = {}
-
-    def fake_translate_all(objects, endpoint=None, **kw):
-        seen.update(kw)
-        return []
-
-    monkeypatch.setattr(planner, "translate_all", fake_translate_all)
-    obj = ai_translator.ProgrammableObject(schema_name="dbo", object_name="p", object_type="PROCEDURE",
-                                           line_count=1, definition="CREATE PROCEDURE dbo.p AS SELECT 1")
-    planner.build_plan([], [obj], "public", True, None, translate_workers=3)
-    assert seen["workers"] == 3
+def test_translate_workers_come_from_config(monkeypatch):
+    monkeypatch.setenv("LBX_TRANSLATE_WORKERS", "3")
+    assert ai_translator._translate_workers() == 3
+    monkeypatch.setenv("LBX_TRANSLATE_WORKERS", "999")
+    assert ai_translator._translate_workers() == 64
+    monkeypatch.setenv("LBX_TRANSLATE_WORKERS", "many")
+    assert ai_translator._translate_workers() == 8
+    monkeypatch.delenv("LBX_TRANSLATE_WORKERS")
+    assert ai_translator._translate_workers() == 8
 
 
 def test_translate_all_honours_the_worker_count(monkeypatch):

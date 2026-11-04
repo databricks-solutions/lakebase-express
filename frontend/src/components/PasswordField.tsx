@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api, type SecretPreview, type SecretRef } from "../api";
 import SecretScopeField from "./SecretScopeField";
 
@@ -37,6 +37,8 @@ export default function PasswordField({
   workspaceHost,
   onChange,
   onAutofill,
+  identity,
+  secretHint = true,
 }: {
   password: string;
   secretRef: SecretRef | null | undefined;
@@ -45,8 +47,12 @@ export default function PasswordField({
   // Called when the selected secret holds a connection string — the parent fills
   // its host/database/port fields from the (non-secret) parsed values.
   onAutofill?: (fields: SecretAutofill) => void;
+  // Adds a third mode with no password at all (the Lakebase target's Databricks identity).
+  identity?: { on: boolean; onToggle: (on: boolean) => void; note: ReactNode };
+  secretHint?: boolean;
 }) {
-  const isSecret = !!secretRef;
+  const idOn = !!identity?.on;
+  const isSecret = !!secretRef && !idOn;
 
   const [keys, setKeys] = useState<string[]>([]);
   const [manualKey, setManualKey] = useState(false);
@@ -94,6 +100,7 @@ export default function PasswordField({
   }, [isSecret, scope, workspaceMismatch]);
 
   const setMode = (secret: boolean) => {
+    if (idOn) identity!.onToggle(false);
     if (!secret) {
       onChange({ password, secret_ref: null });
     } else {
@@ -130,8 +137,8 @@ export default function PasswordField({
         <button
           type="button"
           role="tab"
-          aria-selected={!isSecret}
-          className={`segmented__btn ${!isSecret ? "segmented__btn--on" : ""}`}
+          aria-selected={!isSecret && !idOn}
+          className={`segmented__btn ${!isSecret && !idOn ? "segmented__btn--on" : ""}`}
           onClick={() => setMode(false)}
         >
           Password
@@ -145,9 +152,22 @@ export default function PasswordField({
         >
           Secret
         </button>
+        {identity && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={idOn}
+            className={`segmented__btn ${idOn ? "segmented__btn--on" : ""}`}
+            onClick={() => identity.onToggle(true)}
+          >
+            Databricks identity
+          </button>
+        )}
       </div>
 
-      {!isSecret ? (
+      {idOn ? (
+        <p className="muted pwdfield__hint">{identity!.note}</p>
+      ) : !isSecret ? (
         <input
           type="password"
           placeholder="••••••••"
@@ -214,14 +234,11 @@ export default function PasswordField({
               {preview.port ? ", port" : ""} above from it. The password is read at connect time.
             </p>
           )}
-          <p className="muted pwdfield__hint">
-            Reads the password from this secret at connect time — any Databricks
-            secret scope, including cloud-backed scopes such as Azure Key Vault where
-            available. If the secret holds a full connection string, the
-            host/database/port are filled in for you. Projects persist only this
-            reference; Async Mode can explicitly copy the resolved password into its
-            selected runtime scope for a generated job.
-          </p>
+          {secretHint && (
+            <p className="muted pwdfield__hint">
+              Read at connect time; the project saves only this reference.
+            </p>
+          )}
         </>
       )}
     </div>

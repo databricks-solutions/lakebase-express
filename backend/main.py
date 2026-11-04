@@ -31,6 +31,7 @@ from backend.api.schema_routes import router as schema_router
 from backend.api.settings_routes import router as settings_router
 from backend.api.sizing_routes import router as sizing_router
 from backend.api.validation_routes import router as validation_router
+from backend.connectors import lakebase_identity
 from backend.egress import log_egress_ip
 from backend.storage_status import log_storage
 
@@ -59,12 +60,18 @@ app = FastAPI(title="Lakebase Express", version=__version__, lifespan=lifespan)
 
 @app.middleware("http")
 async def bind_actor(request: Request, call_next):
-    """Attribute audit events to the signed-in user the Apps proxy names."""
+    """Attribute audit events to the signed-in user the Apps proxy names, and keep
+    their forwarded token for a target in Databricks identity mode."""
     actor = next((request.headers[h] for h in audit.IDENTITY_HEADERS if request.headers.get(h)), None)
     token = audit.set_actor(actor)
+    user = lakebase_identity.bind_request(
+        request.headers.get(lakebase_identity.EMAIL_HEADER),
+        request.headers.get(lakebase_identity.TOKEN_HEADER),
+    )
     try:
         return await call_next(request)
     finally:
+        lakebase_identity.reset_request(user)
         audit.reset_actor(token)
 
 

@@ -61,7 +61,10 @@ export default function Settings({ fmEndpoint, setFmEndpoint, workspace, storage
               <span className="dot dot--ok" />
               <span>
                 Connected to <strong>{workspace.host}</strong>
-                {workspace.user ? <> as {workspace.user}</> : null}
+                {workspace.signed_in_user ? <> — signed in as <strong>{workspace.signed_in_user}</strong></> : null}
+                {workspace.user && workspace.user !== workspace.signed_in_user
+                  ? <> · app identity {workspace.user}</>
+                  : null}
               </span>
             </div>
           ) : (

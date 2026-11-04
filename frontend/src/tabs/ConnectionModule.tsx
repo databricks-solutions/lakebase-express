@@ -105,6 +105,7 @@ export default function ConnectionModule({ source, state, setState, onSave, work
           workspaceHost={workspaceHost}
           onChange={setPassword}
           onAutofill={autofill}
+          secretHint={false}
         />
 
         <div className="actions">

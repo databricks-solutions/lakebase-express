@@ -203,6 +203,9 @@ export interface Translation {
 }
 
 // --- Migration engine (execution) ---
+// "databricks": connect as the signed-in Databricks user over OAuth, no password.
+export type LakebaseAuthMode = "password" | "databricks";
+
 export interface LakebaseConn {
   host: string;
   database: string;
@@ -212,6 +215,7 @@ export interface LakebaseConn {
   secret_ref?: SecretRef | null;
   port: number;
   sslmode: string;
+  auth_mode?: LakebaseAuthMode;
   // Scopes a remembered/resolved target password to this migration project.
   project_id?: string;
 }
@@ -351,7 +355,6 @@ export interface TuningOverrides {
   max_streams?: number | null;
   table_streams?: number | null;
   fetch_size?: number | null;
-  translate_workers?: number | null;
 }
 
 // What the live source and target allow (null = could not be read).
@@ -397,6 +400,8 @@ export interface AsyncSetupResult {
   scheduled: boolean;
   notebook_paths: string[];
   note: string;
+  // Set when the job must still be switched to run as this user (Databricks identity).
+  run_as_pending?: string | null;
 }
 
 export interface Artifact {
@@ -901,6 +906,7 @@ export interface TargetConfig {
   port: number;
   sslmode: string;
   secret_ref?: SecretRef | null;
+  auth_mode?: LakebaseAuthMode;
 }
 export interface ProjectSummary {
   id: string;
@@ -956,7 +962,10 @@ export interface StorageStatus {
 export interface WorkspaceStatus {
   connected: boolean;
   host?: string;
+  // The app's own identity — the service principal when deployed.
   user?: string;
+  // The person using the app (the profile when running locally).
+  signed_in_user?: string | null;
   error?: string;
 }
 
@@ -1006,7 +1015,6 @@ export const api = {
     identifier_case: IdentifierCase;
     translate: boolean;
     endpoint?: string;
-    translate_workers?: number | null;
   }) => post<{ items: PlanItem[] }>("/api/migration/plan", body),
   // Background plan build (AI translation runs past the Apps ~120s request
   // timeout): start returns a run_id, then poll planStatus to completion.
@@ -1018,7 +1026,6 @@ export const api = {
     identifier_case: IdentifierCase;
     translate: boolean;
     endpoint?: string;
-    translate_workers?: number | null;
   }) => post<{ run_id: string }>("/api/migration/plan/start", body),
   planStatus: (runId: string) => get<PlanRunState>(`/api/migration/plan/status/${runId}`),
   // Recommended load tuning; pass back `capacity` to skip re-probing the databases.

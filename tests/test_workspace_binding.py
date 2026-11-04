@@ -64,7 +64,25 @@ def test_status_reports_the_bound_workspace(monkeypatch):
         "connected": True,
         "host": "example.cloud.databricks.com",
         "user": "me@example.com",
+        # Locally there is no proxy: the profile is the signed-in user too.
+        "signed_in_user": "me@example.com",
     }
+
+
+def test_status_names_the_signed_in_user_not_the_app_identity(monkeypatch):
+    from backend import main
+
+    monkeypatch.setenv("DATABRICKS_APP_NAME", "lakebase-express")
+    monkeypatch.setattr(config, "WorkspaceClient", lambda: _FakeWorkspaceClient(user="sp-client-id"))
+    app = FastAPI()
+    app.middleware("http")(main.bind_actor)
+    app.include_router(databricks_routes.router)
+    client = TestClient(app)
+
+    body = client.get("/api/databricks/status", headers={"x-forwarded-email": "ana@corp.com"}).json()
+    assert body["user"] == "sp-client-id" and body["signed_in_user"] == "ana@corp.com"
+    # Deployed, a request without the proxy's headers has no person behind it.
+    assert client.get("/api/databricks/status").json()["signed_in_user"] is None
 
 
 def test_status_strips_scheme_from_host(monkeypatch):

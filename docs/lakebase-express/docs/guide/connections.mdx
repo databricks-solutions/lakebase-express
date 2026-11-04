@@ -20,11 +20,37 @@ The **Identifier casing** option (*Preserve source schema and object casing*) sw
 project from lower-cased to source-cased names — see
 [Naming on the target](./index.mdx#naming-on-the-target).
 
+### Authentication
+
+- **Password** — a Postgres role name and password, always over TLS.
+- **Databricks identity** — connects as you, the signed-in Databricks user, with a
+  short-lived OAuth token minted per connection. No password is entered or stored.
+  Running locally, the CLI profile is the user.
+
+Databricks identity needs two things:
+
+1. The app's `postgres` user authorization scope (set in `databricks.yml`). Each user
+   consents once when they next open the app.
+2. A Postgres role for your identity on the Lakebase project. Lakebase creates one
+   only for the project owner; anyone else needs the owner to run:
+
+   ```sql
+   -- databricks psql --project <project-id>
+   CREATE EXTENSION IF NOT EXISTS databricks_auth;
+   SELECT databricks_create_role('you@example.com', 'USER');
+   ```
+
+   The role also needs create and insert privileges on the target database.
+
 :::note
 
-Lakebase auth is **native Postgres roles only** today — a role name and password over the
-Postgres wire protocol, always over TLS. Databricks identity auth (OAuth) is on the
-roadmap; see [Limitations](../reference/limitations.mdx#lakebase-authentication).
+With Databricks identity, **Job and Async modes run the job as you**: the notebooks mint
+your OAuth credential themselves, so no Lakebase secret is written. Setting another user
+as a job's *Run as* needs a workspace admin. If the app's service principal isn't one, the
+job is created without running (a schedule stays paused) and you get Manage permission on
+it. Open it, set **Run as** to yourself, then **Run now**. Keep the app open during a long
+**Sync now** run: each new connection mints a credential from your latest sign-in. See
+[Limitations](../reference/limitations.mdx#lakebase-authentication).
 
 :::
 

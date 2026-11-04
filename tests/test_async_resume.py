@@ -315,7 +315,7 @@ def _patch_workspace(monkeypatch) -> _FakeJobs:
     monkeypatch.setattr(async_setup, "workspace_client", lambda: client)
     monkeypatch.setattr(job_offload, "project_name", lambda project_id: "")
     monkeypatch.setattr(async_setup, "with_run_store", lambda req: req)
-    monkeypatch.setattr(async_setup, "check_run_store_access", lambda job_id: None)
+    monkeypatch.setattr(async_setup, "check_run_store_access", lambda job_id, as_user="": None)
     return jobs_api
 
 
