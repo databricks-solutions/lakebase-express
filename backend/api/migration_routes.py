@@ -16,6 +16,7 @@ from backend.connectors.credentials import (
 )
 from backend.connectors.lakebase import LakebaseConnection
 from backend.data_migration.models import DataGenRequest
+from backend.dialects import SourceDialect, get_dialect
 from backend.migration import async_runs, async_setup, job_offload, plan_runs, runs, secret_setup
 from backend.migration.executor import apply_plan
 from backend.migration.models import (
@@ -101,6 +102,13 @@ def test_lakebase(req: LakebaseConnRequest) -> TestResult:
 # --- Plan + apply (schema & code) ------------------------------------------------
 
 
+def _dialect(source_type: str) -> SourceDialect:
+    try:
+        return get_dialect(source_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/plan", response_model=PlanResponse)
 def plan(req: BuildPlanRequest) -> PlanResponse:
     """Synchronous plan build. Fine for a schema with few/no code objects; for a
@@ -113,6 +121,7 @@ def plan(req: BuildPlanRequest) -> PlanResponse:
         req.translate,
         req.endpoint,
         identifier_case=req.identifier_case,
+        dialect=_dialect(req.source_type),
     )
     return PlanResponse(items=items)
 
@@ -126,6 +135,7 @@ def start_plan(req: BuildPlanRequest) -> StartPlanResponse:
     """Build the plan on a background thread and return a run_id to poll. AI
     translation of code objects runs well past the Databricks Apps ~120s request
     timeout, so it can't be done inline on the request."""
+    _dialect(req.source_type)  # reject an unsupported source before starting the run
     return StartPlanResponse(run_id=plan_runs.start_run(req))
 
 

@@ -1,4 +1,5 @@
-"""SQL Server collation -> Postgres (ICU) collation translation.
+"""SQL Server collation -> Postgres (ICU) collation translation (the T-SQL
+dialect's half; the Postgres half is ``pg_collation``).
 
 Postgres's default collation is case-*sensitive*, so dropping a ``..._CI_AS``
 collation (the Azure SQL default) silently changes results rather than erroring:
@@ -25,7 +26,18 @@ cannot be parsed at all is declined instead.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from backend.schema_migration.pg_collation import (  # noqa: F401 — re-exported
+    BINARY_COLLATION,
+    ROOT_LOCALE,
+    CollationUsage,
+    SourceCollation,
+    TargetCollation,
+    collation_identifier,
+    target_collation,
+)
+from backend.schema_migration.pg_collation import (
+    collect_collations as _collect_collations,
+)
 
 # SQL Server collation-name suffix flags.
 _CASE_FLAGS = {"CI", "CS"}
@@ -48,7 +60,6 @@ _ALL_FLAGS = (
 # tokens — left in place it would look like an unknown locale — and re-expressed
 # as the ICU -kf-upper keyword.
 _PREF_TOKEN = "PREF"
-_UPPERCASE_FIRST_KEYWORD = "kf-upper"
 
 # Locale prefix (what remains after the SQL_ prefix, CP<n> code page, version
 # digits, and trailing flags) -> ICU language tag, keyed lower-case.
@@ -132,70 +143,6 @@ _LOCALE_MAP: dict[str, str] = {
     "chinese_traditional_pinyin": "zh-Hant-u-co-pinyin",
 }
 
-# Used when the source locale carries no language or isn't in the map above.
-ROOT_LOCALE = "und"
-
-# Byte-order comparison — what a _BIN/_BIN2 collation does, and one Postgres
-# already ships, so it needs no CREATE COLLATION.
-BINARY_COLLATION = "C"
-
-
-@dataclass(frozen=True)
-class SourceCollation:
-    """A parsed SQL Server collation name."""
-
-    name: str                       # as scanned, e.g. "SQL_Latin1_General_CP1_CI_AS"
-    locale_key: str                 # normalized locale prefix, e.g. "sql_latin1_general"
-    case_insensitive: bool = False
-    accent_insensitive: bool = False
-    binary: bool = False
-    uppercase_first: bool = False    # the "Pref" token: uppercase sorts first
-    unmapped_flags: tuple[str, ...] = ()   # recognised, not expressible (KS/WS/VSS)
-
-    @property
-    def strength_label(self) -> str:
-        """Comparison semantics in words, for findings and plan notes."""
-        if self.binary:
-            return "binary (byte-order)"
-        case = "case-insensitive" if self.case_insensitive else "case-sensitive"
-        accent = "accent-insensitive" if self.accent_insensitive else "accent-sensitive"
-        return f"{case}, {accent}"
-
-
-@dataclass(frozen=True)
-class TargetCollation:
-    """The Postgres collation a source collation maps to."""
-
-    name: str                       # unqualified Postgres collation name
-    locale: str = ""                # ICU locale, "" for a built-in
-    deterministic: bool = True
-    needs_create: bool = True
-    source: SourceCollation | None = None   # carried through for findings/notes
-    locale_fallback: bool = False   # source locale unknown; ICU root used instead
-
-    @property
-    def is_case_insensitive(self) -> bool:
-        return bool(self.source and self.source.case_insensitive)
-
-    def qualified(self, schema: str | None) -> str:
-        """Spelling for a COLLATE clause. Built-ins are bare (``C`` is in
-        pg_catalog); created ones are schema-qualified so ``search_path`` can't
-        break them."""
-        if not self.needs_create or not schema:
-            return f'"{self.name}"'
-        return f'"{schema}"."{self.name}"'
-
-    def ddl(self, schema: str) -> str:
-        """Idempotent ``CREATE COLLATION``, or "" for a built-in."""
-        if not self.needs_create:
-            return ""
-        deterministic = "true" if self.deterministic else "false"
-        return (
-            f'CREATE COLLATION IF NOT EXISTS "{schema}"."{self.name}"\n'
-            f"    (provider = icu, locale = '{self.locale}', deterministic = {deterministic});"
-        )
-
-
 # Types that can carry a collation. A real scan reports collation_name only for
 # character columns; this also guards hand-built ColumnInfo.
 COLLATABLE_TYPES = frozenset(
@@ -249,27 +196,6 @@ def parse_collation(name: str) -> SourceCollation | None:
     )
 
 
-def _icu_locale(
-    base: str, *, case_insensitive: bool, accent_insensitive: bool,
-    uppercase_first: bool = False,
-) -> str:
-    """ICU locale carrying the strength that matches the source flags."""
-    if accent_insensitive:
-        # level1 ignores accents and case; -kc-true adds case back, i.e. CS_AI.
-        keywords = "ks-level1" if case_insensitive else "ks-level1-kc-true"
-    else:
-        keywords = "ks-level2" if case_insensitive else "ks-level3"
-
-    # No upper/lower ordering to prefer when case is ignored anyway.
-    if uppercase_first and not case_insensitive:
-        keywords = f"{keywords}-{_UPPERCASE_FIRST_KEYWORD}"
-
-    # The -u- extension may appear only once, so append to a base that has one.
-    if "-u-" in base:
-        return f"{base}-{keywords}"
-    return f"{base}-u-{keywords}"
-
-
 def map_collation(name: str) -> TargetCollation | None:
     """Translate a SQL Server collation name to its Postgres equivalent, or None if
     it can't be parsed — the caller then leaves the column on the database default
@@ -277,43 +203,7 @@ def map_collation(name: str) -> TargetCollation | None:
     parsed = parse_collation(name)
     if parsed is None:
         return None
-
-    if parsed.binary:
-        return TargetCollation(
-            name=BINARY_COLLATION, locale="", deterministic=True,
-            needs_create=False, source=parsed,
-        )
-
-    base = _LOCALE_MAP.get(parsed.locale_key)
-    fallback = base is None
-    locale = _icu_locale(
-        base or ROOT_LOCALE,
-        case_insensitive=parsed.case_insensitive,
-        accent_insensitive=parsed.accent_insensitive,
-        uppercase_first=parsed.uppercase_first,
-    )
-    # Nondeterministic is what makes equality itself ignore case/accents; a
-    # deterministic collation would fix ordering only (see module docstring).
-    deterministic = not (parsed.case_insensitive or parsed.accent_insensitive)
-
-    return TargetCollation(
-        name=collation_identifier(parsed.name),
-        locale=locale,
-        deterministic=deterministic,
-        needs_create=True,
-        source=parsed,
-        locale_fallback=fallback,
-    )
-
-
-def collation_identifier(source_name: str) -> str:
-    """Postgres name for a migrated collation: the source name kept verbatim, so
-    the target schema shows which SQL Server collation a column mirrors. Always
-    lower-cased — this identifier is generated rather than carried from a source
-    object, so the project's identifier-case policy doesn't apply."""
-    from backend.schema_migration.naming import truncate_identifier
-
-    return truncate_identifier((source_name or "").strip().lower())
+    return target_collation(parsed, _LOCALE_MAP.get(parsed.locale_key))
 
 
 def column_collation(col) -> TargetCollation | None:
@@ -327,29 +217,6 @@ def column_collation(col) -> TargetCollation | None:
     return map_collation(col.collation_name)
 
 
-@dataclass
-class CollationUsage:
-    """Distinct collations a set of tables needs, and which columns use each.
-    Both dicts are keyed by Postgres collation name."""
-
-    collations: dict[str, TargetCollation] = field(default_factory=dict)
-    columns: dict[str, list[str]] = field(default_factory=dict)   # "schema.table.column"
-
-    def created(self) -> list[TargetCollation]:
-        """Collations needing a CREATE, in a stable order."""
-        return [c for _, c in sorted(self.collations.items()) if c.needs_create]
-
-
 def collect_collations(tables) -> CollationUsage:
     """Walk scanned tables and gather the collations their columns need."""
-    usage = CollationUsage()
-    for t in tables:
-        for col in t.columns:
-            target = column_collation(col)
-            if target is None:
-                continue
-            usage.collations.setdefault(target.name, target)
-            usage.columns.setdefault(target.name, []).append(
-                f"{t.schema_name}.{t.table_name}.{col.name}"
-            )
-    return usage
+    return _collect_collations(tables, column_collation)

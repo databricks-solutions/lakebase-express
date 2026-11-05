@@ -12,6 +12,7 @@ from backend import audit
 from backend.connectors.credentials import LAKEBASE_NAMESPACE, remember_effective
 from backend.connectors.factory import build_connector
 from backend.connectors.lakebase import LakebaseConnection
+from backend.dialects import DEFAULT_DIALECT, get_dialect
 from backend.migration.models import PlanItem
 from backend.projects.store import get_store
 from backend.run_registry import RunRegistry
@@ -94,6 +95,9 @@ def _execute(run_id: str, req: ValidationRunRequest) -> None:
         # validation runner; the extra policy is needed only when explicitly set.
         if req.identifier_case.value == "preserve":
             validation_kwargs["identifier_case"] = req.identifier_case
+        dialect = get_dialect(req.source.source_type)
+        if dialect is not DEFAULT_DIALECT:
+            validation_kwargs["dialect"] = dialect
         report = run_validation(
             source, target, req.target_schema, progress, **validation_kwargs
         )

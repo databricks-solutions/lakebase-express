@@ -9,6 +9,7 @@ from backend.schema_migration.naming import IdentifierCase
 
 class DDLRequest(BaseModel):
     tables: list[TableInfo]
+    source_type: str = "azure-sql"  # catalog connector id; resolves to its dialect
     target_schema: str = "public"  # Lakebase/Postgres schema to create into
     identifier_case: IdentifierCase = IdentifierCase.LOWERCASE
 

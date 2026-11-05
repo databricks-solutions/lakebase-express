@@ -1,8 +1,9 @@
 """REST endpoints for the Schema & Code migration phase."""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
+from backend.dialects import get_dialect
 from backend.schema_migration.ai_translator import translate_all
 from backend.schema_migration.ddl_generator import generate_ddl
 from backend.schema_migration.naming import map_schema
@@ -18,7 +19,12 @@ router = APIRouter(prefix="/api/schema", tags=["schema"])
 
 @router.post("/ddl", response_model=DDLResult)
 def ddl(req: DDLRequest) -> DDLResult:
-    script, count = generate_ddl(req.tables, req.target_schema, req.identifier_case)
+    try:
+        dialect = get_dialect(req.source_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    script, count = generate_ddl(req.tables, req.target_schema, req.identifier_case,
+                                 dialect=dialect)
     return DDLResult(ddl=script, statement_count=count)
 
 

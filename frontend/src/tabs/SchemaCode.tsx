@@ -67,6 +67,7 @@ export default function SchemaCode({ state, setState, fmEndpoint }: Props) {
       // the Databricks Apps ~120s request timeout, so it can't be done inline.
       const { run_id } = await api.startBuildPlan({
         project_id: state.connection?.project_id,
+        source_type: state.connection?.source_type,
         tables: report!.tables,
         programmable_objects: report!.programmable_objects,
         target_schema: state.targetSchema,

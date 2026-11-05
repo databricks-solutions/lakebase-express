@@ -99,6 +99,7 @@ class PlanItem(BaseModel):
 
 class BuildPlanRequest(BaseModel):
     project_id: str = ""                # links the run to its project
+    source_type: str = "azure-sql"      # catalog connector id; resolves to its dialect
     tables: list[TableInfo] = []
     programmable_objects: list[ProgrammableObject] = []
     target_schema: str = "public"

@@ -1009,6 +1009,7 @@ export const api = {
   testLakebase: (req: LakebaseConn) =>
     post<{ ok: boolean; message: string }>("/api/migration/lakebase/test", req),
   buildPlan: (body: {
+    source_type?: string;
     tables: TableInfo[];
     programmable_objects: ProgrammableObject[];
     target_schema: string;
@@ -1020,6 +1021,7 @@ export const api = {
   // timeout): start returns a run_id, then poll planStatus to completion.
   startBuildPlan: (body: {
     project_id?: string;
+    source_type?: string;
     tables: TableInfo[];
     programmable_objects: ProgrammableObject[];
     target_schema: string;

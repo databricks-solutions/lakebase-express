@@ -27,8 +27,8 @@ from backend.assessment import callable_shape
 from backend.assessment.models import ProgrammableObject, Severity, TableInfo
 from backend.assessment.scanner import scan_objects, scan_tables
 from backend.connectors.lakebase import LakebaseConnection
+from backend.dialects import DEFAULT_DIALECT, SourceDialect
 from backend.migration.models import KIND_ORDER, ObjectKind, PlanItem
-from backend.schema_migration.collation_mapper import column_collation
 from backend.schema_migration.ddl_generator import (
     check_constraint_ddl,
     column_default_ddl,
@@ -48,7 +48,6 @@ from backend.schema_migration.naming import (
     primary_key_name,
     trigger_function_name,
 )
-from backend.schema_migration.type_mapper import map_type
 from backend.validation.models import (
     MatchStatus,
     ObjectDiff,
@@ -359,12 +358,15 @@ _PG_TYPE_ALIASES = {
 }
 
 
-def _expected_pg_type(col) -> str:
-    base = map_type(col).split("(", 1)[0].strip().lower()
+def _expected_pg_type(col, dialect: SourceDialect = DEFAULT_DIALECT) -> str:
+    base = dialect.map_type(col).split("(", 1)[0].strip().lower()
     return _PG_TYPE_ALIASES.get(base, base)
 
 
-def _collation_drift(t: TableInfo, target_collations: dict[str, str], target_cols: dict) -> list[str]:
+def _collation_drift(
+    t: TableInfo, target_collations: dict[str, str], target_cols: dict,
+    dialect: SourceDialect = DEFAULT_DIALECT,
+) -> list[str]:
     """Columns whose target collation isn't the one the source collation maps to.
 
     Invisible to every other check: the column holds exactly the right bytes and
@@ -377,7 +379,7 @@ def _collation_drift(t: TableInfo, target_collations: dict[str, str], target_col
     for c in t.columns:
         if c.name not in target_cols:
             continue  # already reported as a missing column
-        expected = column_collation(c)
+        expected = dialect.column_collation(c)
         if expected is None:
             continue
         found = target_collations.get(c.name)
@@ -393,6 +395,7 @@ def _collation_drift(t: TableInfo, target_collations: dict[str, str], target_col
 def _recollate_sql(
     t: TableInfo, schema: str, table: str, collation_schema: str,
     target_collations: dict[str, str],
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> str:
     """SQL that puts the source collation back on the drifted columns.
 
@@ -404,7 +407,7 @@ def _recollate_sql(
     creates: dict[str, str] = {}
     alters: list[str] = []
     for c in t.columns:
-        expected = column_collation(c)
+        expected = dialect.column_collation(c)
         if expected is None or target_collations.get(c.name) == expected.name:
             continue
         ddl = expected.ddl(collation_schema)
@@ -412,7 +415,7 @@ def _recollate_sql(
             creates.setdefault(expected.name, ddl)
         alters.append(
             f"ALTER TABLE {_pg_ident(schema)}.{_pg_ident(table)} "
-            f'ALTER COLUMN "{c.name}" TYPE {map_type(c)} '
+            f'ALTER COLUMN "{c.name}" TYPE {dialect.map_type(c)} '
             f"COLLATE {expected.qualified(collation_schema)};"
         )
     if not alters:
@@ -424,17 +427,20 @@ def _recollate_sql(
     return "\n".join([header, *creates.values(), *alters])
 
 
-def _add_column_sql(schema: str, table: str, col, collation_schema: str = "") -> str:
+def _add_column_sql(
+    schema: str, table: str, col, collation_schema: str = "",
+    dialect: SourceDialect = DEFAULT_DIALECT,
+) -> str:
     """ADD COLUMN for a column missing from the target, carrying its source
     collation like the original CREATE TABLE does. Re-added without it the column
     takes the case-sensitive default, and being *missing* rather than drifted, no
     collation finding would flag it afterwards."""
     null = "" if col.is_nullable else " NOT NULL"
-    target = column_collation(col)
+    target = dialect.column_collation(col)
     collate = f" COLLATE {target.qualified(collation_schema)}" if target else ""
     return (
         f"ALTER TABLE {_pg_ident(schema)}.{_pg_ident(table)} "
-        f'ADD COLUMN "{col.name}" {map_type(col)}{collate}{null};'
+        f'ADD COLUMN "{col.name}" {dialect.map_type(col)}{collate}{null};'
     )
 
 
@@ -721,6 +727,7 @@ def post_data_items(
     mapped: tuple[str, str],
     target_schema: str,
     identifier_case: IdentifierCase | str,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> list[ValidationItem]:
     """One rollup item per post-data kind for a single table.
 
@@ -755,7 +762,7 @@ def post_data_items(
         name = mapped_identifier(chk.name, identifier_case)
         expected.append((name, f"CHECK {chk.name}", chk.definition, None))
         fix_for[name] = check_constraint_ddl(
-            chk, t.table_name, tgt_schema, identifier_case, t.columns
+            chk, t.table_name, tgt_schema, identifier_case, t.columns, dialect=dialect
         )
     present.extend(inv.checks.get(mapped, []))
 
@@ -766,7 +773,7 @@ def post_data_items(
         expected.append((d.column, f"DEFAULT on {d.column}", d.definition, None))
         fix_for[d.column] = column_default_ddl(
             d, t.table_name, tgt_schema, column=cols_by_name.get(d.column),
-            target_schema=target_schema, identifier_case=identifier_case,
+            target_schema=target_schema, identifier_case=identifier_case, dialect=dialect,
         )
     if t.identity_column:
         # An identity column also carries a DEFAULT in some target shapes (a
@@ -774,7 +781,7 @@ def post_data_items(
         # signal rather than reporting a correctly-migrated identity as missing.
         ident = t.identity_column
         expected.append((ident, f"IDENTITY on {ident}", "", None))
-        fix_for[ident] = identity_ddl(t, tgt_schema, identifier_case)
+        fix_for[ident] = identity_ddl(t, tgt_schema, identifier_case, dialect=dialect)
         if ident in inv.identity_columns.get(mapped, set()):
             target_defaults = target_defaults | {ident}
     # Only column-keyed entries participate here; a target column with a default
@@ -801,7 +808,8 @@ def post_data_items(
         label = f"{'UNIQUE ' if idx.is_unique else ''}INDEX {idx.name}"
         expected.append((name, label, idx.filter_definition or "",
                          tuple(c.name for c in idx.columns)))
-        fix_for[name] = index_ddl(idx, t.table_name, tgt_schema, identifier_case, t.columns)
+        fix_for[name] = index_ddl(idx, t.table_name, tgt_schema, identifier_case, t.columns,
+                                  dialect=dialect)
     item = _post_data_rollup(
         t, inv, mapped, kind=ObjectKind.INDEX, expected=expected,
         present=inv.indexes.get(mapped, []), fix_for=fix_for,
@@ -859,6 +867,7 @@ def compare(
     include_tables: bool = True,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
     plan: list[PlanItem] | None = None,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> ValidationReport:
     """Line up the source inventory with the target inventory and diff them.
 
@@ -934,7 +943,7 @@ def compare(
                     source_rows=source_counts.get(key, t.row_count),
                     fix_sql=table_ddl(
                         t, mapped[0], identifier_case,
-                        map_schema("dbo", target_schema, identifier_case),
+                        map_schema("dbo", target_schema, identifier_case), dialect=dialect,
                     ),
                 ))
             continue
@@ -944,11 +953,13 @@ def compare(
         src_col_names = {c.name for c in t.columns}
         cols_extra = sorted(n for n in target_cols if n not in src_col_names)
         drift = [
-            f'{c.name}: expected {_expected_pg_type(c)}, found {target_cols[c.name].lower()}'
+            f'{c.name}: expected {_expected_pg_type(c, dialect)}, found {target_cols[c.name].lower()}'
             for c in t.columns
-            if c.name in target_cols and target_cols[c.name].lower() != _expected_pg_type(c)
+            if c.name in target_cols and target_cols[c.name].lower() != _expected_pg_type(c, dialect)
         ]
-        coll_drift = _collation_drift(t, inventory.column_collations.get(mapped, {}), target_cols)
+        coll_drift = _collation_drift(
+            t, inventory.column_collations.get(mapped, {}), target_cols, dialect
+        )
 
         src_rows = source_counts.get(key, t.row_count)
         tgt_rows = target_counts.get(key)
@@ -997,7 +1008,7 @@ def compare(
         # repeat the same problem three more times.
         if compare_post_data:
             items.extend(
-                post_data_items(t, inventory, mapped, target_schema, identifier_case)
+                post_data_items(t, inventory, mapped, target_schema, identifier_case, dialect)
             )
         if not include_tables:
             # Objects scope: post-data rollups above are re-checked (they are the
@@ -1012,17 +1023,18 @@ def compare(
         # A re-added column COLLATEs its collation, which may never have been created.
         for ddl in dict.fromkeys(
             c.ddl(collation_schema)
-            for c in (column_collation(col) for col in readded)
+            for c in (dialect.column_collation(col) for col in readded)
             if c is not None and c.needs_create
         ):
             fix_parts.append(ddl)
         fix_parts.extend(
-            _add_column_sql(mapped[0], mapped[1], c, collation_schema) for c in readded
+            _add_column_sql(mapped[0], mapped[1], c, collation_schema, dialect)
+            for c in readded
         )
         if coll_drift:
             fix_parts.append(_recollate_sql(
                 t, mapped[0], mapped[1], collation_schema,
-                inventory.column_collations.get(mapped, {}),
+                inventory.column_collations.get(mapped, {}), dialect,
             ))
         fix = "\n".join(p for p in fix_parts if p)
         items.append(ValidationItem(
@@ -1272,6 +1284,7 @@ def run_validation(
     use_estimates: bool = True,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
     plan: list[PlanItem] | None = None,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> ValidationReport:
     """Full source-vs-target validation. ``source`` is any connector exposing
     ``query()``/``database`` (see connectors/factory.py).
@@ -1366,4 +1379,5 @@ def run_validation(
         include_tables=not objects_only,
         identifier_case=identifier_case,
         plan=plan,
+        dialect=dialect,
     )

@@ -1,9 +1,9 @@
-"""Generates Postgres DDL from scanned Azure SQL table metadata.
+"""Generates Postgres DDL from scanned source table metadata.
 
 Emits a runnable script: schema creation, the collations the source columns use,
 then CREATE TABLE per table with mapped types, collations, and nullability.
-Identifiers are double-quoted to preserve casing and neutralise T-SQL [bracket]
-quoting.
+Identifiers are double-quoted to preserve casing. Types, expressions and
+collations come from the source's ``SourceDialect`` (T-SQL by default).
 
 Constraints and indexes (PKs, FKs, unique/plain indexes, column defaults,
 check constraints, identity columns) are generated as **post-data** DDL: they
@@ -23,15 +23,7 @@ from backend.assessment.models import (
     IndexInfo,
     TableInfo,
 )
-from backend.schema_migration.collation_mapper import (
-    collect_collations,
-    column_collation,
-)
-from backend.schema_migration.expr_mapper import (
-    map_default_expression,
-    map_expression,
-    sequence_ref_in,
-)
+from backend.dialects import DEFAULT_DIALECT, SourceDialect
 from backend.schema_migration.naming import (
     IdentifierCase,
     index_name,
@@ -40,7 +32,6 @@ from backend.schema_migration.naming import (
     mapped_identifier,
     primary_key_name,
 )
-from backend.schema_migration.type_mapper import map_type, required_extensions
 
 # Constraint/index naming lives in schema_migration/naming.py — the validation
 # comparator has to look for exactly the names created here, so the rules are
@@ -57,14 +48,17 @@ def _fq(
     return f'"{schema}"."{map_object(table, identifier_case)}"'
 
 
-def _column_ddl(col, *, indent: str = "    ", collation_schema: str = "") -> str:
+def _column_ddl(
+    col, *, indent: str = "    ", collation_schema: str = "",
+    dialect: SourceDialect = DEFAULT_DIALECT,
+) -> str:
     null = "" if col.is_nullable else " NOT NULL"
     # Character columns keep their source collation, so comparisons keep the
     # source's case/accent semantics rather than Postgres's case-sensitive default.
-    target = column_collation(col)
+    target = dialect.column_collation(col)
     collate = f" COLLATE {target.qualified(collation_schema)}" if target else ""
     # Column names are preserved as scanned so the COPY column list keeps matching.
-    return f'{indent}"{col.name}" {map_type(col)}{collate}{null}'
+    return f'{indent}"{col.name}" {dialect.map_type(col)}{collate}{null}'
 
 
 def extension_ddl(name: str) -> str:
@@ -87,13 +81,16 @@ def table_ddl(
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
     collation_schema: str = "",
+    *,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> str:
     """CREATE TABLE for a single table (idempotent). ``schema`` is the resolved
     (already-mapped) Postgres schema; the table name follows ``identifier_case``.
     ``collation_schema`` is where the migration created its collations — passing it
     schema-qualifies each COLLATE so ``search_path`` can't break it."""
     cols = ",\n".join(
-        _column_ddl(c, collation_schema=collation_schema) for c in table.columns
+        _column_ddl(c, collation_schema=collation_schema, dialect=dialect)
+        for c in table.columns
     )
     return (
         f'CREATE TABLE IF NOT EXISTS "{schema}".'
@@ -106,9 +103,11 @@ def _table_ddl(
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
     collation_schema: str = "",
+    *,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> str:
     return f"-- source: {table.fqn}  ({table.row_count:,} rows)\n" + table_ddl(
-        table, schema, identifier_case, collation_schema
+        table, schema, identifier_case, collation_schema, dialect=dialect
     )
 
 
@@ -181,12 +180,14 @@ def index_ddl(
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
     columns: list[ColumnInfo] | None = None,
+    *,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> str:
     """CREATE (UNIQUE) INDEX IF NOT EXISTS. The name is prefixed with the table
     (source index names are per-table; Postgres index names are per-schema).
 
     ``columns`` is the table's scanned columns, needed to translate a filter that
-    compares a ``bit`` column to 0/1 (see ``expr_mapper.map_expression``)."""
+    compares a ``bit`` column to 0/1 (see ``SourceDialect.map_expression``)."""
     fq = _fq(schema, table_name, identifier_case)
     name = index_name(idx.name, table_name, identifier_case)
     cols = ", ".join(f'"{c.name}"' + (" DESC" if c.descending else "") for c in idx.columns)
@@ -194,7 +195,7 @@ def index_ddl(
     include_cols = ", ".join(f'"{c}"' for c in idx.include_columns)
     include = f" INCLUDE ({include_cols})" if idx.include_columns else ""
     where = (
-        f" WHERE {map_expression(idx.filter_definition, columns=columns)}"
+        f" WHERE {dialect.map_expression(idx.filter_definition, columns=columns)}"
         if idx.filter_definition else ""
     )
     return f'CREATE {unique}INDEX IF NOT EXISTS "{name}" ON {fq} ({cols}){include}{where};'
@@ -204,6 +205,7 @@ def column_default_ddl(
     d: ColumnDefaultInfo, table_name: str, schema: str, *,
     column: ColumnInfo | None = None, target_schema: str = "public",
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> str:
     """SET DEFAULT with the mechanically-translated default expression.
 
@@ -213,7 +215,7 @@ def column_default_ddl(
     so the referenced sequence exists. Naturally idempotent (SET DEFAULT replaces;
     CREATE SEQUENCE is guarded)."""
     fq = _fq(schema, table_name, identifier_case)
-    expr = map_default_expression(
+    expr = dialect.map_default_expression(
         d.definition,
         column=column,
         target_schema=target_schema,
@@ -221,7 +223,7 @@ def column_default_ddl(
     )
     set_default = f'ALTER TABLE {fq} ALTER COLUMN "{d.column}" SET DEFAULT {expr};'
 
-    seq = sequence_ref_in(d.definition, target_schema, identifier_case)
+    seq = dialect.sequence_ref_in(d.definition, target_schema, identifier_case)
     if seq:
         seq_fq = f'"{seq[0]}"."{seq[1]}"'
         return f"CREATE SEQUENCE IF NOT EXISTS {seq_fq};\n{set_default}"
@@ -234,13 +236,15 @@ def check_constraint_ddl(
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
     columns: list[ColumnInfo] | None = None,
+    *,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> str:
     """ADD CONSTRAINT ... CHECK (guarded by constraint name). ``columns`` is the
     table's scanned columns, needed to translate a ``bit`` comparison in the
-    predicate (see ``expr_mapper.map_expression``)."""
+    predicate (see ``SourceDialect.map_expression``)."""
     fq = _fq(schema, table_name, identifier_case)
     name = _ident(chk.name, identifier_case)
-    predicate = map_expression(chk.definition, columns=columns)
+    predicate = dialect.map_expression(chk.definition, columns=columns)
     return (
         "DO $$\nBEGIN\n"
         "    IF NOT EXISTS (\n"
@@ -260,6 +264,8 @@ def identity_ddl(
     table: TableInfo,
     schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    *,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> str:
     """Recreate the source IDENTITY column semantics after the load.
 
@@ -271,7 +277,7 @@ def identity_ddl(
     col = table.identity_column or ""
     fq = _fq(schema, table.table_name, identifier_case)
     col_info = next((c for c in table.columns if c.name == col), None)
-    pg_type = map_type(col_info) if col_info else ""
+    pg_type = dialect.map_type(col_info) if col_info else ""
 
     if pg_type in _IDENTITY_PG_TYPES:
         return (
@@ -306,6 +312,8 @@ def post_data_ddl(
     tables: list[TableInfo],
     target_schema: str = "public",
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    *,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> list[tuple[str, str]]:
     """All post-data statements as (label, sql), in safe apply order:
     defaults/identity/PK/checks per table, then indexes, then FKs (which need
@@ -320,16 +328,17 @@ def post_data_ddl(
                 f"{name} · DEFAULT {d.column}",
                 column_default_ddl(d, t.table_name, schema,
                                    column=cols.get(d.column), target_schema=target_schema,
-                                   identifier_case=identifier_case),
+                                   identifier_case=identifier_case, dialect=dialect),
             ))
         if t.identity_column:
-            out.append((f"{name} · IDENTITY {t.identity_column}", identity_ddl(t, schema, identifier_case)))
+            out.append((f"{name} · IDENTITY {t.identity_column}", identity_ddl(t, schema, identifier_case, dialect=dialect)))
         if t.primary_key:
             out.append((f"{name} · PRIMARY KEY", primary_key_ddl(t, schema, identifier_case)))
         for chk in t.check_constraints:
             out.append((
                 f"{name} · CHECK {map_object(chk.name, identifier_case)}",
-                check_constraint_ddl(chk, t.table_name, schema, identifier_case, t.columns),
+                check_constraint_ddl(chk, t.table_name, schema, identifier_case, t.columns,
+                                     dialect=dialect),
             ))
     for t in tables:
         schema = map_schema(t.schema_name, target_schema, identifier_case)
@@ -337,7 +346,8 @@ def post_data_ddl(
         for idx in t.indexes:
             out.append((
                 f"{name} · INDEX {map_object(idx.name, identifier_case)}",
-                index_ddl(idx, t.table_name, schema, identifier_case, t.columns),
+                index_ddl(idx, t.table_name, schema, identifier_case, t.columns,
+                          dialect=dialect),
             ))
     for t in tables:
         schema = map_schema(t.schema_name, target_schema, identifier_case)
@@ -354,6 +364,8 @@ def generate_ddl(
     tables: list[TableInfo],
     target_schema: str = "public",
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    *,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> tuple[str, int]:
     """Return (script, statement_count).
 
@@ -366,10 +378,10 @@ def generate_ddl(
     # It is included in the schema list even when no table maps to it, since the
     # CREATE COLLATION statements below need it to exist.
     collation_schema = map_schema("dbo", target_schema, identifier_case)
-    usage = collect_collations(tables)
+    usage = dialect.collect_collations(tables)
     schemas = sorted({map_schema(t.schema_name, target_schema, identifier_case) for t in tables}
                      | ({collation_schema} if usage.created() else set()))
-    extensions = required_extensions(tables)
+    extensions = dialect.required_extensions(tables)
     header = (
         "-- Generated by Lakebase Express — schema migration\n"
         "-- Review before running. Constraints & indexes are in the post-data\n"
@@ -391,11 +403,11 @@ def generate_ddl(
     blocks = [
         _table_ddl(
             t, map_schema(t.schema_name, target_schema, identifier_case), identifier_case,
-            collation_schema,
+            collation_schema, dialect=dialect,
         )
         for t in tables
     ]
-    post = post_data_ddl(tables, target_schema, identifier_case)
+    post = post_data_ddl(tables, target_schema, identifier_case, dialect=dialect)
     script = header + "\n" + "\n\n".join(blocks) + "\n"
     if post:
         script += (
