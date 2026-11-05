@@ -1,8 +1,8 @@
 """Builds an editable migration plan from the assessment results.
 
 Each plan item carries the exact SQL that will be applied to Lakebase, so the
-user can review and edit it before execution. Table DDL is generated from the
-type mapper; code objects are (optionally) translated by the Foundation Model.
+user can review and edit it before execution. Table DDL is generated through the
+source's dialect; code objects are (optionally) translated by the Foundation Model.
 
 The plan has two phases. Pre-data items (extensions, schemas, collations, tables,
 functions, views, procedures) are applied before the data load; post-data items (constraints,
@@ -17,7 +17,7 @@ from typing import Callable
 from backend.assessment.models import ProgrammableObject, TableInfo
 from backend.migration.models import ObjectKind, PlanItem
 from backend.schema_migration.ai_translator import translate_all
-from backend.schema_migration.collation_mapper import collect_collations
+from backend.dialects import DEFAULT_DIALECT, SourceDialect
 from backend.schema_migration.ddl_generator import (
     check_constraint_ddl,
     extension_ddl,
@@ -30,7 +30,6 @@ from backend.schema_migration.ddl_generator import (
     table_ddl,
 )
 from backend.schema_migration.naming import IdentifierCase, map_object, map_schema
-from backend.schema_migration.type_mapper import required_extensions
 
 _EXTENSION_NOTES = {
     "postgis": "Provides the geometry/geography types the source spatial columns map to.",
@@ -53,6 +52,7 @@ def build_plan(
     endpoint: str | None,
     on_translate_progress: Callable[[int, int], None] | None = None,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> list[PlanItem]:
     """Build the editable migration plan. ``on_translate_progress(done, total)``
     is called as code-object translations complete (for background-run progress);
@@ -66,7 +66,7 @@ def build_plan(
     # Created before the tables that reference them, all in the default target
     # schema since a collation is shared across schemas.
     collation_schema = map_schema("dbo", target_schema, identifier_case)
-    usage = collect_collations(tables)
+    usage = dialect.collect_collations(tables)
 
     # The collation schema gets an item too, even when no table maps to it — the
     # collations are created there and would otherwise have nowhere to land.
@@ -79,7 +79,7 @@ def build_plan(
             sql=extension_ddl(ext),
             notes=_EXTENSION_NOTES.get(ext, ""),
         )
-        for ext in required_extensions(tables)
+        for ext in dialect.required_extensions(tables)
     ]
     items += [
         PlanItem(
@@ -129,12 +129,12 @@ def build_plan(
                 id=f"table:{t.schema_name}.{t.table_name}",
                 kind=ObjectKind.TABLE,
                 name=f"{ms}.{map_object(t.table_name, identifier_case)}",
-                sql=table_ddl(t, ms, identifier_case, collation_schema),
+                sql=table_ddl(t, ms, identifier_case, collation_schema, dialect=dialect),
                 notes=f"{t.column_count} columns · {t.row_count:,} rows · source {t.fqn}.",
             )
         )
 
-    items.extend(_post_data_items(tables, schema_map, target_schema, identifier_case))
+    items.extend(_post_data_items(tables, schema_map, target_schema, identifier_case, dialect))
 
     # Code objects — translate up front (one batch) if requested. The schema map
     # is passed so generated code qualifies references with the mapped schemas.
@@ -179,6 +179,7 @@ def _post_data_items(
     schema_map: dict[str, str],
     target_schema: str,
     identifier_case: IdentifierCase | str = IdentifierCase.LOWERCASE,
+    dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> list[PlanItem]:
     """Constraint/index/FK items for the post-data phase. Emitted per object so
     a single failure stays isolated and each statement is reviewable/editable;
@@ -198,7 +199,7 @@ def _post_data_items(
                     name=f"{target} · DEFAULT {d.column}",
                     sql=column_default_ddl(d, t.table_name, ms,
                                            column=cols.get(d.column), target_schema=target_schema,
-                                           identifier_case=identifier_case),
+                                           identifier_case=identifier_case, dialect=dialect),
                     notes=f"Column default (source: {d.definition}) — translated mechanically, "
                           f"review if it used a T-SQL-only function. {_POST_DATA_NOTE}",
                 )
@@ -209,7 +210,7 @@ def _post_data_items(
                     id=f"identity:{src}.{t.identity_column}",
                     kind=ObjectKind.CONSTRAINT,
                     name=f"{target} · IDENTITY {t.identity_column}",
-                    sql=identity_ddl(t, ms, identifier_case),
+                    sql=identity_ddl(t, ms, identifier_case, dialect=dialect),
                     notes="Recreates the IDENTITY as a Postgres identity/sequence and syncs it "
                           f"to MAX({t.identity_column})+1 — which is why it runs after the load.",
                 )
@@ -230,7 +231,8 @@ def _post_data_items(
                     id=f"check:{src}.{chk.name}",
                     kind=ObjectKind.CONSTRAINT,
                     name=f"{target} · CHECK {map_object(chk.name, identifier_case)}",
-                    sql=check_constraint_ddl(chk, t.table_name, ms, identifier_case, t.columns),
+                    sql=check_constraint_ddl(chk, t.table_name, ms, identifier_case, t.columns,
+                                             dialect=dialect),
                     notes=f"Check constraint (source: {chk.definition}) — translated "
                           f"mechanically, review the predicate. {_POST_DATA_NOTE}",
                 )
@@ -246,7 +248,8 @@ def _post_data_items(
                     id=f"index:{t.schema_name}.{t.table_name}.{idx.name}",
                     kind=ObjectKind.INDEX,
                     name=f"{target} · {map_object(idx.name, identifier_case)}",
-                    sql=index_ddl(idx, t.table_name, ms, identifier_case, t.columns),
+                    sql=index_ddl(idx, t.table_name, ms, identifier_case, t.columns,
+                                  dialect=dialect),
                     notes=f"{'Unique index' if idx.is_unique else 'Index'} on ({cols}). "
                           f"{_POST_DATA_NOTE}",
                 )

@@ -42,10 +42,10 @@ from backend.context_bundle.models import (
     TargetContract,
     sql_digest,
 )
+from backend.dialects import get_dialect
 from backend.migration.models import ObjectKind, PlanItem
 from backend.projects.models import Project
 from backend.query_parity.models import QueryParityReport
-from backend.schema_migration.collation_mapper import column_collation
 from backend.schema_migration.naming import (
     IdentifierCase,
     index_name,
@@ -54,7 +54,6 @@ from backend.schema_migration.naming import (
     primary_key_name,
     trigger_function_name,
 )
-from backend.schema_migration.type_mapper import map_type
 from backend.validation.models import MatchStatus, ValidationReport
 
 # Source types whose Postgres form is `text` legitimately, so a `text` target is
@@ -253,6 +252,7 @@ def _columns(tables: list[TableInfo], project: Project) -> list[ColumnContract]:
     """
     ic = project.identifier_case
     schema = project.target_schema
+    dialect = get_dialect(project.source.source_type)
     out: list[ColumnContract] = []
 
     for t in tables:
@@ -260,7 +260,7 @@ def _columns(tables: list[TableInfo], project: Project) -> list[ColumnContract]:
         target_table = f"{ms}.{map_object(t.table_name, ic)}"
         for col in t.columns:
             source_type = col.data_type.lower()
-            target_type = map_type(col)
+            target_type = dialect.map_type(col)
             # Keys into the glossary; the source type name doubles as its key.
             changes: list[str] = []
 
@@ -269,7 +269,7 @@ def _columns(tables: list[TableInfo], project: Project) -> list[ColumnContract]:
             elif target_type == "text" and source_type not in _TEXTUAL:
                 changes.append(rules.TEXT_FALLBACK)
 
-            collation = column_collation(col)
+            collation = dialect.column_collation(col)
             if collation is not None and not collation.deterministic:
                 changes.append(rules.NONDETERMINISTIC_COLLATION)
             if collation is not None and collation.locale_fallback:

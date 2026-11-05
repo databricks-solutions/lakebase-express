@@ -5,8 +5,9 @@ concrete connector. Azure SQL and on-prem/IaaS SQL Server share the same T-SQL
 dialect and driver (pymssql), so both route to ``AzureSqlConnection``.
 
 To add a new source (Oracle, Postgres, …): implement a connector exposing
-``database``, ``query(sql) -> list[dict]`` and ``test_connection() -> bool``,
-then register its ``source_type`` here. The scanner is connector-agnostic.
+``database``, ``query(sql) -> list[dict]`` and ``test_connection() -> bool`` and
+register its ``source_type`` here, then implement its ``SourceDialect`` (types,
+expressions, collations) and register it under the same id in ``backend/dialects``.
 """
 from __future__ import annotations
 

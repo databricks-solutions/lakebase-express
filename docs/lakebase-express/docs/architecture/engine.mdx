@@ -14,7 +14,8 @@ flowchart TD
   compat --> report[assessment/report<br/>readiness score]
   scan --> ai[assessment/ai_analysis]
   report --> planner[migration/planner]
-  planner --> ddl[schema_migration/ddl_generator<br/>type_mapper · collation_mapper · expr_mapper]
+  planner --> ddl[schema_migration/ddl_generator]
+  ddl --> dialect[dialects/ SourceDialect<br/>tsql: type_mapper · collation_mapper · expr_mapper]
   planner --> tr[schema_migration/ai_translator]
   planner --> exec[migration/executor<br/>+ trigger_sql · routine_sql]
   exec --> load[migration/data_loader]
@@ -45,11 +46,17 @@ Sizing lives separately in `backend/sizing/` (`calculator.py` + `pricing.yaml`).
 the original T-SQL and the model's reasoning. Items are split into pre-data and post-data
 kinds (`POST_DATA_KINDS`).
 
+Types, expressions and collations come from the source's **dialect**
+(`backend/dialects/`, resolved from `source_type`); the planner, DDL generator, validation
+and context bundle call only that interface. T-SQL is the one dialect today, implemented
+by the three mappers below.
+
 | Module | Role |
 |--------|------|
 | `type_mapper.py` | The authoritative SQL Server → Postgres type mapping (`compatibility.py` decides *whether* a type is noteworthy; this decides *what it becomes*) |
 | `ddl_generator.py` | Schemas, collations and `CREATE TABLE`; the post-data constraints, indexes and identity syncs, all idempotent |
 | `collation_mapper.py` | SQL Server collation → ICU collation — see [Collations](../reference/collations.mdx) |
+| `pg_collation.py` | The dialect-neutral Postgres side of collations: ICU strength, `CREATE COLLATION`, usage collection |
 | `expr_mapper.py` | Deterministic translation of defaults, CHECK predicates and filtered-index predicates; unknown constructs pass through verbatim |
 | `windows_timezones.py` | Windows time-zone names → IANA (generated from CLDR; regenerate rather than hand-edit) |
 | `naming.py` | Source → target name mapping (`dbo` → `public`, lower-casing or preserved casing) |

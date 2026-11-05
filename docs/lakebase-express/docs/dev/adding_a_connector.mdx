@@ -17,7 +17,8 @@ connection-form hints. Optionally drop a logo at `frontend/public/logos/<id>.svg
 
 Register the connector's `source_type` (the same id) in `backend/connectors/factory.py`.
 
-- A **T-SQL-family** source reuses `AzureSqlConnection` — add its id to `_TSQL_SOURCES`.
+- A **T-SQL-family** source reuses `AzureSqlConnection` — add its id to `_TSQL_SOURCES`,
+  and map the same id to `TSQL` in `backend/dialects/__init__.py`.
 - A **different dialect** needs a connector class exposing:
 
 ```python
@@ -33,10 +34,34 @@ The scanner only depends on that interface. Classify the driver's transient erro
 `backend/retry.py` (see `azure_sql.py`), so a resuming database retries and a bad password
 fails on the first attempt.
 
+## 3. Dialect
+
+The schema engine (planner, DDL generator, validation, context bundle) never imports a
+source's mappers directly — it calls the `SourceDialect` it is given. A non-T-SQL source
+implements one in `backend/dialects/` and registers it under its `source_type`:
+
+```python
+from backend.dialects.base import SourceDialect
+
+class MyDialect(SourceDialect):
+    name = "mydialect"
+
+    def map_type(self, col) -> str: ...                       # column type
+    def required_extensions(self, tables) -> list[str]: ...   # e.g. postgis
+    def map_expression(self, expr, *, columns=None) -> str: ...        # CHECK / index WHERE
+    def map_default_expression(self, expr, *, column=None, ...) -> str: ...
+    def sequence_ref_in(self, expr, ...) -> tuple[str, str] | None: ...
+    def column_collation(self, col) -> TargetCollation | None: ...
+```
+
+Parse the source's collation names into a `SourceCollation` and build the target with
+`pg_collation.target_collation` — the ICU strength and `CREATE COLLATION` side is shared.
+`backend/dialects/tsql.py` is the reference implementation; `tests/test_dialects.py` shows
+how to check the engine uses only the dialect.
+
 ## What else a new dialect touches
 
-The interface above is enough to connect and test. A full migration path from a non-T-SQL
-source also needs its catalog queries in the scanner, its type, collation and expression
-mappings in `backend/schema_migration/`, a translation prompt, and the data-load read side
-(the in-app loader and the snapshot notebook's Spark reader). Tests for each mapping belong
-next to the existing ones in `tests/`.
+A full migration path from a non-T-SQL source also needs its catalog queries in the
+scanner, its assessment rules (`compatibility.py`), a translation prompt, and the
+data-load read side (the in-app loader and the snapshot notebook's Spark reader). Tests
+for each mapping belong next to the existing ones in `tests/`.

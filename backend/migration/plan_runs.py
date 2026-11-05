@@ -15,6 +15,7 @@ import logging
 import uuid
 
 from backend import audit
+from backend.dialects import get_dialect
 from backend.migration.models import BuildPlanRequest, PlanRunState
 from backend.migration.planner import build_plan
 from backend.run_registry import RunRegistry
@@ -56,6 +57,7 @@ def _execute(run_id: str, req: BuildPlanRequest) -> None:
             req.tables, req.programmable_objects, req.target_schema,
             req.translate, req.endpoint, on_translate_progress=progress,
             identifier_case=req.identifier_case,
+            dialect=get_dialect(req.source_type),
         )
         _set(run_id, lambda s: (
             setattr(s, "status", "success"),
