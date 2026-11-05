@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import audit, config
+from backend import audit, config, fm_params
 
 _REAL_LAKEBASE_ENDPOINT = config.lakebase_endpoint
 
@@ -31,3 +31,11 @@ def lakebase_endpoint():
     """The real resolver, past the stub above."""
     _REAL_LAKEBASE_ENDPOINT.cache_clear()
     return _REAL_LAKEBASE_ENDPOINT
+
+
+@pytest.fixture(autouse=True)
+def fresh_fm_negotiation():
+    """Rejections learned by one test's fake endpoint must not leak into the next."""
+    fm_params.forget_learned()
+    yield
+    fm_params.forget_learned()
