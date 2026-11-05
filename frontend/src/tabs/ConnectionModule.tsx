@@ -81,23 +81,25 @@ export default function ConnectionModule({ source, state, setState, onSave, work
         </p>
         {source.connectionNote && <div className="banner banner--info">{source.connectionNote}</div>}
 
-        <div className="field" style={{ marginTop: 14 }}>
-          <label>Server host</label>
-          <input value={conn.host} placeholder={source.hostPlaceholder ?? "host"} onChange={(e) => set("host", e.target.value)} />
-        </div>
-        <div className="field-row">
+        <div className="field-row" style={{ marginTop: 14 }}>
           <div className="field">
-            <label>Database</label>
-            <input value={conn.database} onChange={(e) => set("database", e.target.value)} />
+            <label>Server host</label>
+            <input value={conn.host} placeholder={source.hostPlaceholder ?? "host"} onChange={(e) => set("host", e.target.value)} />
           </div>
           <div className="field field--narrow">
             <label>Port</label>
             <input type="number" value={conn.port} onChange={(e) => set("port", Number(e.target.value))} />
           </div>
         </div>
-        <div className="field">
-          <label>Username</label>
-          <input value={conn.username} placeholder={source.usernamePlaceholder ?? "username"} onChange={(e) => set("username", e.target.value)} />
+        <div className="field-row">
+          <div className="field">
+            <label>Database</label>
+            <input value={conn.database} onChange={(e) => set("database", e.target.value)} />
+          </div>
+          <div className="field">
+            <label>Username</label>
+            <input value={conn.username} placeholder={source.usernamePlaceholder ?? "username"} onChange={(e) => set("username", e.target.value)} />
+          </div>
         </div>
         <PasswordField
           password={conn.password}

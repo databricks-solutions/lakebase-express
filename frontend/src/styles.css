@@ -300,7 +300,7 @@ a { color: var(--primary); }
 @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
 
 /* Source → Target with a migration arrow in the middle column. */
-.conn-grid { grid-template-columns: minmax(380px, 1fr) auto 1.3fr; }
+.conn-grid { grid-template-columns: minmax(380px, 1fr) auto 1.3fr; align-items: stretch; }
 .migrate-arrow {
   align-self: center;
   display: flex; align-items: center; justify-content: center;
