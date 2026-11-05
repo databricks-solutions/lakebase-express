@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, POST_DATA_KINDS, type ApplyResponse, type AsyncSetupResult, type CapacityLimits, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type TableRef, type TuningOverrides, type TuningPlan, type WorkspaceStatus } from "../api";
+import { api, POST_DATA_KINDS, type ApplyResponse, type AsyncSetupResult, type CapacityLimits, type MaintenanceRunState, type PlanItem, type ResumableAsyncRun, type ResumableRun, type RunState, type SecretScopeOption, type TableInfo, type TableRef, type TuningOverrides, type TuningPlan, type WorkspaceStatus } from "../api";
 import CodeBlock from "../components/CodeBlock";
 import SecretScopeField from "../components/SecretScopeField";
 import type { MigrationState } from "../App";
@@ -47,6 +47,9 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
   const [postApplyRes, setPostApplyRes] = useState<ApplyResponse | null>(null);
   const [postBusy, setPostBusy] = useState(false);
   const postRanRef = useRef(false);
+  // Last phase — VACUUM (ANALYZE) of the loaded tables, polled.
+  const [maint, setMaint] = useState<MaintenanceRunState | null>(null);
+  const [maintBusy, setMaintBusy] = useState(false);
   // What "Sync now" runs: only the schema & code plan (the default), or the full migration.
   const [syncScope, setSyncScope] = useState<SyncScope>("schema");
   // True while/after a schema-&-code-only apply, so progress skips the data phase.
@@ -100,24 +103,53 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
   useEffect(() => {
     if (!runId) return;
     pollRef.current = true;
-    // Phase 3 — constraints & indexes, once the data phase has finished. A
-    // fully failed run (setup-level, nothing loaded) skips it; re-running the
-    // sync applies everything again (the post-data DDL is idempotent).
-    const applyPostPhase = async (r: RunState) => {
-      if (postRanRef.current || !postPlan.length || r.status === "failed") {
+    // Phase 4 — VACUUM (ANALYZE) of the tables that are in the target.
+    const runMaintenance = async (r: RunState) => {
+      const loaded = new Set(r.tables.filter((t) => t.status === "success" || t.status === "skipped").map((t) => t.name));
+      const tables = (state.report?.tables ?? []).filter((t) => loaded.has(`${t.schema_name}.${t.table_name}`));
+      if (!tables.length) return;
+      setMaintBusy(true);
+      try {
+        const { run_id } = await api.startMaintenance({
+          lakebase: state.lakebase, target_schema: state.targetSchema,
+          identifier_case: state.identifierCase, project_id: state.connection?.project_id ?? "",
+          tables: tables.map((t) => ({ schema_name: t.schema_name, table_name: t.table_name, target_table: t.table_name })),
+        });
+        while (pollRef.current) {
+          const m = await api.maintenanceStatus(run_id);
+          if (!pollRef.current) return;
+          setMaint(m);
+          if (m.status !== "running") break;
+          await new Promise((res) => setTimeout(res, 2000));
+        }
+      } catch (e) {
+        if (pollRef.current) setError((e as Error).message);
+      } finally {
+        setMaintBusy(false);
+      }
+    };
+    // Phase 3 — constraints & indexes, once the data phase has finished, then
+    // maintenance. A fully failed run (setup-level, nothing loaded) skips both;
+    // re-running the sync applies everything again (the post-data DDL is idempotent).
+    const finishRun = async (r: RunState) => {
+      if (postRanRef.current) return;
+      postRanRef.current = true;
+      if (r.status === "failed") {
         setBusy(false);
         return;
       }
-      postRanRef.current = true;
-      setPostBusy(true);
-      try {
-        setPostApplyRes(await api.applyPlan({ lakebase: state.lakebase!, items: postPlan, stop_on_error: false }));
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setPostBusy(false);
-        setBusy(false);
+      if (postPlan.length) {
+        setPostBusy(true);
+        try {
+          setPostApplyRes(await api.applyPlan({ lakebase: state.lakebase!, items: postPlan, stop_on_error: false }));
+        } catch (e) {
+          setError((e as Error).message);
+        } finally {
+          setPostBusy(false);
+        }
       }
+      await runMaintenance(r);
+      setBusy(false);
     };
     const tick = async () => {
       try {
@@ -125,7 +157,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
         if (!pollRef.current) return;
         setRun(r);
         if (r.status === "running") setTimeout(tick, 1500);
-        else applyPostPhase(r);
+        else finishRun(r);
       } catch (e) {
         if (pollRef.current) { setError((e as Error).message); setBusy(false); }
       }
@@ -222,7 +254,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
   }
 
   function resetRunState() {
-    setError(null); setApplyRes(null); setPostApplyRes(null); setRun(null); setRunId(null);
+    setError(null); setApplyRes(null); setPostApplyRes(null); setRun(null); setRunId(null); setMaint(null);
     postRanRef.current = false;
   }
 
@@ -474,7 +506,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
           <p className="muted">
             {syncScope === "schema"
               ? "Creates the schemas, tables, code, constraints and indexes in Lakebase. No data is copied."
-              : `Creates the schema and code, copies the selected tables (${overwrite ? "replacing" : "appending to"} existing rows), then adds constraints and indexes.`}
+              : `Creates the schema and code, copies the selected tables (${overwrite ? "replacing" : "appending to"} existing rows), adds constraints and indexes, then runs VACUUM (ANALYZE) on the loaded tables.`}
           </p>
           {noTarget && <NoTarget onGoConnection={onGoConnection} />}
           {!state.plan && onGoSchema && (
@@ -512,6 +544,8 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
             applyRes={applyRes}
             postApplyRes={postApplyRes}
             postBusy={postBusy}
+            maint={maint}
+            maintBusy={maintBusy}
             run={run}
             error={error}
           />
@@ -521,6 +555,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
           {postApplyRes && (
             <ApplySummary res={postApplyRes} label="Constraints & indexes" onGoValidation={onGoValidation} />
           )}
+          {maint && <MaintenanceSummary run={maint} />}
         </section>
       ) : (
         <section className="card">
@@ -533,6 +568,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
                   <li>Source reads are range-partitioned on the primary key, and several tables load at once.</li>
                   <li>Each partition streams into Lakebase with Postgres COPY — no Delta landing in between.</li>
                   <li>After the copy, one chained task per object type adds constraints, indexes, foreign keys and triggers.</li>
+                  <li>A last task runs VACUUM (ANALYZE) on the loaded tables, unless turned off in Load &amp; maintenance.</li>
                   <li>Passwords are read from a Databricks secret scope at runtime, never written into the notebook.</li>
                 </ul>
               </InfoTip>
@@ -541,7 +577,7 @@ export default function CreateSync({ state, setState, onGoConnection, onGoSchema
           </div>
           <p className="muted">
             Creates a Databricks job that copies the selected tables in parallel, then adds
-            constraints, indexes, foreign keys and triggers. Open the job in your workspace to pick
+            constraints, indexes, foreign keys and triggers, and runs maintenance. Open the job in your workspace to pick
             the compute and run it.
           </p>
 
@@ -731,7 +767,8 @@ const TUNING_ROWS_SHOWN = 50;
 // Rows per fetch is picked from these steps; smaller ones only add round trips.
 const FETCH_STEPS = [1000, 2500, 5000, 10000, 25000, 50000];
 
-/** Recommended load tuning with per-field overrides; a blank field uses the recommendation. */
+/** Recommended load tuning with per-field overrides (a blank field uses the
+ *  recommendation), plus the job's final maintenance task. */
 function LoadTuning({ plan, overrides, busy, error, onChange, onReset, onRecheck }: {
   plan: TuningPlan | null;
   overrides: TuningOverrides;
@@ -743,15 +780,18 @@ function LoadTuning({ plan, overrides, busy, error, onChange, onReset, onRecheck
 }) {
   const num = (v: string, max: number) =>
     v.trim() === "" ? null : Math.min(max, Math.max(1, Math.floor(Number(v)) || 1));
+  const maintenanceOn = overrides.maintenance !== false;
   const overridden = overrides.max_streams != null || overrides.table_streams != null
-    || overrides.fetch_size != null || "max_parallel_tables" in overrides || "num_partitions" in overrides;
+    || overrides.fetch_size != null || !maintenanceOn
+    || "max_parallel_tables" in overrides || "num_partitions" in overrides;
   return (
     <>
       <Collapsible
-        title="Load tuning"
-        meta={busy ? "Checking limits…" : plan
+        title="Load & maintenance"
+        meta={(busy ? "Checking limits…" : plan
           ? `${plan.max_streams} streams · up to ${plan.max_parallel_tables} tables at once`
-          : "Recommended from table sizes and database limits"}
+          : "Recommended from table sizes and database limits")
+          + (maintenanceOn ? "" : " · maintenance off")}
         badge={
           <span className={`sbadge ${overridden ? "sbadge--info" : "sbadge--ok"}`}>
             {overridden ? "Customized" : "Recommended"}
@@ -798,6 +838,17 @@ function LoadTuning({ plan, overrides, busy, error, onChange, onReset, onRecheck
         <p className="muted" style={{ margin: 0 }}>
           Blank fields use the recommendation. Each stream holds one source and one Lakebase
           connection. The values are written into the notebook, where you can still edit them.
+        </p>
+        <label className="check">
+          <input
+            type="checkbox" checked={maintenanceOn}
+            onChange={(e) => onChange({ maintenance: e.target.checked ? null : false })}
+          />
+          Run VACUUM (ANALYZE) on the loaded tables as the job's last task
+        </label>
+        <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+          Gives the planner fresh statistics and enables index-only scans before the first query.
+          It reads every table, so on very large tables it can take a while. Off leaves it to autovacuum.
         </p>
         {plan && plan.reasons.length > 0 && (
           <ul className="muted" style={{ margin: 0, paddingLeft: 18 }}>
@@ -852,9 +903,9 @@ function ModeCard({ on, onSelect, badge, title, desc, recommended = false }: {
 }
 
 /** A single top-level bar spanning the whole sync-now run: schema & code apply
- *  (~15%), the data load (driven by real rows copied), then the post-data
- *  constraints & indexes apply (~10%). Evolves as the run progresses and
- *  settles green / amber / red on completion. */
+ *  (~15%), the data load (driven by real rows copied), the post-data
+ *  constraints & indexes apply (~10%), then maintenance (~10%). Evolves as the
+ *  run progresses and settles green / amber / red on completion. */
 function OverallProgress({
   busy,
   hasPlan,
@@ -863,6 +914,8 @@ function OverallProgress({
   applyRes,
   postApplyRes = null,
   postBusy = false,
+  maint = null,
+  maintBusy = false,
   run,
   error,
 }: {
@@ -873,6 +926,8 @@ function OverallProgress({
   applyRes: ApplyResponse | null;
   postApplyRes?: ApplyResponse | null;
   postBusy?: boolean;
+  maint?: MaintenanceRunState | null;
+  maintBusy?: boolean;
   run: RunState | null;
   error: string | null;
 }) {
@@ -892,7 +947,8 @@ function OverallProgress({
 
   const SCHEMA_W = hasPlan ? 15 : 0; // % of the bar allotted to the schema phase
   const POST_W = hasPost ? 10 : 0;   // % allotted to the constraints & indexes phase
-  const DATA_W = 100 - SCHEMA_W - POST_W;
+  const MAINT_W = 10;                 // % allotted to maintenance
+  const DATA_W = 100 - SCHEMA_W - POST_W - MAINT_W;
 
   // Real data-phase fraction: prefer rows copied, fall back to tables done.
   let dataFrac = 0;
@@ -910,27 +966,40 @@ function OverallProgress({
   const dataDone = !!run && run.status !== "running";
   // A fully failed data run (setup-level) skips the post phase.
   const postExpected = hasPost && dataDone && run!.status !== "failed";
-  const postSettled = !!postApplyRes || !postExpected;
+  const postSettled = !!postApplyRes || !postExpected || (!busy && !postBusy);
+  // Skipped when nothing loaded; settled once it ends, or the whole flow did.
+  const maintExpected = dataDone && run!.status !== "failed"
+    && run!.tables.some((t) => t.status === "success" || t.status === "skipped");
+  const maintOver = !!maint && maint.status !== "running";
+  const maintSettled = !maintExpected || maintOver || (!busy && !maintBusy);
+  const maintFailed = !!maint && maint.status !== "running" && maint.status !== "success";
 
   let pct: number;
   let label: string;
   let tone: "running" | "success" | "warn" | "failed";
 
-  if (dataDone && postSettled) {
+  if (dataDone && postSettled && maintSettled) {
     pct = 100;
     const postFailed = postApplyRes?.failed ?? 0;
     tone = run!.status === "success"
-      ? (postFailed || error ? "warn" : "success")
+      ? (postFailed || maintFailed || error ? "warn" : "success")
       : run!.status === "partial" ? "warn" : "failed";
     label =
       run!.status === "failed" ? "Sync failed"
       : tone === "success" ? "Sync complete"
       : "Sync completed with errors";
-  } else if (dataDone && postExpected) {
+  } else if (dataDone && !postSettled) {
     // Post-data phase in flight (constraints, indexes, FKs, triggers).
     pct = SCHEMA_W + DATA_W + (postBusy ? POST_W * 0.45 : 0);
     tone = "running";
     label = "Applying constraints & indexes…";
+  } else if (dataDone) {
+    // Maintenance in flight, table by table.
+    const total = maint?.tables.length ?? 0;
+    const done = maint?.tables.filter((t) => t.status !== "pending").length ?? 0;
+    pct = SCHEMA_W + DATA_W + POST_W + (total ? MAINT_W * (done / total) : 0);
+    tone = "running";
+    label = `Running VACUUM (ANALYZE)${total ? ` — ${done.toLocaleString()} / ${total.toLocaleString()} tables` : "…"}`;
   } else if (error) {
     pct = run ? SCHEMA_W + DATA_W * dataFrac : applyRes ? SCHEMA_W : 4;
     tone = "failed";
@@ -968,6 +1037,11 @@ function OverallProgress({
               active={running && dataDone && !postApplyRes}
             />
           )}
+          <Phase
+            label="Maintenance"
+            done={maintOver && !maintFailed}
+            active={running && dataDone && postSettled && !maintOver}
+          />
         </div>
       )}
     </SyncBar>
@@ -1044,6 +1118,38 @@ function ApplySummary({ res, label = "Schema & code", onGoValidation }: {
             — its AI repair agent picks up whatever is missing or inconsistent and fixes it there.
           </p>
         </>
+      )}
+    </div>
+  );
+}
+
+function MaintenanceSummary({ run }: { run: MaintenanceRunState }) {
+  const total = run.tables.length;
+  const ok = run.tables.filter((t) => t.status === "success").length;
+  const failed = run.tables.filter((t) => t.status === "failed");
+  const cls = run.status === "success" ? "ok" : run.status === "running" ? "skip" : "err";
+  return (
+    <div className="phasebox">
+      <div className="prog__row">
+        <span className="prog__name">Maintenance · VACUUM (ANALYZE)</span>
+        <span className="prog__count">
+          {ok.toLocaleString()} / {total.toLocaleString()} tables{failed.length ? ` · ${failed.length.toLocaleString()} failed` : ""}
+        </span>
+        <span className={`sbadge sbadge--${cls}`}>{run.status}</span>
+      </div>
+      {run.error && <div className="banner banner--err">{run.error}</div>}
+      {failed.length > 0 && (
+        <div className="findings" style={{ marginTop: 10 }}>
+          {failed.map((t) => (
+            <div key={t.name} className="finding finding--high">
+              <span className="tag tag--high">table</span>
+              <div className="finding__body">
+                <div className="finding__title"><strong>{t.name}</strong></div>
+                {t.error && <div className="finding__detail">{t.error}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

@@ -17,7 +17,10 @@ object, independently of how the migration ran.
 - **Row counts** — exact `COUNT(*)` on both sides; the assessment's partition-stats counts
   are not trustworthy enough to declare a migration consistent. Very large tables fall back
   to planner estimates on both sides, compared with a small tolerance and marked as
-  estimated, rather than risk the target's statement timeout.
+  estimated, rather than risk the target's statement timeout. Validation never writes to
+  the target: the estimate is the statistics the migration's
+  [maintenance step](./data_migration.mdx#maintenance) (or autovacuum) left. A table that
+  was never analyzed has no estimate and is reported as unverified.
 - **Constraints, indexes and foreign keys** — one row per table per kind ("5 of 5
   present"), rather than one row per object; expand a row to see exactly what differs.
 

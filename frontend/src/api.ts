@@ -320,6 +320,21 @@ export interface RunState {
   resumed_from?: string | null;
 }
 
+// Post-migration maintenance (VACUUM ANALYZE) of the loaded tables, polled.
+export interface MaintenanceTable {
+  name: string;  // target "schema.table"
+  status: string; // pending|success|failed
+  error?: string | null;
+  duration_ms: number;
+}
+
+export interface MaintenanceRunState {
+  run_id: string;
+  status: string; // running|success|partial|failed
+  tables: MaintenanceTable[];
+  error?: string | null;
+}
+
 // A run whose loader is gone (it failed, or the app restarted mid-load) and which
 // still has tables left, so it can be resumed instead of re-copied from scratch.
 export interface ResumableRun {
@@ -355,6 +370,8 @@ export interface TuningOverrides {
   max_streams?: number | null;
   table_streams?: number | null;
   fetch_size?: number | null;
+  // Async job's final VACUUM (ANALYZE) task; absent/null = on.
+  maintenance?: boolean | null;
 }
 
 // What the live source and target allow (null = could not be read).
@@ -1043,6 +1060,10 @@ export const api = {
   startData: (body: Record<string, unknown>) =>
     post<{ run_id: string }>("/api/migration/data/start", body),
   dataStatus: (runId: string) => get<RunState>(`/api/migration/data/status/${runId}`),
+  startMaintenance: (body: Record<string, unknown>) =>
+    post<{ run_id: string }>("/api/migration/maintenance/start", body),
+  maintenanceStatus: (runId: string) =>
+    get<MaintenanceRunState>(`/api/migration/maintenance/status/${runId}`),
   resumableData: (projectId: string) =>
     get<{ run: ResumableRun | null }>(
       `/api/migration/data/resumable?project_id=${encodeURIComponent(projectId)}`,

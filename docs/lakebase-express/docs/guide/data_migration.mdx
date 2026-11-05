@@ -29,7 +29,7 @@ Runs inside the app with live per-table progress. Two scopes:
 | Scope | What runs |
 |-------|-----------|
 | **Schema & code only** | The whole plan, pre- and post-data. No data is loaded — load it later with a full run or Async mode. |
-| **Full migration** | The pre-data plan items, then the selected tables are streamed in, then the constraints, indexes, foreign keys and triggers are created. |
+| **Full migration** | The pre-data plan items, then the selected tables are streamed in, then the constraints, indexes, foreign keys and triggers are created, then maintenance runs. |
 
 How the load works:
 
@@ -51,6 +51,16 @@ How the load works:
 - Transient failures on either side (a resuming serverless database, a dropped connection)
   retry; real errors fail on the first attempt.
 
+### Maintenance
+
+The last step of a full migration runs `VACUUM (ANALYZE)` on every table that is in the
+target (loaded now, or by the run this one resumed). A freshly loaded table has no planner
+statistics until autovacuum reaches it, and no visibility map, so index-only scans fall
+back to the heap. Maintenance fixes both before the first real query. It reads each table,
+so it takes a while on large ones. It runs in the background, one table at a time, with no
+statement timeout. A table that fails, or that the role may not vacuum, is reported and the
+rest carry on; the data stays loaded either way.
+
 ## Async mode (Databricks Job)
 
 For tables too large for the in-app loader, Async mode generates a **PySpark snapshot
@@ -64,7 +74,7 @@ The job is created without starting it — open it in the workspace to choose co
 (serverless or a cluster), tune it, and *Run now*. It is persistent, so the snapshot can be
 re-run later from the Jobs UI, or put on a schedule there (`POST /api/migration/async/setup` also accepts a `quartz_cron`).
 
-### Load tuning
+### Load & maintenance
 
 The app recommends how hard the job pushes both databases, and writes the values into the
 notebook with the reason for each:
@@ -96,6 +106,9 @@ again (e.g. after a Lakebase resize) and keeps the overrides.
 - The app applies the plan's pre-data items itself; the job runs the copy, then the
   constraints, indexes, foreign keys and triggers in chained tasks — one per object type —
   each with per-statement progress in its own run output.
+- A last `maintenance` task runs the same [maintenance](#maintenance) as Sync now. It is
+  on by default; untick it in **Load & maintenance** to leave the tables to autovacuum. A
+  failure fails only that task, which can be repaired on its own.
 - Source and Lakebase passwords are read from the **runtime secret scope** you pick, never
   embedded in the notebook; the app creates or updates that scope for you. The notebooks
   are written to the **workspace folder** you choose.

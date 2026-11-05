@@ -36,6 +36,8 @@ class TuningOverrides(BaseModel):
     max_streams: int | None = None
     table_streams: int | None = None
     fetch_size: int | None = None
+    # Async job's final VACUUM (ANALYZE) task; None = on (the recommendation).
+    maintenance: bool | None = None
 
     @field_validator("max_streams", "table_streams", "fetch_size")
     @classmethod

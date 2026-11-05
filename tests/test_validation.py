@@ -509,8 +509,8 @@ class HugeTarget(_OwnSession):
         raise AssertionError(f"unexpected SQL: {sql}")
 
     def execute(self, sql, params=None):
-        assert sql.startswith("ANALYZE"), sql
         self.analyze_calls += 1
+        raise AssertionError(f"validation must not write to the target: {sql}")
 
 
 def test_huge_table_uses_estimate_by_default():
@@ -519,9 +519,26 @@ def test_huge_table_uses_estimate_by_default():
     t = _by_id(report)["table:dbo.Position"]
     assert t.status is MatchStatus.MATCHED and t.rows_approximate is True
     assert t.source_rows == 600_000_000 and t.target_rows == 600_000_000
-    # No exact COUNT(*) ran on either side; the target was ANALYZE'd for reltuples.
-    assert src.count_big_calls == 0 and tgt.count_calls == 0 and tgt.analyze_calls == 1
+    # No exact COUNT(*) on either side, and no ANALYZE: reltuples is just read.
+    assert src.count_big_calls == 0 and tgt.count_calls == 0 and tgt.analyze_calls == 0
     assert report.tables_estimated == 1
+
+
+class NeverAnalyzedTarget(HugeTarget):
+    def query(self, sql, params=None, statement_timeout_ms=None):
+        if "reltuples" in sql:
+            return [{"n": -1}]
+        return super().query(sql, params, statement_timeout_ms)
+
+
+def test_never_analyzed_huge_table_is_unverified_not_zero():
+    """reltuples -1 is "no statistics", not an empty table: leave the count
+    unverified (with an ANALYZE hint) instead of reporting a 0-row mismatch."""
+    report = run_validation(HugeSource(), NeverAnalyzedTarget(), "public")
+    t = _by_id(report)["table:dbo.Position"]
+    assert t.target_rows is None
+    assert "could not verify" in t.detail.lower()
+    assert "ANALYZE" in t.recommendation
 
 
 def test_huge_table_exact_mode_counts_both_sides_with_timeout():

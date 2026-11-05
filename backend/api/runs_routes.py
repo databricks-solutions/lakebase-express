@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 
 class RunHistoryEntry(BaseModel):
-    # sync_run | async_job | async_run | plan_build | validation | validation_repair
+    # sync_run | async_job | async_run | plan_build | maintenance | validation | validation_repair
     # | query_parity
     kind: str
     run_id: str

@@ -520,7 +520,7 @@ def test_post_load_notebook_embeds_statements_per_type():
     by_type = _post_by_type(arts)
     # One notebook per present type; the constraint statement lands in the
     # constraints notebook, the index in the indexes notebook.
-    assert set(by_type) == {"02_post_load_constraints", "03_post_load_indexes"}
+    assert set(by_type) == {"02_post_load_constraints", "03_post_load_indexes", "04_maintenance"}
     con = by_type["02_post_load_constraints"]
     assert "POST_LOAD = [" in con
     assert "'public.orders · PRIMARY KEY'" in con
