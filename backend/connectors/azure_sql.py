@@ -66,7 +66,7 @@ class AzureSqlConnection:
     # raise it for a specific query (e.g. an exact COUNT(*) on a huge table).
     _DEFAULT_QUERY_TIMEOUT = 120
 
-    def _connect_once(self, timeout: int = _DEFAULT_QUERY_TIMEOUT):
+    def _connect_once(self, timeout: int = _DEFAULT_QUERY_TIMEOUT, autocommit: bool = False):
         return pymssql.connect(
             server=self.host,
             port=str(self.port),
@@ -75,20 +75,24 @@ class AzureSqlConnection:
             database=self.database,
             login_timeout=30,
             timeout=timeout,
+            autocommit=autocommit,
         )
 
-    @contextmanager
-    def _connect(self, timeout: int = _DEFAULT_QUERY_TIMEOUT):
+    def _open(self, timeout: int = _DEFAULT_QUERY_TIMEOUT, autocommit: bool = False):
         # Retry only transient failures (serverless auto-pause resume, service
         # busy). Anything else — bad credentials, missing database, firewall —
         # raises immediately.
-        conn = call_with_retry(
-            lambda: self._connect_once(timeout),
+        return call_with_retry(
+            lambda: self._connect_once(timeout, autocommit),
             policy=DB_POLICY,
             transient=transient_reason,
             what=f"Azure SQL connect to {self.host}/{self.database}",
             log=log,
         )
+
+    @contextmanager
+    def _connect(self, timeout: int = _DEFAULT_QUERY_TIMEOUT):
+        conn = self._open(timeout)
         try:
             yield conn
         finally:
@@ -122,3 +126,53 @@ class AzureSqlConnection:
         """Lightweight connectivity probe used by the UI before a full scan."""
         rows = self.query("SELECT 1 AS ok")
         return bool(rows) and rows[0]["ok"] == 1
+
+    @contextmanager
+    def session(self):
+        """Reuse connections across the many queries of one scan or run."""
+        session = AzureSqlSession(self)
+        try:
+            yield session
+        finally:
+            session.close()
+
+
+class AzureSqlSession:
+    """``query`` on reused connections, one per timeout (pymssql fixes it at connect).
+
+    Autocommit, so reads never hold a transaction open. A failed query drops its
+    connection — FreeTDS state after an error is unreliable — and the next reconnects.
+    """
+
+    def __init__(self, info: AzureSqlConnection) -> None:
+        self._info = info
+        self._conns: dict[int, pymssql.Connection] = {}
+
+    @property
+    def database(self) -> str:
+        return self._info.database
+
+    def query(self, sql: str, timeout: int | None = None) -> list[dict]:
+        timeout = timeout or self._info._DEFAULT_QUERY_TIMEOUT
+        conn = self._conns.get(timeout)
+        if conn is None:
+            conn = self._conns[timeout] = self._info._open(timeout, autocommit=True)
+        try:
+            cursor = conn.cursor(as_dict=True)
+            cursor.execute(sql)
+            return cursor.fetchall()
+        except Exception:
+            self._drop(timeout)
+            raise
+
+    def _drop(self, timeout: int) -> None:
+        conn = self._conns.pop(timeout, None)
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        for timeout in list(self._conns):
+            self._drop(timeout)

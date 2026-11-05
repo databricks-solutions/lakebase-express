@@ -1287,7 +1287,7 @@ def run_validation(
     dialect: SourceDialect = DEFAULT_DIALECT,
 ) -> ValidationReport:
     """Full source-vs-target validation. ``source`` is any connector exposing
-    ``query()``/``database`` (see connectors/factory.py).
+    ``query()``/``database``/``session()`` (see connectors/factory.py).
 
     ``scope="objects"`` re-checks only schemas and code objects — no table
     structure and, above all, no per-table ``COUNT(*)`` — so it finishes in
@@ -1297,6 +1297,23 @@ def run_validation(
     planner estimate to avoid a slow full scan; set ``False`` to force an exact
     ``COUNT(*)`` on every table (with a generous timeout) for precise totals.
     """
+    # One connection per side for the whole run, not one per query.
+    with source.session() as src, target.session() as tgt:
+        return _validate(src, tgt, target_schema, progress, scope, use_estimates,
+                         identifier_case, plan, dialect)
+
+
+def _validate(
+    source,
+    target,
+    target_schema: str,
+    progress: ProgressFn | None,
+    scope: str,
+    use_estimates: bool,
+    identifier_case: IdentifierCase | str,
+    plan: list[PlanItem] | None,
+    dialect: SourceDialect,
+) -> ValidationReport:
     notify = progress or (lambda *_: None)
     objects_only = scope == "objects"
 

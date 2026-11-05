@@ -6,6 +6,7 @@ Databricks user over OAuth (``auth_mode="databricks"``). The migration engine us
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import psycopg
@@ -105,3 +106,60 @@ class LakebaseConnection:
             cur.execute("SELECT 1")
             row = cur.fetchone()
             return bool(row) and row[0] == 1
+
+    @contextmanager
+    def session(self):
+        """Reuse one connection across the many queries of one run."""
+        session = LakebaseSession(self)
+        try:
+            yield session
+        finally:
+            session.close()
+
+
+class LakebaseSession:
+    """``query``/``execute`` on one reused autocommit connection.
+
+    A per-query timeout is ``SET LOCAL`` in its own transaction so it can't leak
+    into later queries. A broken connection is reopened on the next call.
+    """
+
+    def __init__(self, info: LakebaseConnection) -> None:
+        self._info = info
+        self._conn: psycopg.Connection | None = None
+
+    @property
+    def database(self) -> str:
+        return self._info.database
+
+    def _get(self) -> psycopg.Connection:
+        if self._conn is None or self._conn.closed or self._conn.broken:
+            self.close()
+            self._conn = self._info.connect()
+            self._conn.autocommit = True
+        return self._conn
+
+    def query(
+        self, sql: str, params: dict | None = None, statement_timeout_ms: int | None = None
+    ) -> list[dict]:
+        conn = self._get()
+        if statement_timeout_ms is None:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def execute(self, sql: str, params: dict | None = None) -> None:
+        with self._get().cursor() as cur:
+            cur.execute(sql, params)
+
+    def close(self) -> None:
+        conn, self._conn = self._conn, None
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass

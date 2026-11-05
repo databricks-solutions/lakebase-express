@@ -354,9 +354,11 @@ def run_assessment(
     Foundation Model deep-dive is layered on top (fail-soft — its failure never
     breaks the scan).
     """
-    tables = scan_tables(conn)
-    _count_full_globes(conn, tables)
-    objects = scan_objects(conn)
+    # Closed before the AI call so no idle source connection waits on the model.
+    with conn.session() as session:
+        tables = scan_tables(session)
+        _count_full_globes(session, tables)
+        objects = scan_objects(session)
     findings = compatibility.run_all_rules(tables, objects)
     rep = report.build_report(conn.database, tables, objects, findings)
 
