@@ -323,3 +323,65 @@ def test_gateway_route_still_adapts_to_rejected_params(routes):
     query_chat("system.ai.claude-opus-4-8", [_Msg()], api="gateway", temperature=0.2)
     # The adaptive strip/retry loop wraps both routes, not just serving.
     assert "temperature" not in api.calls[-1][1]
+
+
+_OPUS_5_REJECTION = (
+    "INVALID_PARAMETER_VALUE: Structured output is not supported for this model because "
+    "its translation requires forced tool use, which newer Anthropic models reject."
+)
+
+
+def _rejecting(api, message, exc_type=Exception):
+    real_do = api.do
+
+    def do(method, path, body=None, headers=None):
+        if "response_format" in body:
+            api.calls.append((path, dict(body)))
+            raise exc_type(message)
+        return real_do(method, path, body=body, headers=headers)
+
+    api.do = do
+
+
+def test_structured_output_rejection_without_the_param_name_is_stripped(routes):
+    api, _ = routes
+    _rejecting(api, _OPUS_5_REJECTION)
+    resp = query_chat("databricks-claude-opus-5-5", [_Msg()], api="gateway", max_tokens=16,
+                      response_format={"type": "json_schema", "json_schema": {}})
+    assert "response_format" in api.calls[0][1]
+    assert "response_format" not in api.calls[-1][1]
+    assert resp.choices[0].message.content == "hi"
+
+
+def test_any_bad_request_drops_structured_output(routes):
+    from databricks.sdk.errors import InvalidParameterValue
+    api, _ = routes
+    _rejecting(api, "some future wording", InvalidParameterValue)
+    query_chat("databricks-new", [_Msg()], api="gateway", max_tokens=16,
+               response_format={"type": "json_object"})
+    assert "response_format" not in api.calls[-1][1]
+
+
+def test_rejections_are_remembered_per_endpoint(routes):
+    api, _ = routes
+    _rejecting(api, _OPUS_5_REJECTION)
+    rf = {"type": "json_object"}
+    query_chat("databricks-claude-opus-5-5", [_Msg()], api="gateway", response_format=rf)
+    n = len(api.calls)
+    query_chat("databricks-claude-opus-5-5", [_Msg()], api="gateway", response_format=rf)
+    # The second call skips the doomed attempt; other endpoints still try it.
+    assert len(api.calls) == n + 1
+    assert "response_format" not in api.calls[-1][1]
+    query_chat("databricks-other", [_Msg()], api="gateway", response_format=rf)
+    assert "response_format" in api.calls[-2][1]
+
+
+def test_unrelated_errors_without_structured_output_still_raise(routes):
+    api, _ = routes
+
+    def boom(method, path, body=None, headers=None):
+        raise Exception("BAD_REQUEST: messages must not be empty")
+
+    api.do = boom
+    with pytest.raises(Exception, match="messages must not be empty"):
+        query_chat("databricks-x", [_Msg()], api="gateway", max_tokens=16)

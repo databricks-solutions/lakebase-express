@@ -35,6 +35,7 @@ import logging
 import re
 
 from databricks.sdk.errors import (
+    BadRequest,
     DeadlineExceeded,
     InternalError,
     TemporarilyUnavailable,
@@ -87,17 +88,50 @@ _MAX_TOKENS_CAP_RE = re.compile(
 )
 
 
+# Structured-output rejections vary by model and rarely name the parameter:
+#   "Structured output is not supported for this model because its translation
+#    requires forced tool use, which newer Anthropic models reject."
+_STRUCTURED_REJECTION_RE = re.compile(
+    r"structured output|response_format|json_schema|tool use|tool_choice", re.IGNORECASE
+)
+
+# What each endpoint rejected so far in this process, so negotiation costs one
+# failed call per endpoint instead of one per request.
+_LEARNED_UNSUPPORTED: dict[str, set[str]] = {}
+_LEARNED_CAP: dict[str, int] = {}
+
+
+def forget_learned() -> None:
+    """Clear the per-endpoint negotiation memory (tests, endpoint upgrades)."""
+    _LEARNED_UNSUPPORTED.clear()
+    _LEARNED_CAP.clear()
+
+
 def allowed_params(endpoint: str, params: dict) -> dict:
     """Filter chat parameters down to what ``endpoint`` is known to accept.
 
-    Drops None values and any parameter the endpoint's model family rejects.
+    Drops None values, any parameter the endpoint's model family rejects, and
+    any it already rejected in this process; clamps to a learned token cap.
     """
     lowered = endpoint.lower()
-    denied: set[str] = set()
+    denied: set[str] = set(_LEARNED_UNSUPPORTED.get(lowered, ()))
     for marker, params_denied in _KNOWN_UNSUPPORTED.items():
         if marker in lowered:
             denied |= params_denied
-    return {k: v for k, v in params.items() if v is not None and k not in denied}
+    out = {k: v for k, v in params.items() if v is not None and k not in denied}
+    cap = _LEARNED_CAP.get(lowered)
+    if cap and out.get("max_tokens", 0) > cap:
+        out["max_tokens"] = cap
+    return out
+
+
+def rejects_structured_output(exc: BaseException) -> bool:
+    """Whether a failed call with ``response_format`` should retry without it.
+
+    Structured output is an optional enhancement (every caller also parses free
+    text), so any 400 drops it; a genuine request error reappears on the retry.
+    """
+    return isinstance(exc, BadRequest) or bool(_STRUCTURED_REJECTION_RE.search(str(exc)))
 
 
 def unsupported_param(exc: BaseException) -> str | None:
@@ -195,6 +229,7 @@ def query_chat(endpoint: str, messages, api: str | None = None, **params):
 def _query_negotiated(w, api: str, endpoint: str, messages, params: dict):
     """One chat call. ``params`` is mutated in place so a dropped parameter or
     clamped ``max_tokens`` outlives it; anything else raises for the retry layer."""
+    key = endpoint.lower()
     while True:
         try:
             if api == FM_API_GATEWAY:
@@ -209,18 +244,19 @@ def _query_negotiated(w, api: str, endpoint: str, messages, params: dict):
                     "Endpoint %s caps output at %d tokens — clamping max_tokens", endpoint, cap
                 )
                 params["max_tokens"] = cap  # == cap next round, so this can't loop
+                _LEARNED_CAP[key] = cap
                 continue
             param = unsupported_param(exc)
-            if param is None and "response_format" in params and "response_format" in str(exc).lower():
-                # Rejections of structured output don't always use the standard
-                # "does not support the X parameter" phrasing.
+            if (param is None or param not in params) and "response_format" in params \
+                    and rejects_structured_output(exc):
                 param = "response_format"
             if param is None or param not in params:
                 raise
             log.warning(
-                "Endpoint %s rejected parameter %r — retrying without it", endpoint, param
+                "Endpoint %s rejected parameter %r — retrying without it: %s", endpoint, param, exc
             )
             params.pop(param)
+            _LEARNED_UNSUPPORTED.setdefault(key, set()).add(param)
 
 
 def chat_text(resp) -> str:
