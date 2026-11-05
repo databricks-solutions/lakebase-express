@@ -148,19 +148,20 @@ def _execute(run_id: str, req: QueryParityRunRequest) -> None:
 
         comparisons = []
         total = len(req.queries)
-        for done, q in enumerate(req.queries):
-            _set(run_id, lambda s, done=done, q=q: (
-                setattr(s, "phase", "Running queries"),
-                setattr(s, "queries_done", done),
-                setattr(s, "queries_total", total),
-                setattr(s, "current", q.title or q.id),
-            ))
-            src_res, src_rows = _run_source(source, q.source_sql)
-            tgt_res, tgt_rows = _run_target(target, q.target_sql)
-            comparisons.append(compare(
-                q, src_res, tgt_res,
-                source_rows=src_rows[:VALUE_SAMPLE], target_rows=tgt_rows[:VALUE_SAMPLE],
-            ))
+        with source.session() as src, target.session() as tgt:
+            for done, q in enumerate(req.queries):
+                _set(run_id, lambda s, done=done, q=q: (
+                    setattr(s, "phase", "Running queries"),
+                    setattr(s, "queries_done", done),
+                    setattr(s, "queries_total", total),
+                    setattr(s, "current", q.title or q.id),
+                ))
+                src_res, src_rows = _run_source(src, q.source_sql)
+                tgt_res, tgt_rows = _run_target(tgt, q.target_sql)
+                comparisons.append(compare(
+                    q, src_res, tgt_res,
+                    source_rows=src_rows[:VALUE_SAMPLE], target_rows=tgt_rows[:VALUE_SAMPLE],
+                ))
 
         _set(run_id, lambda s: setattr(s, "phase", "Building report"))
         report = _build_report(req, comparisons,

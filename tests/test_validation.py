@@ -1,5 +1,6 @@
 """Post-migration validation: comparison logic, AI fixer parsing, run registry."""
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from backend.assessment.models import (
@@ -326,7 +327,15 @@ def test_expected_schemas_scope():
 # --- fetch_target_inventory -----------------------------------------------------------
 
 
-class FakeTarget:
+class _OwnSession:
+    """run_validation queries through ``session()``; a fake is its own session."""
+
+    @contextmanager
+    def session(self):
+        yield self
+
+
+class FakeTarget(_OwnSession):
     database = "tgtdb"
 
     def query(self, sql, params=None, statement_timeout_ms=None):
@@ -387,7 +396,7 @@ def test_routines_query_excludes_event_trigger_and_extension_functions():
 # --- run_validation end-to-end (fake connectors) ---------------------------------------
 
 
-class FakeSource:
+class FakeSource(_OwnSession):
     database = "srcdb"
 
     def query(self, sql, timeout=None):
@@ -444,7 +453,7 @@ def test_run_validation_objects_scope_skips_tables_and_counts():
     assert _by_id(report)["procedure:dbo.usp_Report"].status is MatchStatus.MISSING
 
 
-class HugeSource:
+class HugeSource(_OwnSession):
     """One table well above the exact-count threshold (600M rows)."""
     database = "srcdb"
 
@@ -472,7 +481,7 @@ class HugeSource:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
-class HugeTarget:
+class HugeTarget(_OwnSession):
     database = "tgtdb"
 
     def __init__(self):
