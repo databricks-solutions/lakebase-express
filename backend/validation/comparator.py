@@ -327,22 +327,26 @@ _ESTIMATE_TOLERANCE = 0.005
 _EXACT_COUNT_TIMEOUT_SECONDS = 600
 
 
+class NoStatistics(Exception):
+    """The table was never analyzed, so the planner has no row estimate."""
+
+
 def estimate_target_rows(target: LakebaseConnection, schema: str, table: str) -> int:
     """Planner's row estimate for a table (``pg_class.reltuples``), no table scan.
 
-    Runs a sampling ``ANALYZE`` first so the estimate reflects the freshly
-    loaded data — reltuples is otherwise whatever the last autovacuum saw, which
-    for a just-migrated table can still be 0. Returns 0 if the estimate is
-    unavailable (e.g. never analyzed).
+    Read-only: the migration's maintenance step (or autovacuum) analyzes the
+    tables. Raises NoStatistics for a never-analyzed table (reltuples -1).
     """
-    target.execute(f"ANALYZE {_pg_ident(schema)}.{_pg_ident(table)}")
     rows = target.query(
         "SELECT reltuples::bigint AS n FROM pg_class c "
         "JOIN pg_namespace ns ON ns.oid = c.relnamespace "
         "WHERE ns.nspname = %(schema)s AND c.relname = %(table)s",
         {"schema": schema, "table": table},
     )
-    return int(rows[0]["n"]) if rows and rows[0]["n"] is not None and rows[0]["n"] >= 0 else 0
+    n = rows[0]["n"] if rows else None
+    if n is None or n < 0:
+        raise NoStatistics(f"{schema}.{table} has no planner statistics yet")
+    return int(n)
 
 
 # --- Comparison (pure) --------------------------------------------------------------
@@ -709,7 +713,8 @@ def _table_recommendation(problems: list[str], unverified: bool) -> str:
         return ""
     if unverified:
         return ("Re-run the validation, or check the table exists and is readable in the "
-                "target — the row count could not be counted or estimated.")
+                "target — the row count could not be counted or estimated. A table never "
+                "analyzed has no estimate: run ANALYZE on it, or validate with exact counts.")
     return ("Re-copy the table to reconcile the data. Structural gaps can be "
             "fixed with the SQL below or the AI fix.")
 

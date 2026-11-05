@@ -95,7 +95,8 @@ def upload_notebooks(w, req: DataGenRequest, workspace_dir: str) -> list[str]:
     """Upload generated notebooks to the workspace; return all paths in order.
 
     The first path is the loader (PySpark snapshot); the rest are the per-type
-    post-load DDL notebooks (constraints, indexes, foreign keys, triggers).
+    post-load DDL notebooks (constraints, indexes, foreign keys, triggers), then
+    the maintenance notebook when it is on.
     """
     base = project_dir(workspace_dir, req.project_id)
     w.workspace.mkdirs(base)
@@ -163,6 +164,7 @@ def _ensure_job(w, paths: list[str], schedule: jobs.CronSchedule | None, name: s
 
     The job is a linear chain of tasks: the PySpark snapshot copy, then one task
     per post-load object type (constraints → indexes → foreign keys → triggers),
+    then maintenance (VACUUM ANALYZE) when it is on,
     each depending on the previous so it only runs once the earlier phase
     succeeds. Splitting per type keeps the job graph legible — a failure shows
     exactly which phase broke — and each task is independently re-runnable via

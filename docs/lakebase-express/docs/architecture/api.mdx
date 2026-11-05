@@ -47,6 +47,8 @@ endpoint until the run is terminal (`success`, `failed` or `partial`).
 | `POST` | `/api/migration/data/start` | Start a sync data load (optionally resuming a run) |
 | `GET` | `/api/migration/data/status/{run_id}` | Poll it |
 | `GET` | `/api/migration/data/resumable` | The project's newest resumable sync run, if any |
+| `POST` | `/api/migration/maintenance/start` | Run `VACUUM (ANALYZE)` on the loaded tables in the background (last sync step) |
+| `GET` | `/api/migration/maintenance/status/{run_id}` | Poll it |
 | `POST` | `/api/migration/secrets/ensure` | Create or update the runtime secret scope the snapshot job reads |
 | `POST` | `/api/migration/async/setup` | Provision async mode: run once, create without running, or schedule (`quartz_cron`) |
 | `GET` | `/api/migration/async/resumable` | The project's newest resumable async run, if any |

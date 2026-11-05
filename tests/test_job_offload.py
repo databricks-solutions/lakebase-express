@@ -1,7 +1,7 @@
 """Snapshot job provisioning — exercised with a fake workspace client, no live workspace."""
 from types import SimpleNamespace
 
-from backend.data_migration.models import DataGenRequest, PostLoadStatement, TableRef
+from backend.data_migration.models import DataGenRequest, PostLoadStatement, TableRef, TuningOverrides
 from backend.migration import async_setup, job_offload
 
 
@@ -109,6 +109,7 @@ def test_upload_deletes_stale_notebook_first(monkeypatch):
         "/Workspace/Shared/x/02_post_load_constraints",
         "/Workspace/Shared/x/03_post_load_indexes",
         "/Workspace/Shared/x/04_post_load_triggers",
+        "/Workspace/Shared/x/05_maintenance",
     ]
 
 
@@ -119,22 +120,32 @@ def test_job_chains_one_task_per_post_load_type(monkeypatch):
     job_offload.create_job_and_run(_req_with_post(), "/Workspace/Shared/x")
     tasks = client.jobs.created_with["tasks"]
     assert [t.task_key for t in tasks] == [
-        "load", "post_load_constraints", "post_load_indexes", "post_load_triggers",
+        "load", "post_load_constraints", "post_load_indexes", "post_load_triggers", "maintenance",
     ]
     # Linear chain: task N depends on task N-1; the first depends on nothing.
     assert tasks[0].depends_on is None
     for prev, cur in zip(tasks, tasks[1:]):
         assert [d.task_key for d in cur.depends_on] == [prev.task_key]
-    assert tasks[-1].notebook_task.notebook_path == "/Workspace/Shared/x/04_post_load_triggers"
+    assert tasks[-1].notebook_task.notebook_path == "/Workspace/Shared/x/05_maintenance"
 
 
-def test_job_is_single_task_when_no_post_data(monkeypatch):
-    """No post-data items -> just the snapshot task, no dangling dependencies."""
+def test_job_is_load_then_maintenance_when_no_post_data(monkeypatch):
+    """No post-data items -> the snapshot task, then maintenance."""
     client = _patch(monkeypatch)
     job_offload.create_job_and_run(_req(), "/Workspace/Shared/x")
     tasks = client.jobs.created_with["tasks"]
-    assert [t.task_key for t in tasks] == ["load"]
+    assert [t.task_key for t in tasks] == ["load", "maintenance"]
     assert tasks[0].depends_on is None
+
+
+def test_job_has_no_maintenance_task_when_turned_off(monkeypatch):
+    client = _patch(monkeypatch)
+    req = _req_with_post().model_copy(update={"tuning": TuningOverrides(maintenance=False)})
+    job_offload.create_job_and_run(req, "/Workspace/Shared/x")
+    tasks = client.jobs.created_with["tasks"]
+    assert [t.task_key for t in tasks] == [
+        "load", "post_load_constraints", "post_load_indexes", "post_load_triggers",
+    ]
 
 
 def test_one_off_creates_persistent_job_and_runs_it(monkeypatch):

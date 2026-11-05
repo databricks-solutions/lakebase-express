@@ -229,6 +229,39 @@ class RunState(BaseModel):
     dropped_fks: list[tuple[str, str, str]] = []
 
 
+# --- Post-migration maintenance ----------------------------------------------------
+
+
+class MaintenanceTableRef(BaseModel):
+    schema_name: str
+    table_name: str
+    target_table: str | None = None          # defaults to table_name
+
+
+class MaintenanceRequest(BaseModel):
+    lakebase: LakebaseConnRequest
+    target_schema: str = "public"
+    identifier_case: IdentifierCase = IdentifierCase.LOWERCASE
+    tables: list[MaintenanceTableRef] = Field(..., min_length=1)
+    project_id: str = ""
+
+
+class MaintenanceTable(BaseModel):
+    name: str                                # target "schema.table"
+    status: str = "pending"                  # pending|success|failed
+    error: str | None = None
+    duration_ms: int = 0
+
+
+class MaintenanceRunState(BaseModel):
+    run_id: str
+    status: str = "running"                  # running|success|partial|failed
+    tables: list[MaintenanceTable] = []
+    error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
 class TaskProgress(BaseModel):
     """One Databricks job task of an async run, recorded by the task itself."""
     status: str = "running"                  # running|success|failed

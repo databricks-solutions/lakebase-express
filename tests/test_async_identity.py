@@ -40,7 +40,7 @@ def _python(code: str) -> str:
 
 def test_identity_notebooks_mint_oauth_and_read_no_lakebase_secret():
     artifacts = generate(_spec())
-    assert len(artifacts) == 2
+    assert len(artifacts) == 3  # load, constraints, maintenance
     for art in artifacts:
         ast.parse(_python(art.code))
         assert f'PG_ENDPOINT = "{_EP}"' in art.code

@@ -17,7 +17,9 @@ from backend.connectors.credentials import (
 from backend.connectors.lakebase import LakebaseConnection
 from backend.data_migration.models import DataGenRequest
 from backend.dialects import SourceDialect, get_dialect
-from backend.migration import async_runs, async_setup, job_offload, plan_runs, runs, secret_setup
+from backend.migration import (
+    async_runs, async_setup, job_offload, maintenance, plan_runs, runs, secret_setup,
+)
 from backend.migration.executor import apply_plan
 from backend.migration.models import (
     ApplyRequest,
@@ -26,6 +28,8 @@ from backend.migration.models import (
     DataLoadRequest,
     ItemStatus,
     LakebaseConnRequest,
+    MaintenanceRequest,
+    MaintenanceRunState,
     PlanResponse,
     PlanRunState,
     RunState,
@@ -262,6 +266,24 @@ def resumable_data(project_id: str) -> ResumableResponse:
             rows_copied=sum(t.rows_copied for t in state.tables),
         )
     )
+
+
+# --- Post-migration maintenance (sync) --------------------------------------------
+
+
+@router.post("/maintenance/start", response_model=StartRunResponse)
+def start_maintenance(req: MaintenanceRequest) -> StartRunResponse:
+    """VACUUM (ANALYZE) the loaded tables in the background — the last step of a sync."""
+    req = req.model_copy(update={"lakebase": with_lakebase_password(req.lakebase)})
+    return StartRunResponse(run_id=maintenance.start_run(req))
+
+
+@router.get("/maintenance/status/{run_id}", response_model=MaintenanceRunState)
+def maintenance_status(run_id: str) -> MaintenanceRunState:
+    state = maintenance.get_run(run_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Unknown maintenance run id.")
+    return state
 
 
 # --- Data load (offload to Databricks Job) ---------------------------------------

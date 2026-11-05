@@ -58,9 +58,9 @@ def _parse_python_cells(code: str) -> None:
 # --- Artifact shape --------------------------------------------------------------
 
 
-def test_generates_only_snapshot_when_no_post_data():
+def test_generates_only_snapshot_and_maintenance_when_no_post_data():
     arts = generate(_req())
-    assert [a.filename for a in arts] == ["01_snapshot_load.py"]
+    assert [a.filename for a in arts] == ["01_snapshot_load.py", "02_maintenance.py"]
 
 
 def test_generates_one_post_load_notebook_per_object_type():
@@ -73,6 +73,7 @@ def test_generates_one_post_load_notebook_per_object_type():
         "03_post_load_indexes.py",
         "04_post_load_foreign_keys.py",
         "05_post_load_triggers.py",
+        "06_maintenance.py",
     ]
 
 
@@ -87,6 +88,7 @@ def test_post_load_notebooks_only_for_present_types():
         "01_snapshot_load.py",
         "02_post_load_constraints.py",
         "03_post_load_triggers.py",   # renumbered — indexes/FKs absent
+        "04_maintenance.py",
     ]
 
 
